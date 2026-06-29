@@ -1,0 +1,23 @@
+# astra_ast — abstract syntax for rules and views.
+
+use astra_value
+
+# Expressions — the right-hand side of a require / let / =.
+pub enum Expr:
+    LitInt(int)
+    LitText(Text)
+    LitBool(bool)
+    VarRef(Text)
+    Call(Text, [Expr])
+    Field(Expr, Text)
+
+# Statements — what a rule body is built of.
+pub enum Stmt:
+    Require(Expr)
+    Let(Text, Expr)
+    SetStmt(Expr, Text, Expr)
+    EmitStmt(Text, Expr)
+
+# A rule declaration — name, args, body.
+pub data Param: name: Text, type_name: Text
+pub data Rule: name: Text, params: [Param], body: [Stmt]

@@ -1,0 +1,7 @@
+name = "astra_parser"
+version = "0.0.1"
+description = "Astra — recursive-descent parser tokens → AST"
+
+[orbs]
+astra_ast = "path:../astra_ast"
+astra_lexer = "path:../astra_lexer"

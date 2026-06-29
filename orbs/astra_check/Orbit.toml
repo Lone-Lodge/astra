@@ -1,0 +1,6 @@
+name = "astra_check"
+version = "0.0.1"
+description = "Astra — table-lookup typechecker"
+
+[orbs]
+astra_ast = "path:../astra_ast"

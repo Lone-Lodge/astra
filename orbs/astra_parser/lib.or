@@ -1,0 +1,11 @@
+# astra_parser — token stream → AST.
+#
+# Rust kept this at ~760 LOC across the parser/ module. Orion port
+# defers full implementation; the API surface is here so dependents
+# compile.
+
+use astra_ast
+use astra_lexer
+
+pub fn parse(_tokens: [Tok]) -> [Rule]:
+    []

@@ -1,0 +1,16 @@
+# astra_lexer — tokenise `.astra` source.
+#
+# Rust kept this at 194 LOC + 83 for the token vocab. Full pure-Orion
+# tokeniser lands once the language gets the string-byte primitive
+# (the orion lexer in Orion will share infrastructure).
+
+pub enum Tok:
+    IdentT(Text)
+    IntT(int)
+    StrT(Text)
+    KeywordT(Text)
+    PunctT(Text)
+    EofT
+
+pub fn lex(_source: Text) -> [Tok]:
+    [EofT]

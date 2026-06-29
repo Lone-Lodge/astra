@@ -1,0 +1,39 @@
+use astra
+use io
+
+fn main() -> int:
+    print_line("Astra — pure Orion")
+    print_line("version: " + version())
+
+    # Run an empty source — exercises the lex → parse → check → eval
+    # pipeline end-to-end through stub implementations.
+    outcome = run("", [])
+    mut effect_count = 0
+    for _effect in outcome.effects:
+        effect_count = effect_count + 1
+    print_line("effects from empty run: " + show_int(effect_count))
+    0
+
+fn show_int(value: int) -> Text:
+    if value == 0:
+        "0"
+    else:
+        digits(value)
+
+fn digits(value: int) -> Text:
+    if value == 0:
+        ""
+    else:
+        digits(value / 10) + glyph(value % 10)
+
+fn glyph(d: int) -> Text:
+    if d == 0:
+        "0"
+    else:
+        if d == 1:
+            "1"
+        else:
+            if d == 2:
+                "2"
+            else:
+                "x"

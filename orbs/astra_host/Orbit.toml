@@ -1,0 +1,6 @@
+name = "astra_host"
+version = "0.0.1"
+description = "Astra — Host / Resolver seam (read world, resolve modules)"
+
+[orbs]
+astra_value = "path:../astra_value"

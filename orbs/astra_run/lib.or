@@ -1,0 +1,27 @@
+# astra_run — the one-call front door: source → Outcome.
+
+use astra_value
+use astra_outcome
+use astra_lexer
+use astra_parser
+use astra_check
+use astra_eval
+
+pub fn run(source: Text, args: [Value]) -> Outcome:
+    tokens = lex(source)
+    rules = parse(tokens)
+    if list_empty(rules):
+        empty()
+    else:
+        # Type-check first; refuse on errors.
+        errors = check_rule(at(rules, 0))
+        if list_empty(errors):
+            run_rule(at(rules, 0), args)
+        else:
+            empty()
+
+fn list_empty(items: [int]) -> bool:
+    mut count = 0
+    for _value in items:
+        count = count + 1
+    count == 0

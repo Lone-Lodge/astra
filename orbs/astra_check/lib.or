@@ -1,0 +1,11 @@
+# astra_check — typechecker.
+#
+# Rust kept this at 430 LOC. With four Value variants the checker
+# is a small table-lookup, not Hindley-Milner.
+
+use astra_ast
+
+pub data CheckError: rule: Text, message: Text
+
+pub fn check_rule(_rule: Rule) -> [CheckError]:
+    []

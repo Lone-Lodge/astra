@@ -1,0 +1,3 @@
+name = "astra_lexer"
+version = "0.0.1"
+description = "Astra — tokeniser"

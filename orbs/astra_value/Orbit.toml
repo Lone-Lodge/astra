@@ -1,0 +1,3 @@
+name = "astra_value"
+version = "0.0.1"
+description = "Astra — Value: four typed data + optional absence"

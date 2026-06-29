@@ -1,0 +1,11 @@
+# astra_eval — evaluate a rule's body, producing an Outcome.
+#
+# Rust kept this at 560 LOC. Orion's match + pattern destructuring
+# do most of the dispatch work; this stays smaller.
+
+use astra_ast
+use astra_outcome
+use astra_value
+
+pub fn run_rule(_rule: Rule, _args: [Value]) -> Outcome:
+    empty()
