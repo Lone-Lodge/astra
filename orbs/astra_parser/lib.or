@@ -123,9 +123,14 @@ fn parse_rule(tokens: [Token], start: int, n: int) -> RuleStep:
 data StmtStep: stmt: Stmt, next: int, ok: bool, error: Text
 
 fn parse_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
+    # Dispatch on the leading keyword: emit / require / let.
+    if match_tok(tokens, start, n, "Require"):
+        return parse_require_stmt(tokens, start + 1, n)
+    if match_tok(tokens, start, n, "Let"):
+        return parse_let_stmt(tokens, start + 1, n)
     mut i = start
     if not match_tok(tokens, i, n, "Emit"):
-        return StmtStep{stmt: EmitEffect("", []), next: i, ok: false, error: "expected `emit` (MVP only supports emit-statements)"}
+        return StmtStep{stmt: EmitEffect("", []), next: i, ok: false, error: "expected `emit`, `require`, or `let`"}
     i = i + 1
     name_tok = if i < n then at(tokens, i) else newline_token()
     event = ident_of(name_tok.tok)
@@ -196,11 +201,124 @@ fn parse_field(tokens: [Token], start: int, n: int) -> FieldStep:
     else:
         FieldStep{field: FieldExpr{name: "", value: LitInt(0)}, next: i, ok: false, error: step.error}
 
-# ---- expr (MVP: literals only) ----
+# ---- require / let stmt parsers ----
+
+fn parse_require_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
+    step = parse_expr(tokens, start, n)
+    if not step.ok:
+        return StmtStep{stmt: Require(LitBool(false)), next: step.next, ok: false, error: step.error}
+    StmtStep{stmt: Require(step.value), next: step.next, ok: true, error: ""}
+
+fn parse_let_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
+    if start >= n:
+        return StmtStep{stmt: Let("", LitInt(0)), next: start, ok: false, error: "expected name after `let`"}
+    name = ident_of(at(tokens, start).tok)
+    if name == "":
+        return StmtStep{stmt: Let("", LitInt(0)), next: start, ok: false, error: "expected name after `let`"}
+    mut i = start + 1
+    if not match_tok(tokens, i, n, "Assign"):
+        return StmtStep{stmt: Let(name, LitInt(0)), next: i, ok: false, error: "expected `=` after let name"}
+    i = i + 1
+    step = parse_expr(tokens, i, n)
+    if not step.ok:
+        return StmtStep{stmt: Let(name, LitInt(0)), next: step.next, ok: false, error: step.error}
+    StmtStep{stmt: Let(name, step.value), next: step.next, ok: true, error: ""}
+
+# ---- expression grammar (precedence climbing) ----
+#
+# Levels low → high:
+#   1: or          2: and        3: == !=     4: < <= > >=
+#   5: + -         6: * / %      7: unary -, not
+#   8: postfix (.field, (args)) 9: primary
 
 data ExprStep: value: Expr, next: int, ok: bool, error: Text
 
-fn parse_expr(tokens: [Token], start: int, n: int) -> ExprStep:
+pub fn parse_expr(tokens: [Token], start: int, n: int) -> ExprStep:
+    parse_binop(tokens, start, n, 1)
+
+# Token-kind → operator-string + precedence. Empty op means "not a binop".
+fn binop_at(tokens: [Token], i: int, n: int) -> Text:
+    if i >= n:
+        return ""
+    k = tok_kind(at(tokens, i).tok)
+    if k == "Or" then "or"
+    else if k == "And" then "and"
+    else if k == "Eq" then "=="
+    else if k == "Ne" then "!="
+    else if k == "Lt" then "<"
+    else if k == "Le" then "<="
+    else if k == "Gt" then ">"
+    else if k == "Ge" then ">="
+    else if k == "Plus" then "+"
+    else if k == "Minus" then "-"
+    else if k == "Star" then "*"
+    else if k == "Slash" then "/"
+    else if k == "Percent" then "%"
+    else ""
+
+fn prec_of(op: Text) -> int:
+    if op == "or" then 1
+    else if op == "and" then 2
+    else if op == "==" or op == "!=" then 3
+    else if op == "<" or op == "<=" or op == ">" or op == ">=" then 4
+    else if op == "+" or op == "-" then 5
+    else if op == "*" or op == "/" or op == "%" then 6
+    else 0
+
+fn parse_binop(tokens: [Token], start: int, n: int, min_prec: int) -> ExprStep:
+    lhs_step = parse_unary(tokens, start, n)
+    if not lhs_step.ok:
+        return lhs_step
+    mut lhs = lhs_step.value
+    mut i = lhs_step.next
+    loop:
+        op = binop_at(tokens, i, n)
+        if op == "":
+            break
+        p = prec_of(op)
+        if p < min_prec:
+            break
+        i = i + 1
+        rhs_step = parse_binop(tokens, i, n, p + 1)
+        if not rhs_step.ok:
+            return rhs_step
+        lhs = Binop(op, lhs, rhs_step.value)
+        i = rhs_step.next
+    ExprStep{value: lhs, next: i, ok: true, error: ""}
+
+fn parse_unary(tokens: [Token], start: int, n: int) -> ExprStep:
+    if match_tok(tokens, start, n, "Not"):
+        inner = parse_unary(tokens, start + 1, n)
+        if not inner.ok:
+            return inner
+        return ExprStep{value: Unop("not", inner.value), next: inner.next, ok: true, error: ""}
+    if match_tok(tokens, start, n, "Minus"):
+        inner = parse_unary(tokens, start + 1, n)
+        if not inner.ok:
+            return inner
+        return ExprStep{value: Unop("-", inner.value), next: inner.next, ok: true, error: ""}
+    parse_postfix(tokens, start, n)
+
+fn parse_postfix(tokens: [Token], start: int, n: int) -> ExprStep:
+    head = parse_primary(tokens, start, n)
+    if not head.ok:
+        return head
+    mut e = head.value
+    mut i = head.next
+    loop:
+        if match_tok(tokens, i, n, "Dot"):
+            if i + 1 >= n:
+                return ExprStep{value: e, next: i, ok: false, error: "expected field name after `.`"}
+            name = ident_of(at(tokens, i + 1).tok)
+            if name == "":
+                return ExprStep{value: e, next: i, ok: false, error: "expected field name after `.`"}
+            e = Field(e, name)
+            i = i + 2
+        else:
+            break
+    ExprStep{value: e, next: i, ok: true, error: ""}
+
+fn parse_primary(tokens: [Token], start: int, n: int) -> ExprStep:
     if start >= n:
         return ExprStep{value: LitInt(0), next: start, ok: false, error: "unexpected EOF in expression"}
     t = at(tokens, start)
@@ -214,10 +332,59 @@ fn parse_expr(tokens: [Token], start: int, n: int) -> ExprStep:
         return ExprStep{value: LitBool(true), next: start + 1, ok: true, error: ""}
     if match_tok(tokens, start, n, "False"):
         return ExprStep{value: LitBool(false), next: start + 1, ok: true, error: ""}
+    if match_tok(tokens, start, n, "If"):
+        return parse_if_expr(tokens, start + 1, n)
+    if match_tok(tokens, start, n, "LParen"):
+        inner = parse_expr(tokens, start + 1, n)
+        if not inner.ok:
+            return inner
+        if not match_tok(tokens, inner.next, n, "RParen"):
+            return ExprStep{value: inner.value, next: inner.next, ok: false, error: "expected `)`"}
+        return ExprStep{value: inner.value, next: inner.next + 1, ok: true, error: ""}
     name = ident_of(t.tok)
     if name != "":
+        # Ident — could be VarRef or Call(name, args).
+        if match_tok(tokens, start + 1, n, "LParen"):
+            return parse_call(tokens, start + 2, n, name)
         return ExprStep{value: VarRef(name), next: start + 1, ok: true, error: ""}
     ExprStep{value: LitInt(0), next: start, ok: false, error: "expected an expression"}
+
+# After consuming `name(`, parse comma-sep args + closing `)`.
+fn parse_call(tokens: [Token], start: int, n: int, name: Text) -> ExprStep:
+    mut i = start
+    mut args = []
+    if match_tok(tokens, i, n, "RParen"):
+        return ExprStep{value: Call(name, args), next: i + 1, ok: true, error: ""}
+    loop:
+        step = parse_expr(tokens, i, n)
+        if not step.ok:
+            return step
+        args = push(args, step.value)
+        i = step.next
+        if match_tok(tokens, i, n, "Comma"):
+            i = i + 1
+        else:
+            break
+    if not match_tok(tokens, i, n, "RParen"):
+        return ExprStep{value: Call(name, args), next: i, ok: false, error: "expected `)` in call"}
+    ExprStep{value: Call(name, args), next: i + 1, ok: true, error: ""}
+
+# After `if`, parse: cond `then` then_expr `else` else_expr.
+fn parse_if_expr(tokens: [Token], start: int, n: int) -> ExprStep:
+    cond = parse_expr(tokens, start, n)
+    if not cond.ok:
+        return cond
+    if not match_tok(tokens, cond.next, n, "Then"):
+        return ExprStep{value: cond.value, next: cond.next, ok: false, error: "expected `then`"}
+    then_step = parse_expr(tokens, cond.next + 1, n)
+    if not then_step.ok:
+        return then_step
+    if not match_tok(tokens, then_step.next, n, "Else"):
+        return ExprStep{value: then_step.value, next: then_step.next, ok: false, error: "expected `else`"}
+    else_step = parse_expr(tokens, then_step.next + 1, n)
+    if not else_step.ok:
+        return else_step
+    ExprStep{value: IfExpr(cond.value, then_step.value, else_step.value), next: else_step.next, ok: true, error: ""}
 
 # ---- token-matching helpers (string-based to avoid match-everywhere) ----
 

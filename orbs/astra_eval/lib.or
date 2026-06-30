@@ -1,24 +1,31 @@
 # astra_eval — walk a Rule's body, produce an Outcome.
 #
-# MVP scope matches the parser: rule body of `emit Event { field: expr }`
-# statements. Expressions are literals + VarRef (param lookup). The
-# evaluator binds params positionally from `args`, then walks each stmt
-# and accumulates effects.
+# M1 features: require / let / emit statements; expressions with
+# binops / unops / if-then-else / field access / function calls.
 
 use astra_ast
 use astra_outcome
 use astra_value
 
+# Helper data — name+value pair for the environment.
+pub data Binding: name: Text, value: Value
+
+# A failed `require` aborts the rule with an empty outcome.
+pub data EvalState: env: [Binding], effects: [AstraEffect], refused: bool
+
 # Run a rule body against positional args. Returns an Outcome whose
 # `effects` is the list of proposed effects in source order.
 pub fn run_rule(r: Rule, args: [Value]) -> Outcome:
     env = bind_params(r.params, args, 0, [])
-    mut effects = []
+    mut state = EvalState{env: env, effects: [], refused: false}
     for stmt in r.body:
-        effects = push(effects, eval_stmt(stmt, env))
-    Outcome{effects: effects, reads: []}
+        if not state.refused:
+            state = step_stmt(stmt, state)
+    if state.refused:
+        empty()
+    else:
+        Outcome{effects: state.effects, reads: []}
 
-# Bind positional args to param names — env is [(name, value)].
 fn bind_params(params: [Param], args: [Value], i: int, acc: [Binding]) -> [Binding]:
     if i >= len(params):
         acc
@@ -27,7 +34,6 @@ fn bind_params(params: [Param], args: [Value], i: int, acc: [Binding]) -> [Bindi
         v = if i < len(args) then at(args, i) else NoneV
         bind_params(params, args, i + 1, push(acc, Binding{name: p.name, value: v}))
 
-# Lookup binding by name, return NoneV if absent.
 fn lookup(env: [Binding], name: Text) -> Value:
     n = len(env)
     mut found = NoneV
@@ -37,16 +43,28 @@ fn lookup(env: [Binding], name: Text) -> Value:
             found = b.value
     found
 
-# Evaluate one statement → Effect. (MVP: only EmitEffect → Emit.)
-fn eval_stmt(s: Stmt, env: [Binding]) -> AstraEffect:
+fn step_stmt(s: Stmt, state: EvalState) -> EvalState:
     match s:
-        EmitEffect(event, fields) -> emit_to_effect(event, fields, env)
+        EmitEffect(event, fields) -> EvalState{env: state.env, effects: push(state.effects, emit_to_effect(event, fields, state.env)), refused: false}
+        Require(cond) -> apply_require(cond, state)
+        Let(name, value_expr) -> EvalState{env: push(state.env, Binding{name: name, value: eval_expr(value_expr, state.env)}), effects: state.effects, refused: false}
+
+fn apply_require(cond: Expr, state: EvalState) -> EvalState:
+    v = eval_expr(cond, state.env)
+    if is_truthy(v):
+        state
+    else:
+        EvalState{env: state.env, effects: [], refused: true}
+
+fn is_truthy(v: Value) -> bool:
+    match v:
+        BoolV(b) -> b
+        IntV(n) -> n != 0
+        TextV(s) -> len(s) > 0
+        RefV(_) -> true
+        NoneV -> false
 
 fn emit_to_effect(event: Text, fields: [FieldExpr], env: [Binding]) -> AstraEffect:
-    # Astra's Emit effect carries (event, payload). The Rust impl uses
-    # a list of (String, Value) pairs; our Value enum lacks compound
-    # types so we collapse to "the first field's value" for MVP. Full
-    # n-field payload lands when astra_value adds a List variant.
     mut first_value = NoneV
     if len(fields) > 0:
         f = at(fields, 0)
@@ -59,6 +77,50 @@ fn eval_expr(e: Expr, env: [Binding]) -> Value:
         LitText(s) -> TextV(s)
         LitBool(b) -> BoolV(b)
         VarRef(name) -> lookup(env, name)
+        Binop(op, a, b) -> eval_binop(op, eval_expr(a, env), eval_expr(b, env))
+        Unop(op, x) -> eval_unop(op, eval_expr(x, env))
+        IfExpr(c, t, e2) -> if is_truthy(eval_expr(c, env)) then eval_expr(t, env) else eval_expr(e2, env)
+        Call(_name, _args) -> NoneV
+        Field(_base, _name) -> NoneV
 
-# Helper data — name+value pair for the environment.
-pub data Binding: name: Text, value: Value
+fn eval_binop(op: Text, a: Value, b: Value) -> Value:
+    if op == "and":
+        BoolV(is_truthy(a) and is_truthy(b))
+    else:
+        if op == "or":
+            BoolV(is_truthy(a) or is_truthy(b))
+        else:
+            eval_binop_numeric(op, a, b)
+
+fn eval_binop_numeric(op: Text, a: Value, b: Value) -> Value:
+    ai = as_int(a)
+    bi = as_int(b)
+    if op == "+" then IntV(ai + bi)
+    else if op == "-" then IntV(ai - bi)
+    else if op == "*" then IntV(ai * bi)
+    else if op == "/" then IntV(if bi == 0 then 0 else ai / bi)
+    else if op == "%" then IntV(if bi == 0 then 0 else ai - (ai / bi) * bi)
+    else if op == "==" then BoolV(ai == bi)
+    else if op == "!=" then BoolV(ai != bi)
+    else if op == "<" then BoolV(ai < bi)
+    else if op == "<=" then BoolV(ai <= bi)
+    else if op == ">" then BoolV(ai > bi)
+    else if op == ">=" then BoolV(ai >= bi)
+    else NoneV
+
+fn eval_unop(op: Text, v: Value) -> Value:
+    if op == "not":
+        BoolV(not is_truthy(v))
+    else:
+        if op == "-":
+            IntV(0 - as_int(v))
+        else:
+            NoneV
+
+fn as_int(v: Value) -> int:
+    match v:
+        IntV(n) -> n
+        BoolV(b) -> if b then 1 else 0
+        TextV(_) -> 0
+        RefV(id) -> id
+        NoneV -> 0

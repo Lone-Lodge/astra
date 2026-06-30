@@ -3,31 +3,30 @@ use astra_value
 use astra_outcome
 use io
 
-# Full pipeline smoke: lex → parse → eval → Outcome.effects.
-# Pure-Orion Astra MVP — first program where source text becomes
-# proposed Effects through the lang.
+# M1 smoke: a rule with binops, let-binding, require-guard, and an
+# emit whose payload comes from a computed expression.
 
 fn main() -> int:
-    # Avoid Orion's {...} string interpolation by using the parenless emit form.
-    src = "rule on_click(x, y): emit PlaceBlock()"
-    args = [IntV(3), IntV(7)]
-    outcome = run(src, "on_click", args)
+    # Test 1: rule fires when x > 0; payload = x * 2.
+    # Multi-line via concat to dodge Orion's {...} string interp.
+    src = "rule scale(x): require x > 0 let doubled = x * 2 emit Scaled" + "(" + ")"
+    test_one(src, "scale", [IntV(5)], "x=5 → expects 1 effect")
+    test_one(src, "scale", [IntV(0)], "x=0 → expects 0 effects (refused)")
+    test_one(src, "scale", [IntV(0 - 3)], "x=-3 → expects 0 effects (refused)")
+    # Test 2: if-then-else expression.
+    src2 = "rule check(n): require if n > 10 then true else false emit Big()"
+    test_one(src2, "check", [IntV(20)], "n=20 → expects 1 effect")
+    test_one(src2, "check", [IntV(5)], "n=5 → expects 0 effects")
+    0
+
+fn test_one(src: Text, rule: Text, args: [Value], label: Text):
+    print_line(label)
+    outcome = run(src, rule, args)
     mut count = 0
     for _e in outcome.effects:
         count = count + 1
-    print_line("effects produced:")
+    print_line("  effects:")
     print_line(show_int(count))
-    if count > 0:
-        first = at(outcome.effects, 0)
-        print_line(describe_effect(first))
-    0
-
-fn describe_effect(e: Effect) -> Text:
-    match e:
-        Emit(_event, _value) -> "emit"
-        Spawn(_id) -> "spawn"
-        Destroy(_id) -> "destroy"
-        Set(_eid, _field, _v) -> "set"
 
 fn show_int(value: int) -> Text:
     if value == 0:

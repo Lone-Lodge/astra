@@ -1,27 +1,33 @@
-# astra_ast — abstract syntax for rules.
+# astra_ast — AST for rules.
 #
-# MVP scope: just enough to express a rule body of `emit` statements with
-# literal-valued field payloads. Full grammar (Field/Call/binop/if/let/
-# require/set/spawn/destroy) lands as we port the parser further.
+# M1 grammar: rule + params + body of (emit | require | let) stmts,
+# expressions support literals/varref/binop/unop/if/call/field access.
 
 use astra_value
 
-# Expressions — literal-only MVP.
+# ---- Expressions ----
+# Note: Field is `base.name` (entity-field-access). Call is `name(args)`.
 pub enum Expr:
     LitInt(int)
     LitText(Text)
     LitBool(bool)
     VarRef(Text)
+    Binop(Text, Expr, Expr)        # op tag: "+" / "*" / "==" / "and" / ...
+    Unop(Text, Expr)               # "not" / "-"
+    IfExpr(Expr, Expr, Expr)       # cond then else
+    Call(Text, [Expr])             # callee + args
+    Field(Expr, Text)              # base.name
 
-# Statement = one effect a rule proposes.
-# EmitEffect is `emit EventName { field: expr, ... }`.
-pub enum Stmt:
-    EmitEffect(Text, [FieldExpr])
-
-# A `name: expr` pair inside an emit body.
+# A `name: expr` pair inside emit body.
 pub data FieldExpr: name: Text, value: Expr
 
-# A rule's parameters (currently unused — MVP rules take zero args).
+# Statement = one piece of a rule body.
+pub enum Stmt:
+    EmitEffect(Text, [FieldExpr])
+    Require(Expr)                  # silent no-op if false
+    Let(Text, Expr)                # bind name in env for rest of body
+
+# A rule's parameter.
 pub data Param: name: Text, type_name: Text
 
 # A whole rule.
