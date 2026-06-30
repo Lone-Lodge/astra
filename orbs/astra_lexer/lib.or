@@ -1,16 +1,362 @@
 # astra_lexer — tokenise `.astra` source.
 #
-# Rust kept this at 194 LOC + 83 for the token vocab. Full pure-Orion
-# tokeniser lands once the language gets the string-byte primitive
-# (the orion lexer in Orion will share infrastructure).
+# Port av Rust-implementationen (LodgeEngine/astra/src/lexer.rs).
+# Indent är kosmetisk — Newline separerar statements, brackets/keywords
+# delimar resten. Inga INDENT/DEDENT tokens behövs.
+#
+# Pure Orion — kör på lodge-orion interpretern, kompilerbar via orion-self
+# när bundle-rebuild #143 är klar.
 
+use bytes
+
+# Token-vocab — paritet med Rust astra::Tok.
 pub enum Tok:
-    IdentT(Text)
-    IntT(int)
-    StrT(Text)
-    KeywordT(Text)
-    PunctT(Text)
-    EofT
+    Int(int)
+    Str(Text)
+    Ident(Text)
+    # decl & stmt keywords
+    Rule
+    Record
+    Require
+    Let
+    Set
+    Spawn
+    Destroy
+    Emit
+    On
+    View
+    Entity
+    Test
+    Apply
+    Expect
+    Tick
+    # expression keywords
+    If
+    Then
+    Else
+    Match
+    For
+    Count
+    All
+    In
+    Where
+    Empty
+    True
+    False
+    Not
+    And
+    Or
+    # punctuation & operators
+    LParen
+    RParen
+    LBrace
+    RBrace
+    Comma
+    Dot
+    Colon
+    Assign
+    Eq
+    Ne
+    Lt
+    Le
+    Gt
+    Ge
+    Plus
+    Minus
+    Star
+    Slash
+    Percent
+    Newline
 
-pub fn lex(_source: Text) -> [Tok]:
-    [EofT]
+# A token + its source line — enough to point an error at a line.
+pub data Token: tok: Tok, line: int
+
+# Lex error with the offending line.
+pub data LexError: message: Text, line: int
+
+# A lex result — empty `error` means tokens are good. Sum types with payload
+# in Orion are still rough, so we return both fields and a flag.
+pub data LexResult: tokens: [Token], ok: bool, error: LexError
+
+# ---- Entry point ----
+
+pub fn lex(source: Text) -> LexResult:
+    bs = bytes_from_text(source)
+    n = len(bs)
+    mut tokens = []
+    mut i = 0
+    mut line = 1
+    mut failed = false
+    mut err_msg = ""
+    mut err_line = 0
+    loop:
+        if i >= n:
+            break
+        if failed:
+            break
+        c = at(bs, i)
+        # newline
+        if c == 10:
+            tokens = push_newline(tokens, line)
+            line = line + 1
+            i = i + 1
+        else:
+            # whitespace
+            if c == 32 or c == 9 or c == 13:
+                i = i + 1
+            else:
+                # comment to EOL
+                if c == 35:
+                    i = skip_to_eol(bs, i, n)
+                else:
+                    # string literal
+                    if c == 34:
+                        res = scan_string(bs, i + 1, n, line)
+                        if res.ok:
+                            tokens = push(tokens, Token{tok: Str(res.text), line: line})
+                            i = res.next
+                        else:
+                            failed = true
+                            err_msg = res.error
+                            err_line = line
+                    else:
+                        # digit → int
+                        if is_digit(c):
+                            res = scan_int(bs, i, n, line)
+                            if res.ok:
+                                tokens = push(tokens, Token{tok: Int(res.value), line: line})
+                                i = res.next
+                            else:
+                                failed = true
+                                err_msg = res.error
+                                err_line = line
+                        else:
+                            # alpha → ident or keyword
+                            if is_alpha(c):
+                                step = scan_ident(bs, i, n)
+                                tokens = push(tokens, Token{tok: keyword_of(step.text), line: line})
+                                i = step.next
+                            else:
+                                # punct/symbol
+                                step = scan_symbol(bs, i, n, line)
+                                if step.ok:
+                                    tokens = push(tokens, Token{tok: step.tok, line: line})
+                                    i = step.next
+                                else:
+                                    failed = true
+                                    err_msg = step.error
+                                    err_line = line
+    # Always append a terminating Newline so every stmt ends the same way.
+    tokens = push_newline(tokens, line)
+    if failed:
+        LexResult{tokens: [], ok: false, error: LexError{message: err_msg, line: err_line}}
+    else:
+        LexResult{tokens: tokens, ok: true, error: LexError{message: "", line: 0}}
+
+# ---- char predicates ----
+
+fn is_digit(c: int) -> bool:
+    c >= 48 and c <= 57
+
+fn is_alpha(c: int) -> bool:
+    (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or c == 95
+
+fn is_alnum(c: int) -> bool:
+    is_alpha(c) or is_digit(c)
+
+# ---- scanners ----
+
+fn skip_to_eol(bs: [int], start: int, n: int) -> int:
+    mut i = start
+    loop:
+        if i >= n:
+            break
+        if at(bs, i) == 10:
+            break
+        i = i + 1
+    i
+
+data StrStep: text: Text, next: int, ok: bool, error: Text
+
+fn scan_string(bs: [int], start: int, n: int, line: int) -> StrStep:
+    mut i = start
+    mut chars = []
+    mut closed = false
+    mut bad = false
+    loop:
+        if i >= n:
+            break
+        c = at(bs, i)
+        if c == 34:
+            closed = true
+            break
+        if c == 10:
+            bad = true
+            break
+        chars = push(chars, c)
+        i = i + 1
+    if bad:
+        StrStep{text: "", next: i, ok: false, error: "unterminated string"}
+    else:
+        if not closed:
+            StrStep{text: "", next: i, ok: false, error: "unterminated string"}
+        else:
+            StrStep{text: bytes_to_text(chars), next: i + 1, ok: true, error: ""}
+
+data IntStep: value: int, next: int, ok: bool, error: Text
+
+fn scan_int(bs: [int], start: int, n: int, line: int) -> IntStep:
+    mut i = start
+    mut value = 0
+    loop:
+        if i >= n:
+            break
+        c = at(bs, i)
+        if not is_digit(c):
+            break
+        value = value * 10 + (c - 48)
+        i = i + 1
+    IntStep{value: value, next: i, ok: true, error: ""}
+
+data IdentStep: text: Text, next: int
+
+fn scan_ident(bs: [int], start: int, n: int) -> IdentStep:
+    mut i = start
+    mut chars = []
+    loop:
+        if i >= n:
+            break
+        c = at(bs, i)
+        if not is_alnum(c):
+            break
+        chars = push(chars, c)
+        i = i + 1
+    IdentStep{text: bytes_to_text(chars), next: i}
+
+data SymStep: tok: Tok, next: int, ok: bool, error: Text
+
+fn scan_symbol(bs: [int], start: int, n: int, line: int) -> SymStep:
+    c = at(bs, start)
+    next_c = if start + 1 < n then at(bs, start + 1) else 0
+    # 2-char ops first
+    if c == 61 and next_c == 61:
+        SymStep{tok: Eq, next: start + 2, ok: true, error: ""}
+    else:
+        if c == 33 and next_c == 61:
+            SymStep{tok: Ne, next: start + 2, ok: true, error: ""}
+        else:
+            if c == 62 and next_c == 61:
+                SymStep{tok: Ge, next: start + 2, ok: true, error: ""}
+            else:
+                if c == 60 and next_c == 61:
+                    SymStep{tok: Le, next: start + 2, ok: true, error: ""}
+                else:
+                    one_char_symbol(c, start)
+
+fn one_char_symbol(c: int, start: int) -> SymStep:
+    if c == 40:
+        SymStep{tok: LParen, next: start + 1, ok: true, error: ""}
+    else:
+        if c == 41:
+            SymStep{tok: RParen, next: start + 1, ok: true, error: ""}
+        else:
+            if c == 123:
+                SymStep{tok: LBrace, next: start + 1, ok: true, error: ""}
+            else:
+                if c == 125:
+                    SymStep{tok: RBrace, next: start + 1, ok: true, error: ""}
+                else:
+                    one_char_symbol_rest(c, start)
+
+fn one_char_symbol_rest(c: int, start: int) -> SymStep:
+    if c == 44:
+        SymStep{tok: Comma, next: start + 1, ok: true, error: ""}
+    else:
+        if c == 46:
+            SymStep{tok: Dot, next: start + 1, ok: true, error: ""}
+        else:
+            if c == 58:
+                SymStep{tok: Colon, next: start + 1, ok: true, error: ""}
+            else:
+                if c == 61:
+                    SymStep{tok: Assign, next: start + 1, ok: true, error: ""}
+                else:
+                    one_char_symbol_math(c, start)
+
+fn one_char_symbol_math(c: int, start: int) -> SymStep:
+    if c == 60:
+        SymStep{tok: Lt, next: start + 1, ok: true, error: ""}
+    else:
+        if c == 62:
+            SymStep{tok: Gt, next: start + 1, ok: true, error: ""}
+        else:
+            if c == 43:
+                SymStep{tok: Plus, next: start + 1, ok: true, error: ""}
+            else:
+                if c == 45:
+                    SymStep{tok: Minus, next: start + 1, ok: true, error: ""}
+                else:
+                    if c == 42:
+                        SymStep{tok: Star, next: start + 1, ok: true, error: ""}
+                    else:
+                        if c == 47:
+                            SymStep{tok: Slash, next: start + 1, ok: true, error: ""}
+                        else:
+                            if c == 37:
+                                SymStep{tok: Percent, next: start + 1, ok: true, error: ""}
+                            else:
+                                SymStep{tok: Comma, next: start + 1, ok: false, error: "unexpected character"}
+
+# ---- helpers ----
+
+# Append a Newline, dedup runs (matching Rust push_newline contract).
+fn push_newline(tokens: [Token], line: int) -> [Token]:
+    n = len(tokens)
+    if n == 0:
+        tokens
+    else:
+        last = at(tokens, n - 1)
+        if is_newline_token(last):
+            tokens
+        else:
+            push(tokens, Token{tok: Newline, line: line})
+
+fn is_newline_token(t: Token) -> bool:
+    # Pattern-match-via-fold — Orion's enum match should handle this.
+    match t.tok:
+        Newline -> true
+        _ -> false
+
+# Map an identifier text to its keyword token, or Ident if not reserved.
+fn keyword_of(text: Text) -> Tok:
+    if text == "rule" then Rule
+    else if text == "record" then Record
+    else if text == "require" then Require
+    else if text == "let" then Let
+    else if text == "set" then Set
+    else if text == "spawn" then Spawn
+    else if text == "destroy" then Destroy
+    else if text == "emit" then Emit
+    else if text == "on" then On
+    else if text == "view" then View
+    else if text == "entity" then Entity
+    else if text == "test" then Test
+    else if text == "apply" then Apply
+    else if text == "expect" then Expect
+    else if text == "tick" then Tick
+    else if text == "if" then If
+    else if text == "then" then Then
+    else if text == "else" then Else
+    else if text == "match" then Match
+    else if text == "for" then For
+    else if text == "count" then Count
+    else if text == "all" then All
+    else if text == "in" then In
+    else if text == "where" then Where
+    else if text == "empty" then Empty
+    else if text == "true" then True
+    else if text == "false" then False
+    else if text == "not" then Not
+    else if text == "and" then And
+    else if text == "or" then Or
+    else Ident(text)

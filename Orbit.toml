@@ -6,3 +6,4 @@ description = "Astra — a small typed host-agnostic language for authored game 
 [orbs]
 astra = "path:orbs/astra"
 io = "*"
+bytes = "*"

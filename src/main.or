@@ -1,17 +1,28 @@
 use astra
+use astra_lexer
 use io
 
+# Smoke: kör pure-Orion lexer på en astra-snippet, räkna tokens.
 fn main() -> int:
-    print_line("Astra — pure Orion")
-    print_line("version: " + version())
-
-    # Run an empty source — exercises the lex → parse → check → eval
-    # pipeline end-to-end through stub implementations.
-    outcome = run("", [])
-    mut effect_count = 0
-    for _effect in outcome.effects:
-        effect_count = effect_count + 1
-    print_line("effects from empty run: " + show_int(effect_count))
+    print_line("Astra — pure Orion lexer test")
+    src = "rule fire(x): require x == 1 emit Reset()"
+    result = lex(src)
+    if result.ok:
+        n = 0
+        mut count = 0
+        for _t in result.tokens:
+            count = count + 1
+        print_line("tokens scanned:")
+        print_line(show_int(count))
+        # Dump the first 8 tokens' lines
+        mut i = 0
+        for tok in result.tokens:
+            if i < 8:
+                print_line("  line " + show_int(tok.line))
+            i = i + 1
+    else:
+        print_line("LEX ERROR")
+        print_line(result.error.message)
     0
 
 fn show_int(value: int) -> Text:
@@ -24,16 +35,16 @@ fn digits(value: int) -> Text:
     if value == 0:
         ""
     else:
-        digits(value / 10) + glyph(value % 10)
+        digits(value / 10) + glyph(value - (value / 10) * 10)
 
 fn glyph(d: int) -> Text:
-    if d == 0:
-        "0"
-    else:
-        if d == 1:
-            "1"
-        else:
-            if d == 2:
-                "2"
-            else:
-                "x"
+    if d == 0 then "0"
+    else if d == 1 then "1"
+    else if d == 2 then "2"
+    else if d == 3 then "3"
+    else if d == 4 then "4"
+    else if d == 5 then "5"
+    else if d == 6 then "6"
+    else if d == 7 then "7"
+    else if d == 8 then "8"
+    else "9"
