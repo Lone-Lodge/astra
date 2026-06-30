@@ -1,27 +1,33 @@
-# astra_run — the one-call front door: source → Outcome.
+# astra_run — the single front door: source → Outcome.
 
 use astra_value
 use astra_outcome
 use astra_lexer
 use astra_parser
-use astra_check
 use astra_eval
 
-pub fn run(source: Text, args: [Value]) -> Outcome:
-    tokens = lex(source)
-    rules = parse(tokens)
-    if list_empty(rules):
-        empty()
-    else:
-        # Type-check first; refuse on errors.
-        errors = check_rule(at(rules, 0))
-        if list_empty(errors):
-            run_rule(at(rules, 0), args)
-        else:
-            empty()
+# Lex + parse + (MVP: skip check) + evaluate the first rule.
+# Errors at any stage collapse to an empty Outcome — atlas pipes silent
+# refusals through, exactly how the Rust impl handles failed guards.
+pub fn run(source: Text, rule_name: Text, args: [Value]) -> Outcome:
+    lex_result = lex(source)
+    if not lex_result.ok:
+        return empty()
+    parse_result = parse(lex_result.tokens)
+    if not parse_result.ok:
+        return empty()
+    target = find_rule(parse_result.rules, rule_name)
+    if len(target.name) == 0:
+        return empty()
+    run_rule(target, args)
 
-fn list_empty(items: [int]) -> bool:
-    mut count = 0
-    for _value in items:
-        count = count + 1
-    count == 0
+# Find the first rule by name. Returns an empty Rule sentinel when
+# nothing matches — caller checks `len(rule.name) == 0`.
+fn find_rule(rules: [Rule], name: Text) -> Rule:
+    n = len(rules)
+    mut found = Rule{name: "", params: [], body: []}
+    for i in 0..<n:
+        r = at(rules, i)
+        if r.name == name:
+            found = r
+    found

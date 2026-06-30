@@ -1,35 +1,33 @@
-use astra_lexer
-use astra_parser
+use astra_run
+use astra_value
+use astra_outcome
 use io
 
-# Smoke: lex + parse a minimal astra rule, verify rule + emit body.
+# Full pipeline smoke: lex → parse → eval → Outcome.effects.
+# Pure-Orion Astra MVP — first program where source text becomes
+# proposed Effects through the lang.
 
 fn main() -> int:
-    src = "rule fire(): emit Reset()"
-    lex_result = lex(src)
-    if not lex_result.ok:
-        print_line("LEX FAIL")
-        return 1
-    parse_result = parse(lex_result.tokens)
-    if not parse_result.ok:
-        print_line("PARSE FAIL")
-        print_line(parse_result.error.message)
-        return 1
-    mut rule_count = 0
-    for _r in parse_result.rules:
-        rule_count = rule_count + 1
-    print_line("parsed rules:")
-    print_line(show_int(rule_count))
-    if rule_count > 0:
-        r = at(parse_result.rules, 0)
-        print_line("first rule name:")
-        print_line(r.name)
-        mut body_count = 0
-        for _s in r.body:
-            body_count = body_count + 1
-        print_line("body stmts:")
-        print_line(show_int(body_count))
+    # Avoid Orion's {...} string interpolation by using the parenless emit form.
+    src = "rule on_click(x, y): emit PlaceBlock()"
+    args = [IntV(3), IntV(7)]
+    outcome = run(src, "on_click", args)
+    mut count = 0
+    for _e in outcome.effects:
+        count = count + 1
+    print_line("effects produced:")
+    print_line(show_int(count))
+    if count > 0:
+        first = at(outcome.effects, 0)
+        print_line(describe_effect(first))
     0
+
+fn describe_effect(e: Effect) -> Text:
+    match e:
+        Emit(_event, _value) -> "emit"
+        Spawn(_id) -> "spawn"
+        Destroy(_id) -> "destroy"
+        Set(_eid, _field, _v) -> "set"
 
 fn show_int(value: int) -> Text:
     if value == 0:

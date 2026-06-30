@@ -70,9 +70,22 @@ fn parse_rule(tokens: [Token], start: int, n: int) -> RuleStep:
     if not match_tok(tokens, i, n, "LParen"):
         return RuleStep{rule: empty_rule(), next: i, ok: false, error: "expected `(`"}
     i = i + 1
-    # MVP: no params — expect immediate ")"
+    # Optional comma-separated ident params (no types in MVP).
+    mut params = []
+    loop:
+        if i >= n:
+            break
+        if match_tok(tokens, i, n, "RParen"):
+            break
+        p_name = ident_of(at(tokens, i).tok)
+        if p_name == "":
+            return RuleStep{rule: empty_rule(), next: i, ok: false, error: "expected param name or `)`"}
+        params = push(params, Param{name: p_name, type_name: ""})
+        i = i + 1
+        if match_tok(tokens, i, n, "Comma"):
+            i = i + 1
     if not match_tok(tokens, i, n, "RParen"):
-        return RuleStep{rule: empty_rule(), next: i, ok: false, error: "expected `)` (MVP rules take zero args)"}
+        return RuleStep{rule: empty_rule(), next: i, ok: false, error: "expected `)`"}
     i = i + 1
     # Expect ":"
     if not match_tok(tokens, i, n, "Colon"):
@@ -103,7 +116,7 @@ fn parse_rule(tokens: [Token], start: int, n: int) -> RuleStep:
                 i = step.next
             else:
                 return RuleStep{rule: empty_rule(), next: i, ok: false, error: step.error}
-    RuleStep{rule: Rule{name: name, params: [], body: body}, next: i, ok: true, error: ""}
+    RuleStep{rule: Rule{name: name, params: params, body: body}, next: i, ok: true, error: ""}
 
 # ---- stmt = "emit" IDENT [ "{" field-list "}" ] ----
 
