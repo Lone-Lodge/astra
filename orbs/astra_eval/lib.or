@@ -38,11 +38,11 @@ fn lookup(env: [Binding], name: Text) -> Value:
     found
 
 # Evaluate one statement → Effect. (MVP: only EmitEffect → Emit.)
-fn eval_stmt(s: Stmt, env: [Binding]) -> Effect:
+fn eval_stmt(s: Stmt, env: [Binding]) -> AstraEffect:
     match s:
         EmitEffect(event, fields) -> emit_to_effect(event, fields, env)
 
-fn emit_to_effect(event: Text, fields: [FieldExpr], env: [Binding]) -> Effect:
+fn emit_to_effect(event: Text, fields: [FieldExpr], env: [Binding]) -> AstraEffect:
     # Astra's Emit effect carries (event, payload). The Rust impl uses
     # a list of (String, Value) pairs; our Value enum lacks compound
     # types so we collapse to "the first field's value" for MVP. Full
@@ -51,7 +51,7 @@ fn emit_to_effect(event: Text, fields: [FieldExpr], env: [Binding]) -> Effect:
     if len(fields) > 0:
         f = at(fields, 0)
         first_value = eval_expr(f.value, env)
-    Emit(event, first_value)
+    AstraEmit(event, first_value)
 
 fn eval_expr(e: Expr, env: [Binding]) -> Value:
     match e:

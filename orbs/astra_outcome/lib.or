@@ -8,17 +8,17 @@ use astra_value
 
 # One write or signal the rule proposed. Atlas turns these into
 # atlas_event::Event values at the seam.
-pub enum Effect:
-    Set(int, Text, Value)
-    Spawn(int)
-    Destroy(int)
-    Emit(Text, Value)
+pub enum AstraEffect:
+    AstraSet(int, Text, Value)
+    AstraSpawn(int)
+    AstraDestroy(int)
+    AstraEmit(Text, Value)
 
 # One read trace — used by the typed Trace UI to show where a rule
 # looked when it computed its answer.
 pub data Read: entity: int, field: Text
 
-pub data Outcome: effects: [Effect], reads: [Read]
+pub data Outcome: effects: [AstraEffect], reads: [Read]
 
 pub fn empty() -> Outcome:
     Outcome{effects: [], reads: []}
