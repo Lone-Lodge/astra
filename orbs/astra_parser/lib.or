@@ -1,11 +1,305 @@
-# astra_parser — token stream → AST.
+# astra_parser — tokens → AST. MVP scope: `rule name(): emit X {f: lit}`.
 #
-# Rust kept this at ~760 LOC across the parser/ module. Orion port
-# defers full implementation; the API surface is here so dependents
-# compile.
+# Pure-Orion recursive descent. Cursor + helpers follow the Rust
+# LodgeEngine/astra/src/parser/mod.rs structure 1:1, but the grammar
+# subset is intentionally tiny for the first iteration.
 
 use astra_ast
 use astra_lexer
 
-pub fn parse(_tokens: [Tok]) -> [Rule]:
-    []
+pub data ParseError: message: Text, line: int
+
+# A parse result — `ok: false` means consult `error`.
+pub data ParseResult: rules: [Rule], ok: bool, error: ParseError
+
+pub fn parse(tokens: [Token]) -> ParseResult:
+    n = len(tokens)
+    mut i = 0
+    mut rules = []
+    mut failed = false
+    mut err_msg = ""
+    mut err_line = 0
+    # Skip leading newlines.
+    loop:
+        if i >= n:
+            break
+        t = at(tokens, i)
+        if is_newline(t.tok):
+            i = i + 1
+        else:
+            break
+    loop:
+        if i >= n:
+            break
+        if failed:
+            break
+        t = at(tokens, i)
+        if is_eof_or_done(t):
+            break
+        # Top-level: only `rule NAME (): emit ...` for MVP.
+        step = parse_rule(tokens, i, n)
+        if step.ok:
+            rules = push(rules, step.rule)
+            i = step.next
+        else:
+            failed = true
+            err_msg = step.error
+            err_line = t.line
+    if failed:
+        ParseResult{rules: [], ok: false, error: ParseError{message: err_msg, line: err_line}}
+    else:
+        ParseResult{rules: rules, ok: true, error: ParseError{message: "", line: 0}}
+
+# ---- rule = "rule" IDENT "(" ")" ":" NEWLINE stmts ----
+
+data RuleStep: rule: Rule, next: int, ok: bool, error: Text
+
+fn parse_rule(tokens: [Token], start: int, n: int) -> RuleStep:
+    mut i = start
+    # Expect Rule keyword.
+    if not match_tok(tokens, i, n, "Rule"):
+        return RuleStep{rule: empty_rule(), next: i, ok: false, error: "expected `rule`"}
+    i = i + 1
+    # Expect Ident(name).
+    name_tok = if i < n then at(tokens, i) else newline_token()
+    name = ident_of(name_tok.tok)
+    if name == "":
+        return RuleStep{rule: empty_rule(), next: i, ok: false, error: "expected rule name"}
+    i = i + 1
+    # Expect "("
+    if not match_tok(tokens, i, n, "LParen"):
+        return RuleStep{rule: empty_rule(), next: i, ok: false, error: "expected `(`"}
+    i = i + 1
+    # MVP: no params — expect immediate ")"
+    if not match_tok(tokens, i, n, "RParen"):
+        return RuleStep{rule: empty_rule(), next: i, ok: false, error: "expected `)` (MVP rules take zero args)"}
+    i = i + 1
+    # Expect ":"
+    if not match_tok(tokens, i, n, "Colon"):
+        return RuleStep{rule: empty_rule(), next: i, ok: false, error: "expected `:`"}
+    i = i + 1
+    # Skip newlines into body.
+    loop:
+        if i >= n:
+            break
+        if is_newline(at(tokens, i).tok):
+            i = i + 1
+        else:
+            break
+    # Body: list of stmts until top-level Rule or EOF.
+    mut body = []
+    loop:
+        if i >= n:
+            break
+        t = at(tokens, i)
+        if match_tok(tokens, i, n, "Rule"):
+            break
+        if is_newline(t.tok):
+            i = i + 1
+        else:
+            step = parse_stmt(tokens, i, n)
+            if step.ok:
+                body = push(body, step.stmt)
+                i = step.next
+            else:
+                return RuleStep{rule: empty_rule(), next: i, ok: false, error: step.error}
+    RuleStep{rule: Rule{name: name, params: [], body: body}, next: i, ok: true, error: ""}
+
+# ---- stmt = "emit" IDENT [ "{" field-list "}" ] ----
+
+data StmtStep: stmt: Stmt, next: int, ok: bool, error: Text
+
+fn parse_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
+    mut i = start
+    if not match_tok(tokens, i, n, "Emit"):
+        return StmtStep{stmt: EmitEffect("", []), next: i, ok: false, error: "expected `emit` (MVP only supports emit-statements)"}
+    i = i + 1
+    name_tok = if i < n then at(tokens, i) else newline_token()
+    event = ident_of(name_tok.tok)
+    if event == "":
+        return StmtStep{stmt: EmitEffect("", []), next: i, ok: false, error: "expected event name after `emit`"}
+    i = i + 1
+    # Optional `{ ... }` field block.
+    fields = []
+    mut field_list = fields
+    mut i2 = i
+    if match_tok(tokens, i2, n, "LParen"):
+        # Skip parenless emit (`emit Reset()`) — consume "()" with no fields.
+        i2 = i2 + 1
+        if match_tok(tokens, i2, n, "RParen"):
+            i2 = i2 + 1
+    else:
+        if match_tok(tokens, i2, n, "LBrace"):
+            i2 = i2 + 1
+            # Skip newlines
+            loop:
+                if i2 >= n:
+                    break
+                if is_newline(at(tokens, i2).tok):
+                    i2 = i2 + 1
+                else:
+                    break
+            loop:
+                if i2 >= n:
+                    break
+                if match_tok(tokens, i2, n, "RBrace"):
+                    break
+                step = parse_field(tokens, i2, n)
+                if step.ok:
+                    field_list = push(field_list, step.field)
+                    i2 = step.next
+                    if match_tok(tokens, i2, n, "Comma"):
+                        i2 = i2 + 1
+                    loop:
+                        if i2 >= n:
+                            break
+                        if is_newline(at(tokens, i2).tok):
+                            i2 = i2 + 1
+                        else:
+                            break
+                else:
+                    return StmtStep{stmt: EmitEffect(event, []), next: i2, ok: false, error: step.error}
+            if match_tok(tokens, i2, n, "RBrace"):
+                i2 = i2 + 1
+    StmtStep{stmt: EmitEffect(event, field_list), next: i2, ok: true, error: ""}
+
+# ---- field = IDENT ":" expr ----
+
+data FieldStep: field: FieldExpr, next: int, ok: bool, error: Text
+
+fn parse_field(tokens: [Token], start: int, n: int) -> FieldStep:
+    mut i = start
+    name_tok = if i < n then at(tokens, i) else newline_token()
+    name = ident_of(name_tok.tok)
+    if name == "":
+        return FieldStep{field: FieldExpr{name: "", value: LitInt(0)}, next: i, ok: false, error: "expected field name"}
+    i = i + 1
+    if not match_tok(tokens, i, n, "Colon"):
+        return FieldStep{field: FieldExpr{name: "", value: LitInt(0)}, next: i, ok: false, error: "expected `:`"}
+    i = i + 1
+    step = parse_expr(tokens, i, n)
+    if step.ok:
+        FieldStep{field: FieldExpr{name: name, value: step.value}, next: step.next, ok: true, error: ""}
+    else:
+        FieldStep{field: FieldExpr{name: "", value: LitInt(0)}, next: i, ok: false, error: step.error}
+
+# ---- expr (MVP: literals only) ----
+
+data ExprStep: value: Expr, next: int, ok: bool, error: Text
+
+fn parse_expr(tokens: [Token], start: int, n: int) -> ExprStep:
+    if start >= n:
+        return ExprStep{value: LitInt(0), next: start, ok: false, error: "unexpected EOF in expression"}
+    t = at(tokens, start)
+    int_v = int_of(t.tok)
+    if int_v >= 0:
+        return ExprStep{value: LitInt(int_v), next: start + 1, ok: true, error: ""}
+    s = text_of(t.tok)
+    if s != "":
+        return ExprStep{value: LitText(s), next: start + 1, ok: true, error: ""}
+    if match_tok(tokens, start, n, "True"):
+        return ExprStep{value: LitBool(true), next: start + 1, ok: true, error: ""}
+    if match_tok(tokens, start, n, "False"):
+        return ExprStep{value: LitBool(false), next: start + 1, ok: true, error: ""}
+    name = ident_of(t.tok)
+    if name != "":
+        return ExprStep{value: VarRef(name), next: start + 1, ok: true, error: ""}
+    ExprStep{value: LitInt(0), next: start, ok: false, error: "expected an expression"}
+
+# ---- token-matching helpers (string-based to avoid match-everywhere) ----
+
+fn empty_rule() -> Rule:
+    Rule{name: "", params: [], body: []}
+
+fn newline_token() -> Token:
+    Token{tok: Newline, line: 0}
+
+fn is_newline(t: Tok) -> bool:
+    match t:
+        Newline -> true
+        _ -> false
+
+fn is_eof_or_done(_t: Token) -> bool:
+    false
+
+# Compare current token against a kind name. We dispatch by short string
+# because Orion match on tagged enums with no payload is verbose to write
+# inline. Returns true when token at i is the expected variant.
+fn match_tok(tokens: [Token], i: int, n: int, kind: Text) -> bool:
+    if i >= n:
+        false
+    else:
+        tok_kind(at(tokens, i).tok) == kind
+
+# Map every Tok variant to a short string tag.
+fn tok_kind(t: Tok) -> Text:
+    match t:
+        Int(_) -> "Int"
+        Str(_) -> "Str"
+        Ident(_) -> "Ident"
+        Rule -> "Rule"
+        Record -> "Record"
+        Require -> "Require"
+        Let -> "Let"
+        Set -> "Set"
+        Spawn -> "Spawn"
+        Destroy -> "Destroy"
+        Emit -> "Emit"
+        On -> "On"
+        View -> "View"
+        Entity -> "Entity"
+        Test -> "Test"
+        Apply -> "Apply"
+        Expect -> "Expect"
+        Tick -> "Tick"
+        If -> "If"
+        Then -> "Then"
+        Else -> "Else"
+        Match -> "Match"
+        For -> "For"
+        Count -> "Count"
+        All -> "All"
+        In -> "In"
+        Where -> "Where"
+        Empty -> "Empty"
+        True -> "True"
+        False -> "False"
+        Not -> "Not"
+        And -> "And"
+        Or -> "Or"
+        LParen -> "LParen"
+        RParen -> "RParen"
+        LBrace -> "LBrace"
+        RBrace -> "RBrace"
+        Comma -> "Comma"
+        Dot -> "Dot"
+        Colon -> "Colon"
+        Assign -> "Assign"
+        Eq -> "Eq"
+        Ne -> "Ne"
+        Lt -> "Lt"
+        Le -> "Le"
+        Gt -> "Gt"
+        Ge -> "Ge"
+        Plus -> "Plus"
+        Minus -> "Minus"
+        Star -> "Star"
+        Slash -> "Slash"
+        Percent -> "Percent"
+        Newline -> "Newline"
+
+# Extract data from a token, or return sentinel value if wrong variant.
+fn ident_of(t: Tok) -> Text:
+    match t:
+        Ident(s) -> s
+        _ -> ""
+
+fn int_of(t: Tok) -> int:
+    match t:
+        Int(n) -> n
+        _ -> 0 - 1
+
+fn text_of(t: Tok) -> Text:
+    match t:
+        Str(s) -> s
+        _ -> ""

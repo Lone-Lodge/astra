@@ -1,23 +1,28 @@
-# astra_ast — abstract syntax for rules and views.
+# astra_ast — abstract syntax for rules.
+#
+# MVP scope: just enough to express a rule body of `emit` statements with
+# literal-valued field payloads. Full grammar (Field/Call/binop/if/let/
+# require/set/spawn/destroy) lands as we port the parser further.
 
 use astra_value
 
-# Expressions — the right-hand side of a require / let / =.
+# Expressions — literal-only MVP.
 pub enum Expr:
     LitInt(int)
     LitText(Text)
     LitBool(bool)
     VarRef(Text)
-    Call(Text, [Expr])
-    Field(Expr, Text)
 
-# Statements — what a rule body is built of.
+# Statement = one effect a rule proposes.
+# EmitEffect is `emit EventName { field: expr, ... }`.
 pub enum Stmt:
-    Require(Expr)
-    Let(Text, Expr)
-    SetStmt(Expr, Text, Expr)
-    EmitStmt(Text, Expr)
+    EmitEffect(Text, [FieldExpr])
 
-# A rule declaration — name, args, body.
+# A `name: expr` pair inside an emit body.
+pub data FieldExpr: name: Text, value: Expr
+
+# A rule's parameters (currently unused — MVP rules take zero args).
 pub data Param: name: Text, type_name: Text
+
+# A whole rule.
 pub data Rule: name: Text, params: [Param], body: [Stmt]
