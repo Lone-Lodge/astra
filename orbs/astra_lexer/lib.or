@@ -10,11 +10,13 @@
 use bytes
 
 # Token-vocab — paritet med Rust astra::Tok.
+# Comments interspersed in enum body confuse Orion's indent-tracking parser,
+# so all variant names live in one contiguous block, sections noted in trailing
+# comments rather than indented headers.
 pub enum Tok:
     Int(int)
     Str(Text)
     Ident(Text)
-    # decl & stmt keywords
     Rule
     Record
     Require
@@ -30,7 +32,6 @@ pub enum Tok:
     Apply
     Expect
     Tick
-    # expression keywords
     If
     Then
     Else
@@ -46,7 +47,6 @@ pub enum Tok:
     Not
     And
     Or
-    # punctuation & operators
     LParen
     RParen
     LBrace
