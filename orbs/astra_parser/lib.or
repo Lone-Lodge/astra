@@ -56,15 +56,23 @@ data RuleStep: rule: Rule, next: int, ok: bool, error: Text
 
 fn parse_rule(tokens: [Token], start: int, n: int) -> RuleStep:
     mut i = start
-    # Expect Rule keyword.
-    if not match_tok(tokens, i, n, "Rule"):
-        return RuleStep{rule: empty_rule(), next: i, ok: false, error: "expected `rule`"}
-    i = i + 1
-    # Expect Ident(name).
-    name_tok = if i < n then at(tokens, i) else newline_token()
-    name = ident_of(name_tok.tok)
+    # Accept either `rule NAME(...)` or `on EVENT(...)`. The latter is
+    # a handler — same shape, but `trigger` is set so dispatch can find it.
+    mut is_handler = false
+    if match_tok(tokens, i, n, "On"):
+        is_handler = true
+        i = i + 1
+    else:
+        if not match_tok(tokens, i, n, "Rule"):
+            return RuleStep{rule: empty_rule(), next: i, ok: false, error: "expected `rule` or `on`"}
+        i = i + 1
+    # i points at the rule/event NAME token.
+    if i >= n:
+        return RuleStep{rule: empty_rule(), next: i, ok: false, error: "expected name"}
+    name = ident_of(at(tokens, i).tok)
     if name == "":
-        return RuleStep{rule: empty_rule(), next: i, ok: false, error: "expected rule name"}
+        return RuleStep{rule: empty_rule(), next: i, ok: false, error: "expected name"}
+    trigger = if is_handler then name else ""
     i = i + 1
     # Expect "("
     if not match_tok(tokens, i, n, "LParen"):
@@ -116,7 +124,7 @@ fn parse_rule(tokens: [Token], start: int, n: int) -> RuleStep:
                 i = step.next
             else:
                 return RuleStep{rule: empty_rule(), next: i, ok: false, error: step.error}
-    RuleStep{rule: Rule{name: name, params: params, body: body}, next: i, ok: true, error: ""}
+    RuleStep{rule: Rule{name: name, params: params, body: body, trigger: trigger}, next: i, ok: true, error: ""}
 
 # ---- stmt = "emit" IDENT [ "{" field-list "}" ] ----
 
@@ -389,7 +397,7 @@ fn parse_if_expr(tokens: [Token], start: int, n: int) -> ExprStep:
 # ---- token-matching helpers (string-based to avoid match-everywhere) ----
 
 fn empty_rule() -> Rule:
-    Rule{name: "", params: [], body: []}
+    Rule{name: "", params: [], body: [], trigger: ""}
 
 fn newline_token() -> Token:
     Token{tok: Newline, line: 0}

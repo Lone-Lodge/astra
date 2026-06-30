@@ -30,5 +30,6 @@ pub enum Stmt:
 # A rule's parameter.
 pub data Param: name: Text, type_name: Text
 
-# A whole rule.
-pub data Rule: name: Text, params: [Param], body: [Stmt]
+# A whole rule. `trigger` is empty for plain rules (called by name) and
+# the event name for `on Event(...)` handlers (fired via dispatch).
+pub data Rule: name: Text, params: [Param], body: [Stmt], trigger: Text

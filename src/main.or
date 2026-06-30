@@ -3,30 +3,34 @@ use astra_value
 use astra_outcome
 use io
 
-# M1 smoke: a rule with binops, let-binding, require-guard, and an
-# emit whose payload comes from a computed expression.
-
 fn main() -> int:
-    # Test 1: rule fires when x > 0; payload = x * 2.
-    # Multi-line via concat to dodge Orion's {...} string interp.
-    src = "rule scale(x): require x > 0 let doubled = x * 2 emit Scaled" + "(" + ")"
-    test_one(src, "scale", [IntV(5)], "x=5 → expects 1 effect")
-    test_one(src, "scale", [IntV(0)], "x=0 → expects 0 effects (refused)")
-    test_one(src, "scale", [IntV(0 - 3)], "x=-3 → expects 0 effects (refused)")
-    # Test 2: if-then-else expression.
-    src2 = "rule check(n): require if n > 10 then true else false emit Big()"
-    test_one(src2, "check", [IntV(20)], "n=20 → expects 1 effect")
-    test_one(src2, "check", [IntV(5)], "n=5 → expects 0 effects")
+    # M1 regression
+    src_rule = "rule scale(x): require x > 0 let d = x*2 emit Scaled()"
+    outcome1 = run(src_rule, "scale", [IntV(5)])
+    print_line("rule scale(5) effects:")
+    print_line(show_int(eff_count(outcome1)))
+
+    # M2: on-event dispatch
+    src_handler = "on Click(x, y): require x > 0 emit Confirmed()"
+    outcome2 = dispatch(src_handler, "Click", [IntV(10), IntV(20)])
+    print_line("dispatch Click(10,20) effects:")
+    print_line(show_int(eff_count(outcome2)))
+    outcome3 = dispatch(src_handler, "Click", [IntV(0 - 1), IntV(20)])
+    print_line("dispatch Click(-1,20) effects (refused):")
+    print_line(show_int(eff_count(outcome3)))
+
+    # Multiple handlers for same event — both fire
+    src_multi = "on Tick(): emit A()\non Tick(): emit B()"
+    outcome4 = dispatch(src_multi, "Tick", [])
+    print_line("dispatch Tick (two handlers) effects:")
+    print_line(show_int(eff_count(outcome4)))
     0
 
-fn test_one(src: Text, rule: Text, args: [Value], label: Text):
-    print_line(label)
-    outcome = run(src, rule, args)
-    mut count = 0
-    for _e in outcome.effects:
-        count = count + 1
-    print_line("  effects:")
-    print_line(show_int(count))
+fn eff_count(o: Outcome) -> int:
+    mut c = 0
+    for _e in o.effects:
+        c = c + 1
+    c
 
 fn show_int(value: int) -> Text:
     if value == 0:

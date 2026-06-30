@@ -1,4 +1,9 @@
 # astra_run — the single front door: source → Outcome.
+#
+# `run(source, name, args)` finds the plain rule named `name` and
+# evaluates it.  `dispatch(source, event, args)` finds every `on Event`
+# handler and merges their effects — the reactive entry point cubsy
+# uses to wire user input to .astra scripts.
 
 use astra_value
 use astra_outcome
@@ -6,28 +11,46 @@ use astra_lexer
 use astra_parser
 use astra_eval
 
-# Lex + parse + (MVP: skip check) + evaluate the first rule.
+# Lex + parse + (MVP: skip check) + evaluate the first rule by NAME.
 # Errors at any stage collapse to an empty Outcome — atlas pipes silent
 # refusals through, exactly how the Rust impl handles failed guards.
 pub fn run(source: Text, rule_name: Text, args: [Value]) -> Outcome:
-    lex_result = lex(source)
-    if not lex_result.ok:
-        return empty()
-    parse_result = parse(lex_result.tokens)
-    if not parse_result.ok:
-        return empty()
-    target = find_rule(parse_result.rules, rule_name)
+    rules = compile(source)
+    target = find_named_rule(rules, rule_name)
     if len(target.name) == 0:
         return empty()
     run_rule(target, args)
 
-# Find the first rule by name. Returns an empty Rule sentinel when
-# nothing matches — caller checks `len(rule.name) == 0`.
-fn find_rule(rules: [Rule], name: Text) -> Rule:
+# Dispatch — fire every `on Event(...)` handler in `source` matching
+# `event`. Merges all effects (order = source order).
+pub fn dispatch(source: Text, event: Text, args: [Value]) -> Outcome:
+    rules = compile(source)
+    mut effects = []
+    for r in rules:
+        if r.trigger == event:
+            outcome = run_rule(r, args)
+            for e in outcome.effects:
+                effects = push(effects, e)
+    Outcome{effects: effects, reads: []}
+
+fn compile(source: Text) -> [Rule]:
+    lex_result = lex(source)
+    if not lex_result.ok:
+        return []
+    parse_result = parse(lex_result.tokens)
+    if not parse_result.ok:
+        return []
+    parse_result.rules
+
+# Find first plain rule (no trigger) by name. Sentinel: empty Rule.
+fn find_named_rule(rules: [Rule], name: Text) -> Rule:
     n = len(rules)
-    mut found = Rule{name: "", params: [], body: []}
+    mut found = empty_sentinel()
     for i in 0..<n:
         r = at(rules, i)
-        if r.name == name:
+        if r.name == name and len(r.trigger) == 0:
             found = r
     found
+
+fn empty_sentinel() -> Rule:
+    Rule{name: "", params: [], body: [], trigger: ""}
