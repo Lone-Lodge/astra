@@ -15,15 +15,24 @@ Astra writes the **decisions**. Atlas runs the **engine**. Orion writes the
 ```
 ┌──────────────────────────────────────────────────────────┐
 │  Astra  — rules / intents / behaviors  (designers, AI)   │
-│           hot-reloadable, sandbox, traceable             │
+│           write-side: emits Effects                       │
+├──────────────────────────────────────────────────────────┤
+│  Veil   — views / UI / render trees     (designers, AI)  │
+│           read-side: declares Views                       │
 ├──────────────────────────────────────────────────────────┤
 │  Atlas  — world / ECS / render / input  (engine devs)    │
 │           tick-log, effects, channels                    │
 ├──────────────────────────────────────────────────────────┤
-│  Orion  — systems language                (lib authors)  │
+│  Orion  — systems language               (lib authors)   │
 │           native-compiled, full FFI                      │
 └──────────────────────────────────────────────────────────┘
 ```
+
+**Astra and Veil are siblings.** Astra writes; Veil shows.
+- Astra rule: `on_click(x, y) → emit Place { cell }`
+- Veil view: `Hud → stack [ score, health, minimap ]`
+Both compile to pure declarations. Both are hot-reloadable. Both are
+LLM-friendly. Neither touches state directly.
 
 ## What Astra is NOT
 
