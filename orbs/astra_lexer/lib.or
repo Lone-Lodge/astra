@@ -47,10 +47,28 @@ pub enum Tok:
     Not
     And
     Or
+    When
+    Every
+    Fn
+    Const
+    Each
+    To
+    From
+    Through
+    Exists
+    None
+    Whenever
+    Becomes
+    Spawned
+    Destroyed
+    Component
+    Arrow
     LParen
     RParen
     LBrace
     RBrace
+    LBracket
+    RBracket
     Comma
     Dot
     Colon
@@ -251,7 +269,10 @@ fn scan_symbol(bs: [int], start: int, n: int, line: int) -> SymStep:
                 if c == 60 and next_c == 61:
                     SymStep{tok: Le, next: start + 2, ok: true, error: ""}
                 else:
-                    one_char_symbol(c, start)
+                    if c == 45 and next_c == 62:
+                        SymStep{tok: Arrow, next: start + 2, ok: true, error: ""}
+                    else:
+                        one_char_symbol(c, start)
 
 fn one_char_symbol(c: int, start: int) -> SymStep:
     if c == 40:
@@ -266,7 +287,13 @@ fn one_char_symbol(c: int, start: int) -> SymStep:
                 if c == 125:
                     SymStep{tok: RBrace, next: start + 1, ok: true, error: ""}
                 else:
-                    one_char_symbol_rest(c, start)
+                    if c == 91:
+                        SymStep{tok: LBracket, next: start + 1, ok: true, error: ""}
+                    else:
+                        if c == 93:
+                            SymStep{tok: RBracket, next: start + 1, ok: true, error: ""}
+                        else:
+                            one_char_symbol_rest(c, start)
 
 fn one_char_symbol_rest(c: int, start: int) -> SymStep:
     if c == 44:
@@ -359,4 +386,16 @@ fn keyword_of(text: Text) -> Tok:
     else if text == "not" then Not
     else if text == "and" then And
     else if text == "or" then Or
+    else if text == "when" then When
+    else if text == "every" then Every
+    else if text == "fn" then Fn
+    else if text == "const" then Const
+    else if text == "each" then Each
+    else if text == "to" then To
+    else if text == "exists" then Exists
+    else if text == "none" then None
+    else if text == "becomes" then Becomes
+    else if text == "spawned" then Spawned
+    else if text == "destroyed" then Destroyed
+    else if text == "component" then Component
     else Ident(text)

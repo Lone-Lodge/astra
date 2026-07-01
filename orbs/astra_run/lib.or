@@ -3,44 +3,152 @@
 # `run(source, name, args)` finds the plain rule named `name` and
 # evaluates it.  `dispatch(source, event, args)` finds every `on Event`
 # handler and merges their effects — the reactive entry point cubsy
-# uses to wire user input to .astra scripts.
+# uses to wire user input to .astra scripts. `tick(source, ctx, prev)`
+# fires every `when EXPR: body` rule on the false→true edge.
+#
+# Pure helper `fn` definitions live in the parser's function table and
+# are forwarded to eval transparently — rules call them via expression
+# `Call(name, args)` without any runtime ceremony.
 
 use astra_value
 use astra_outcome
+use astra_ast
 use astra_lexer
 use astra_parser
 use astra_eval
+
+# What `compile` produces — both rule list and helper function table.
+data Compiled: rules: [Rule], functions: [Function], consts: [Binding]
 
 # Lex + parse + (MVP: skip check) + evaluate the first rule by NAME.
 # Errors at any stage collapse to an empty Outcome — atlas pipes silent
 # refusals through, exactly how the Rust impl handles failed guards.
 pub fn run(source: Text, rule_name: Text, args: [Value]) -> Outcome:
-    rules = compile(source)
-    target = find_named_rule(rules, rule_name)
+    c = compile(source)
+    target = find_named_rule(c.rules, rule_name)
     if len(target.name) == 0:
         return empty()
-    run_rule(target, args)
+    run_rule_args_ctx(target, args, c.consts, c.functions)
 
 # Dispatch — fire every `on Event(...)` handler in `source` matching
 # `event`. Merges all effects (order = source order).
+# Invoke a pure helper `fn` by name with args; return its Value result.
+# Lets Orion-side hosts call into astra-defined helpers for pixel math,
+# piece catalog lookups, etc. — single source of truth in the .astra
+# file, host stays a thin invoker.
+pub fn eval_fn(source: Text, fn_name: Text, args: [Value]) -> Value:
+    c = compile(source)
+    f = find_fn(c.functions, fn_name)
+    if f.name == "":
+        NoneV
+    else:
+        env = bind_call_params(f.params, args, 0, c.consts)
+        eval_in_env(f.body, env, c.functions)
+
+fn find_fn(funcs: [Function], name: Text) -> Function:
+    n = len(funcs)
+    mut found = Function{name: "", params: [], return_type: "", body: LitInt(0)}
+    for i in 0..<n:
+        f = at(funcs, i)
+        if f.name == name:
+            found = f
+    found
+
+fn bind_call_params(params: [Param], args: [Value], i: int, acc: [Binding]) -> [Binding]:
+    if i >= len(params):
+        acc
+    else:
+        p = at(params, i)
+        v = if i < len(args) then at(args, i) else NoneV
+        bind_call_params(params, args, i + 1, push(acc, Binding{name: p.name, value: v}))
+
 pub fn dispatch(source: Text, event: Text, args: [Value]) -> Outcome:
-    rules = compile(source)
+    dispatch_ctx(source, event, args, [])
+
+# Dispatch with extra ctx bindings the handler body can reference as
+# free names (e.g. `tray`, `blocks`). atlas_astra::astra_event_ctx
+# auto-injects `tick`.
+pub fn dispatch_ctx(source: Text, event: Text, args: [Value], ctx: [Binding]) -> Outcome:
+    c = compile(source)
+    full_ctx = merge_bindings(c.consts, ctx)
     mut effects = []
-    for r in rules:
+    for r in c.rules:
         if r.trigger == event:
-            outcome = run_rule(r, args)
+            outcome = run_rule_args_ctx(r, args, full_ctx, c.functions)
             for e in outcome.effects:
                 effects = push(effects, e)
     Outcome{effects: effects, reads: []}
 
-fn compile(source: Text) -> [Rule]:
+fn merge_bindings(a: [Binding], b: [Binding]) -> [Binding]:
+    mut out = a
+    for binding in b:
+        out = push(out, binding)
+    out
+
+# Result of a reactive tick. `truths` is parallel to the `when` rules in
+# source order — true means "condition currently holds". The host stores
+# this between ticks and passes it back as `prev_truths` so we can
+# detect the false→true edge that fires the body.
+pub data TickOutcome: outcome: Outcome, truths: [bool]
+
+# Evaluate every `when EXPR: body` rule in `source` against the supplied
+# context bindings. Fires the body on the false→true edge only —
+# `prev_truths` carries last tick's per-rule state. First call should
+# pass an empty list; subsequent calls pass the previous TickOutcome's
+# `truths` so milestones don't re-fire every tick.
+#
+# Out-of-bounds prev_truths entries default to `false` (cold start), so
+# any condition that's true on first tick fires once.
+pub fn tick(source: Text, ctx: [Binding], prev_truths: [bool]) -> TickOutcome:
+    c = compile(source)
+    full_ctx = merge_bindings(c.consts, ctx)
+    mut effects = []
+    mut truths = []
+    mut idx = 0
+    for r in c.rules:
+        if r.trigger == "$when":
+            v = eval_in_env(r.condition, full_ctx, c.functions)
+            now = value_is_truthy(v)
+            was = prev_truth_at(prev_truths, idx)
+            truths = push(truths, now)
+            if now and not was:
+                outcome = run_rule_env(r, full_ctx, c.functions)
+                for e in outcome.effects:
+                    effects = push(effects, e)
+            idx = idx + 1
+    TickOutcome{outcome: Outcome{effects: effects, reads: []}, truths: truths}
+
+fn prev_truth_at(prev: [bool], i: int) -> bool:
+    if i < 0 or i >= len(prev):
+        false
+    else:
+        at(prev, i)
+
+# Expose parse result so hosts can inspect component/entity declarations
+# without depending directly on astra_lexer / astra_parser.
+pub fn compile_parse_result(source: Text) -> ParseResult:
     lex_result = lex(source)
     if not lex_result.ok:
-        return []
+        return ParseResult{rules: [], functions: [], entities: [], consts: [], components: [], ok: false, error: ParseError{message: lex_result.error.message, line: lex_result.error.line}}
+    parse(lex_result.tokens)
+
+fn compile(source: Text) -> Compiled:
+    lex_result = lex(source)
+    if not lex_result.ok:
+        return Compiled{rules: [], functions: [], consts: []}
     parse_result = parse(lex_result.tokens)
     if not parse_result.ok:
-        return []
-    parse_result.rules
+        return Compiled{rules: [], functions: [], consts: []}
+    consts = eval_consts(parse_result.consts, parse_result.functions, 0, [])
+    Compiled{rules: parse_result.rules, functions: parse_result.functions, consts: consts}
+
+fn eval_consts(decls: [ConstDecl], funcs: [Function], i: int, acc: [Binding]) -> [Binding]:
+    if i >= len(decls):
+        acc
+    else:
+        d = at(decls, i)
+        v = eval_in_env(d.value, acc, funcs)
+        eval_consts(decls, funcs, i + 1, push(acc, Binding{name: d.name, value: v}))
 
 # Find first plain rule (no trigger) by name. Sentinel: empty Rule.
 fn find_named_rule(rules: [Rule], name: Text) -> Rule:
@@ -53,4 +161,4 @@ fn find_named_rule(rules: [Rule], name: Text) -> Rule:
     found
 
 fn empty_sentinel() -> Rule:
-    Rule{name: "", params: [], body: [], trigger: ""}
+    Rule{name: "", params: [], body: [], trigger: "", condition: LitBool(true)}

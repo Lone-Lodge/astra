@@ -9,13 +9,21 @@ use astra_lexer
 
 pub data ParseError: message: Text, line: int
 
-# A parse result — `ok: false` means consult `error`.
-pub data ParseResult: rules: [Rule], ok: bool, error: ParseError
+# A parse result — `ok: false` means consult `error`. `functions` are
+# pure helpers callable from rule expressions; `rules` are the regular
+# `rule`/`on`/`when`/`every` bodies; `entities` are typed authoring
+# declarations the host uses to register constructors for `spawn Kind`;
+# `components` are ECS component type declarations (`component Kind: f:t`).
+pub data ParseResult: rules: [Rule], functions: [Function], entities: [EntityDecl], consts: [ConstDecl], components: [ComponentDecl], ok: bool, error: ParseError
 
 pub fn parse(tokens: [Token]) -> ParseResult:
     n = len(tokens)
     mut i = 0
     mut rules = []
+    mut functions = []
+    mut entities = []
+    mut consts = []
+    mut components = []
     mut failed = false
     mut err_msg = ""
     mut err_line = 0
@@ -34,27 +42,87 @@ pub fn parse(tokens: [Token]) -> ParseResult:
         if failed:
             break
         t = at(tokens, i)
-        if is_eof_or_done(t):
-            break
-        # Top-level: only `rule NAME (): emit ...` for MVP.
-        step = parse_rule(tokens, i, n)
-        if step.ok:
-            rules = push(rules, step.rule)
-            i = step.next
+        if is_newline(t.tok):
+            i = i + 1
         else:
-            failed = true
-            err_msg = step.error
-            err_line = t.line
+            if is_eof_or_done(t):
+                break
+            if match_tok(tokens, i, n, "Component"):
+                cstep = parse_component_decl(tokens, i + 1, n)
+                if cstep.ok:
+                    components = push(components, cstep.component)
+                    i = cstep.next
+                else:
+                    failed = true
+                    err_msg = cstep.error
+                    err_line = t.line
+            else:
+            if match_tok(tokens, i, n, "Const"):
+                cstep = parse_const_decl(tokens, i + 1, n)
+                if cstep.ok:
+                    consts = push(consts, cstep.cnst)
+                    i = cstep.next
+                else:
+                    failed = true
+                    err_msg = cstep.error
+                    err_line = t.line
+            else:
+            if match_tok(tokens, i, n, "Fn"):
+                fstep = parse_function(tokens, i + 1, n)
+                if fstep.ok:
+                    functions = push(functions, fstep.func)
+                    i = fstep.next
+                else:
+                    failed = true
+                    err_msg = fstep.error
+                    err_line = t.line
+            else:
+                if match_tok(tokens, i, n, "Entity"):
+                    estep = parse_entity_decl(tokens, i + 1, n)
+                    if estep.ok:
+                        entities = push(entities, estep.entity)
+                        i = estep.next
+                    else:
+                        failed = true
+                        err_msg = estep.error
+                        err_line = t.line
+                else:
+                    if match_tok(tokens, i, n, "Each"):
+                        fstep = parse_for_loop(tokens, i + 1, n)
+                        if fstep.ok:
+                            for r in fstep.rules:
+                                rules = push(rules, r)
+                            i = fstep.next
+                        else:
+                            failed = true
+                            err_msg = fstep.error
+                            err_line = t.line
+                    else:
+                        step = parse_rule(tokens, i, n)
+                        if step.ok:
+                            rules = push(rules, step.rule)
+                            i = step.next
+                        else:
+                            failed = true
+                            err_msg = step.error
+                            err_line = t.line
     if failed:
-        ParseResult{rules: [], ok: false, error: ParseError{message: err_msg, line: err_line}}
+        ParseResult{rules: [], functions: [], entities: [], consts: [], components: [], ok: false, error: ParseError{message: err_msg, line: err_line}}
     else:
-        ParseResult{rules: rules, ok: true, error: ParseError{message: "", line: 0}}
+        ParseResult{rules: rules, functions: functions, entities: entities, consts: consts, components: components, ok: true, error: ParseError{message: "", line: 0}}
 
 # ---- rule = "rule" IDENT "(" ")" ":" NEWLINE stmts ----
 
 data RuleStep: rule: Rule, next: int, ok: bool, error: Text
 
 fn parse_rule(tokens: [Token], start: int, n: int) -> RuleStep:
+    # `when EXPR: body` short-circuits — it has no name/paren list.
+    if match_tok(tokens, start, n, "When"):
+        return parse_when_rule(tokens, start + 1, n)
+    # `every N: body` desugars to when (tick % N == 0): body — same
+    # runtime path, host just has to bind `tick` in ctx (atlas_astra does).
+    if match_tok(tokens, start, n, "Every"):
+        return parse_every_rule(tokens, start + 1, n)
     mut i = start
     # Accept either `rule NAME(...)` or `on EVENT(...)`. The latter is
     # a handler — same shape, but `trigger` is set so dispatch can find it.
@@ -64,7 +132,7 @@ fn parse_rule(tokens: [Token], start: int, n: int) -> RuleStep:
         i = i + 1
     else:
         if not match_tok(tokens, i, n, "Rule"):
-            return RuleStep{rule: empty_rule(), next: i, ok: false, error: "expected `rule` or `on`"}
+            return RuleStep{rule: empty_rule(), next: i, ok: false, error: "expected `rule`, `on`, or `when`"}
         i = i + 1
     # i points at the rule/event NAME token.
     if i >= n:
@@ -107,13 +175,13 @@ fn parse_rule(tokens: [Token], start: int, n: int) -> RuleStep:
             i = i + 1
         else:
             break
-    # Body: list of stmts until top-level Rule or EOF.
+    # Body: list of stmts until next top-level rule starter or EOF.
     mut body = []
     loop:
         if i >= n:
             break
         t = at(tokens, i)
-        if match_tok(tokens, i, n, "Rule"):
+        if at_rule_starter(tokens, i, n):
             break
         if is_newline(t.tok):
             i = i + 1
@@ -124,21 +192,386 @@ fn parse_rule(tokens: [Token], start: int, n: int) -> RuleStep:
                 i = step.next
             else:
                 return RuleStep{rule: empty_rule(), next: i, ok: false, error: step.error}
-    RuleStep{rule: Rule{name: name, params: params, body: body, trigger: trigger}, next: i, ok: true, error: ""}
+    RuleStep{rule: Rule{name: name, params: params, body: body, trigger: trigger, condition: LitBool(true)}, next: i, ok: true, error: ""}
+
+# `when EXPR : NEWLINE body` — produces a Rule with trigger="$when"
+# and `condition` set to the watch expression. Body re-uses the same
+# stmt grammar as `rule`/`on`.
+fn parse_when_rule(tokens: [Token], start: int, n: int) -> RuleStep:
+    # `when spawned(Kind):` / `when destroyed(Kind):` — lifecycle triggers.
+    if match_tok(tokens, start, n, "Spawned") or match_tok(tokens, start, n, "Destroyed"):
+        is_spawned = match_tok(tokens, start, n, "Spawned")
+        trigger_prefix = if is_spawned then "$spawned:" else "$destroyed:"
+        mut i = start + 1
+        if not match_tok(tokens, i, n, "LParen"):
+            return RuleStep{rule: empty_rule(), next: i, ok: false, error: "expected `(` after spawned/destroyed"}
+        i = i + 1
+        kind_name = ident_of(at(tokens, i).tok)
+        if kind_name == "":
+            return RuleStep{rule: empty_rule(), next: i, ok: false, error: "expected component type name in spawned(T)"}
+        i = i + 1
+        if not match_tok(tokens, i, n, "RParen"):
+            return RuleStep{rule: empty_rule(), next: i, ok: false, error: "expected `)` after component type in spawned(T)"}
+        i = i + 1
+        if not match_tok(tokens, i, n, "Colon"):
+            return RuleStep{rule: empty_rule(), next: i, ok: false, error: "expected `:` after when spawned(T)"}
+        i = i + 1
+        loop:
+            if i >= n:
+                break
+            if is_newline(at(tokens, i).tok):
+                i = i + 1
+            else:
+                break
+        mut body = []
+        loop:
+            if i >= n:
+                break
+            t = at(tokens, i)
+            if at_rule_starter(tokens, i, n):
+                break
+            if is_newline(t.tok):
+                i = i + 1
+            else:
+                step = parse_stmt(tokens, i, n)
+                if step.ok:
+                    body = push(body, step.stmt)
+                    i = step.next
+                else:
+                    return RuleStep{rule: empty_rule(), next: i, ok: false, error: step.error}
+        return RuleStep{rule: Rule{name: "", params: [], body: body, trigger: trigger_prefix + kind_name, condition: LitBool(true)}, next: i, ok: true, error: ""}
+    # Regular `when COND:` — edge-triggered conditional.
+    cond = parse_expr(tokens, start, n)
+    if not cond.ok:
+        return RuleStep{rule: empty_rule(), next: cond.next, ok: false, error: cond.error}
+    mut i = cond.next
+    if not match_tok(tokens, i, n, "Colon"):
+        return RuleStep{rule: empty_rule(), next: i, ok: false, error: "expected `:` after when condition"}
+    i = i + 1
+    loop:
+        if i >= n:
+            break
+        if is_newline(at(tokens, i).tok):
+            i = i + 1
+        else:
+            break
+    mut body = []
+    loop:
+        if i >= n:
+            break
+        t = at(tokens, i)
+        if at_rule_starter(tokens, i, n):
+            break
+        if is_newline(t.tok):
+            i = i + 1
+        else:
+            step = parse_stmt(tokens, i, n)
+            if step.ok:
+                body = push(body, step.stmt)
+                i = step.next
+            else:
+                return RuleStep{rule: empty_rule(), next: i, ok: false, error: step.error}
+    RuleStep{rule: Rule{name: "", params: [], body: body, trigger: "$when", condition: cond.value}, next: i, ok: true, error: ""}
+
+fn at_rule_starter(tokens: [Token], i: int, n: int) -> bool:
+    match_tok(tokens, i, n, "Rule") or match_tok(tokens, i, n, "On") or match_tok(tokens, i, n, "Every") or match_tok(tokens, i, n, "Fn") or match_tok(tokens, i, n, "When") or match_tok(tokens, i, n, "Component") or match_tok(tokens, i, n, "Entity") or match_tok(tokens, i, n, "Const")
+
+# `fn NAME(params) -> TYPE: body-expr` — pure helper. Params may include
+# optional `: type` annotations; we accept and discard them for now.
+# Body is a single expression (parens/if-else compose naturally).
+data FuncStep: func: Function, next: int, ok: bool, error: Text
+
+fn parse_function(tokens: [Token], start: int, n: int) -> FuncStep:
+    if start >= n:
+        return FuncStep{func: empty_function(), next: start, ok: false, error: "expected fn name"}
+    name = ident_of(at(tokens, start).tok)
+    if name == "":
+        return FuncStep{func: empty_function(), next: start, ok: false, error: "expected fn name"}
+    mut i = start + 1
+    if not match_tok(tokens, i, n, "LParen"):
+        return FuncStep{func: empty_function(), next: i, ok: false, error: "expected `(` after fn name"}
+    i = i + 1
+    mut params = []
+    loop:
+        if i >= n:
+            break
+        if match_tok(tokens, i, n, "RParen"):
+            break
+        p_name = ident_of(at(tokens, i).tok)
+        if p_name == "":
+            return FuncStep{func: empty_function(), next: i, ok: false, error: "expected param name or `)`"}
+        i = i + 1
+        mut p_type = ""
+        if match_tok(tokens, i, n, "Colon"):
+            i = i + 1
+            if i < n:
+                p_type = ident_of(at(tokens, i).tok)
+                if p_type == "":
+                    return FuncStep{func: empty_function(), next: i, ok: false, error: "expected type name"}
+                i = i + 1
+        params = push(params, Param{name: p_name, type_name: p_type})
+        if match_tok(tokens, i, n, "Comma"):
+            i = i + 1
+    if not match_tok(tokens, i, n, "RParen"):
+        return FuncStep{func: empty_function(), next: i, ok: false, error: "expected `)`"}
+    i = i + 1
+    mut ret_type = ""
+    if match_tok(tokens, i, n, "Arrow"):
+        i = i + 1
+        if i < n:
+            ret_type = ident_of(at(tokens, i).tok)
+            if ret_type == "":
+                return FuncStep{func: empty_function(), next: i, ok: false, error: "expected return type after `->`"}
+            i = i + 1
+    if not match_tok(tokens, i, n, "Colon"):
+        return FuncStep{func: empty_function(), next: i, ok: false, error: "expected `:` before fn body"}
+    i = i + 1
+    i = skip_newlines(tokens, i, n)
+    body = parse_expr(tokens, i, n)
+    if not body.ok:
+        return FuncStep{func: empty_function(), next: body.next, ok: false, error: body.error}
+    FuncStep{func: Function{name: name, params: params, return_type: ret_type, body: body.value}, next: body.next, ok: true, error: ""}
+
+fn empty_function() -> Function:
+    Function{name: "", params: [], return_type: "", body: LitInt(0)}
+
+# Top-level `IDENT(...)` with no leading `fn` keyword is treated as a
+# function definition. We peek for IDENT LParen and assume fn-shape
+# (vs an unlikely top-level expression). All other top-level
+# constructs use explicit keywords (rule/on/when/every/each/entity/const/fn).
+fn looks_like_implicit_fn(tokens: [Token], i: int, n: int) -> bool:
+    if i >= n:
+        return false
+    if ident_of(at(tokens, i).tok) == "":
+        return false
+    match_tok(tokens, i + 1, n, "LParen")
+
+# `entity Kind { f: type, f: type, ... }` — typed component declaration.
+# Field types are accepted and stored for future checks but unenforced.
+data EntityStep: entity: EntityDecl, next: int, ok: bool, error: Text
+
+fn parse_entity_decl(tokens: [Token], start: int, n: int) -> EntityStep:
+    if start >= n:
+        return EntityStep{entity: empty_entity_decl(), next: start, ok: false, error: "expected entity name"}
+    name = ident_of(at(tokens, start).tok)
+    if name == "":
+        return EntityStep{entity: empty_entity_decl(), next: start, ok: false, error: "expected entity name"}
+    mut i = start + 1
+    if not match_tok(tokens, i, n, "LBrace"):
+        return EntityStep{entity: empty_entity_decl(), next: i, ok: false, error: "expected LBrace after entity name"}
+    i = i + 1
+    i = skip_newlines(tokens, i, n)
+    mut fields = []
+    loop:
+        if i >= n:
+            break
+        if match_tok(tokens, i, n, "RBrace"):
+            break
+        f_name = ident_of(at(tokens, i).tok)
+        if f_name == "":
+            return EntityStep{entity: empty_entity_decl(), next: i, ok: false, error: "expected field name"}
+        i = i + 1
+        mut f_type = ""
+        if match_tok(tokens, i, n, "Colon"):
+            i = i + 1
+            if i < n:
+                f_type = ident_of(at(tokens, i).tok)
+                if f_type == "":
+                    return EntityStep{entity: empty_entity_decl(), next: i, ok: false, error: "expected field type"}
+                i = i + 1
+        fields = push(fields, Param{name: f_name, type_name: f_type})
+        if match_tok(tokens, i, n, "Comma"):
+            i = i + 1
+        i = skip_newlines(tokens, i, n)
+    if match_tok(tokens, i, n, "RBrace"):
+        i = i + 1
+    EntityStep{entity: EntityDecl{name: name, fields: fields}, next: i, ok: true, error: ""}
+
+fn empty_entity_decl() -> EntityDecl:
+    EntityDecl{name: "", fields: []}
+
+# `component Kind { f: type, f: type, ... }` — ECS component declaration.
+# Identical structure to entity but signals that atlas_astra should
+# register the type directly in world storage (no manual pack_* glue).
+data ComponentStep: component: ComponentDecl, next: int, ok: bool, error: Text
+
+fn parse_component_decl(tokens: [Token], start: int, n: int) -> ComponentStep:
+    if start >= n:
+        return ComponentStep{component: empty_component_decl(), next: start, ok: false, error: "expected component name"}
+    name = ident_of(at(tokens, start).tok)
+    if name == "":
+        return ComponentStep{component: empty_component_decl(), next: start, ok: false, error: "expected component name"}
+    mut i = start + 1
+    if not match_tok(tokens, i, n, "LBrace"):
+        return ComponentStep{component: empty_component_decl(), next: i, ok: false, error: "expected LBrace after component name"}
+    i = i + 1
+    i = skip_newlines(tokens, i, n)
+    mut fields = []
+    loop:
+        if i >= n:
+            break
+        if match_tok(tokens, i, n, "RBrace"):
+            break
+        f_name = ident_of(at(tokens, i).tok)
+        if f_name == "":
+            return ComponentStep{component: empty_component_decl(), next: i, ok: false, error: "expected field name in component"}
+        i = i + 1
+        mut f_type = ""
+        if match_tok(tokens, i, n, "Colon"):
+            i = i + 1
+            if i < n:
+                f_type = ident_of(at(tokens, i).tok)
+                if f_type == "":
+                    return ComponentStep{component: empty_component_decl(), next: i, ok: false, error: "expected field type in component"}
+                i = i + 1
+        fields = push(fields, Param{name: f_name, type_name: f_type})
+        if match_tok(tokens, i, n, "Comma"):
+            i = i + 1
+        i = skip_newlines(tokens, i, n)
+    if match_tok(tokens, i, n, "RBrace"):
+        i = i + 1
+    ComponentStep{component: ComponentDecl{name: name, fields: fields}, next: i, ok: true, error: ""}
+
+fn empty_component_decl() -> ComponentDecl:
+    ComponentDecl{name: "", fields: []}
+
+data ConstStep: cnst: ConstDecl, next: int, ok: bool, error: Text
+
+fn parse_const_decl(tokens: [Token], start: int, n: int) -> ConstStep:
+    if start >= n:
+        return ConstStep{cnst: ConstDecl{name: "", value: LitInt(0)}, next: start, ok: false, error: "expected const name"}
+    name = ident_of(at(tokens, start).tok)
+    if name == "":
+        return ConstStep{cnst: ConstDecl{name: "", value: LitInt(0)}, next: start, ok: false, error: "expected const name"}
+    mut i = start + 1
+    if not match_tok(tokens, i, n, "Assign"):
+        return ConstStep{cnst: ConstDecl{name: name, value: LitInt(0)}, next: i, ok: false, error: "expected = after const name"}
+    i = i + 1
+    val_step = parse_expr(tokens, i, n)
+    if not val_step.ok:
+        return ConstStep{cnst: ConstDecl{name: name, value: LitInt(0)}, next: val_step.next, ok: false, error: val_step.error}
+    ConstStep{cnst: ConstDecl{name: name, value: val_step.value}, next: val_step.next, ok: true, error: ""}
+
+# `for IDENT in INT..<INT: body` — top-level macro. Body must be a
+# single rule construct (typically `when EXPR: stmts`). At parse time
+# we clone the body once per iteration, substituting the iter var.
+# Runtime sees N independent rules — edge detection, ctx threading,
+# everything else is unchanged.
+data ForStep: rules: [Rule], next: int, ok: bool, error: Text
+
+fn parse_for_loop(tokens: [Token], start: int, n: int) -> ForStep:
+    if start >= n:
+        return ForStep{rules: [], next: start, ok: false, error: "expected iter name after `for`"}
+    iter_name = ident_of(at(tokens, start).tok)
+    if iter_name == "":
+        return ForStep{rules: [], next: start, ok: false, error: "expected iter name after `for`"}
+    mut i = start + 1
+    if not match_tok(tokens, i, n, "In"):
+        return ForStep{rules: [], next: i, ok: false, error: "expected `in` after iter name"}
+    i = i + 1
+    if match_tok(tokens, i, n, "From"):
+        i = i + 1
+    range_start = int_of(at(tokens, i).tok)
+    if range_start < 0:
+        return ForStep{rules: [], next: i, ok: false, error: "expected int literal range start"}
+    i = i + 1
+    mut inclusive = false
+    if match_tok(tokens, i, n, "To"):
+        i = i + 1
+    else:
+        if match_tok(tokens, i, n, "Through"):
+            inclusive = true
+            i = i + 1
+        else:
+            return ForStep{rules: [], next: i, ok: false, error: "expected `to` or `through`"}
+    mut range_end = int_of(at(tokens, i).tok)
+    if range_end < 0:
+        return ForStep{rules: [], next: i, ok: false, error: "expected int literal range end"}
+    if inclusive:
+        range_end = range_end + 1
+    i = i + 1
+    if not match_tok(tokens, i, n, "Colon"):
+        return ForStep{rules: [], next: i, ok: false, error: "expected `:` after for header"}
+    i = i + 1
+    i = skip_newlines(tokens, i, n)
+    # Body: exactly one rule construct (rule/on/when/every). We hand
+    # over to parse_rule which handles all those shapes.
+    body_step = parse_rule(tokens, i, n)
+    if not body_step.ok:
+        return ForStep{rules: [], next: body_step.next, ok: false, error: body_step.error}
+    mut out = []
+    mut v = range_start
+    loop:
+        if v >= range_end:
+            break
+        out = push(out, subst_rule(body_step.rule, iter_name, v))
+        v = v + 1
+    ForStep{rules: out, next: body_step.next, ok: true, error: ""}
+
+# `every N : NEWLINE body` — sugar for `when (tick % N == 0): body`.
+# Period must be an int literal; runtime evaluates the synthetic
+# condition against whatever `tick` binding the host supplies.
+fn parse_every_rule(tokens: [Token], start: int, n: int) -> RuleStep:
+    if start >= n:
+        return RuleStep{rule: empty_rule(), next: start, ok: false, error: "expected period after `every`"}
+    period = int_of(at(tokens, start).tok)
+    if period <= 0:
+        return RuleStep{rule: empty_rule(), next: start, ok: false, error: "expected positive int period after `every`"}
+    mut i = start + 1
+    if not match_tok(tokens, i, n, "Colon"):
+        return RuleStep{rule: empty_rule(), next: i, ok: false, error: "expected `:` after every period"}
+    i = i + 1
+    loop:
+        if i >= n:
+            break
+        if is_newline(at(tokens, i).tok):
+            i = i + 1
+        else:
+            break
+    mut body = []
+    loop:
+        if i >= n:
+            break
+        t = at(tokens, i)
+        if at_rule_starter(tokens, i, n):
+            break
+        if is_newline(t.tok):
+            i = i + 1
+        else:
+            step = parse_stmt(tokens, i, n)
+            if step.ok:
+                body = push(body, step.stmt)
+                i = step.next
+            else:
+                return RuleStep{rule: empty_rule(), next: i, ok: false, error: step.error}
+    cond = Binop("==", Binop("%", VarRef("tick"), LitInt(period)), LitInt(0))
+    RuleStep{rule: Rule{name: "", params: [], body: body, trigger: "$when", condition: cond}, next: i, ok: true, error: ""}
 
 # ---- stmt = "emit" IDENT [ "{" field-list "}" ] ----
 
 data StmtStep: stmt: Stmt, next: int, ok: bool, error: Text
 
 fn parse_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
-    # Dispatch on the leading keyword: emit / require / let.
+    # Dispatch on the leading keyword.
     if match_tok(tokens, start, n, "Require"):
         return parse_require_stmt(tokens, start + 1, n)
     if match_tok(tokens, start, n, "Let"):
         return parse_let_stmt(tokens, start + 1, n)
+    if match_tok(tokens, start, n, "Spawn"):
+        return parse_spawn_stmt(tokens, start + 1, n)
+    if match_tok(tokens, start, n, "Destroy"):
+        return parse_destroy_stmt(tokens, start + 1, n)
+    if match_tok(tokens, start, n, "Set"):
+        return parse_set_stmt(tokens, start + 1, n)
+    if match_tok(tokens, start, n, "Each"):
+        return parse_foreach_stmt(tokens, start + 1, n)
+    if match_tok(tokens, start, n, "When"):
+        return parse_if_stmt(tokens, start + 1, n)
+    if looks_like_assignment(tokens, start, n):
+        return parse_set_stmt(tokens, start, n)
     mut i = start
     if not match_tok(tokens, i, n, "Emit"):
-        return StmtStep{stmt: EmitEffect("", []), next: i, ok: false, error: "expected `emit`, `require`, or `let`"}
+        return StmtStep{stmt: EmitEffect("", []), next: i, ok: false, error: "expected emit/require/let/spawn/destroy/set/for/assignment"}
     i = i + 1
     name_tok = if i < n then at(tokens, i) else newline_token()
     event = ident_of(name_tok.tok)
@@ -149,45 +582,56 @@ fn parse_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
     fields = []
     mut field_list = fields
     mut i2 = i
+    # `emit X()` — parenless form, no fields. Consume the empty paren pair.
     if match_tok(tokens, i2, n, "LParen"):
-        # Skip parenless emit (`emit Reset()`) — consume "()" with no fields.
         i2 = i2 + 1
         if match_tok(tokens, i2, n, "RParen"):
             i2 = i2 + 1
-    else:
-        if match_tok(tokens, i2, n, "LBrace"):
-            i2 = i2 + 1
-            # Skip newlines
-            loop:
-                if i2 >= n:
-                    break
-                if is_newline(at(tokens, i2).tok):
-                    i2 = i2 + 1
-                else:
-                    break
-            loop:
-                if i2 >= n:
-                    break
-                if match_tok(tokens, i2, n, "RBrace"):
-                    break
-                step = parse_field(tokens, i2, n)
-                if step.ok:
-                    field_list = push(field_list, step.field)
-                    i2 = step.next
-                    if match_tok(tokens, i2, n, "Comma"):
-                        i2 = i2 + 1
-                    loop:
-                        if i2 >= n:
-                            break
-                        if is_newline(at(tokens, i2).tok):
-                            i2 = i2 + 1
-                        else:
-                            break
-                else:
-                    return StmtStep{stmt: EmitEffect(event, []), next: i2, ok: false, error: step.error}
-            if match_tok(tokens, i2, n, "RBrace"):
-                i2 = i2 + 1
+    # `emit X { f1: v1, f2: v2, ... }` — field-block form. Separate guard
+    # (not an else) because the dangling-else binding in Orion's parser
+    # would otherwise attach the else to the inner RParen check instead
+    # of the outer LParen check, silently skipping this branch entirely.
+    if match_tok(tokens, i2, n, "LBrace"):
+        brace = parse_field_block(tokens, i2, n)
+        if not brace.ok:
+            return StmtStep{stmt: EmitEffect(event, []), next: brace.next, ok: false, error: brace.error}
+        field_list = brace.fields
+        i2 = brace.next
     StmtStep{stmt: EmitEffect(event, field_list), next: i2, ok: true, error: ""}
+
+data FieldBlockStep: fields: [FieldExpr], next: int, ok: bool, error: Text
+
+fn parse_field_block(tokens: [Token], start: int, n: int) -> FieldBlockStep:
+    mut i = start + 1
+    mut out = []
+    i = skip_newlines(tokens, i, n)
+    loop:
+        if i >= n:
+            break
+        if match_tok(tokens, i, n, "RBrace"):
+            break
+        step = parse_field(tokens, i, n)
+        if not step.ok:
+            return FieldBlockStep{fields: out, next: i, ok: false, error: step.error}
+        out = push(out, step.field)
+        i = step.next
+        if match_tok(tokens, i, n, "Comma"):
+            i = i + 1
+        i = skip_newlines(tokens, i, n)
+    if match_tok(tokens, i, n, "RBrace"):
+        i = i + 1
+    FieldBlockStep{fields: out, next: i, ok: true, error: ""}
+
+fn skip_newlines(tokens: [Token], start: int, n: int) -> int:
+    mut i = start
+    loop:
+        if i >= n:
+            break
+        if is_newline(at(tokens, i).tok):
+            i = i + 1
+        else:
+            break
+    i
 
 # ---- field = IDENT ":" expr ----
 
@@ -211,15 +655,31 @@ fn parse_field(tokens: [Token], start: int, n: int) -> FieldStep:
 
 # ---- require / let stmt parsers ----
 
+# `require A` — single guard. `require A, B, C` — comma-separated guards
+# combined with AND so the rule passes only when all hold. Reads as a
+# checklist of preconditions.
 fn parse_require_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
     step = parse_expr(tokens, start, n)
     if not step.ok:
         return StmtStep{stmt: Require(LitBool(false)), next: step.next, ok: false, error: step.error}
-    StmtStep{stmt: Require(step.value), next: step.next, ok: true, error: ""}
+    mut combined = step.value
+    mut i = step.next
+    loop:
+        if not match_tok(tokens, i, n, "Comma"):
+            break
+        i = i + 1
+        more = parse_expr(tokens, i, n)
+        if not more.ok:
+            return StmtStep{stmt: Require(combined), next: more.next, ok: false, error: more.error}
+        combined = Binop("and", combined, more.value)
+        i = more.next
+    StmtStep{stmt: Require(combined), next: i, ok: true, error: ""}
 
 fn parse_let_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
     if start >= n:
         return StmtStep{stmt: Let("", LitInt(0)), next: start, ok: false, error: "expected name after `let`"}
+    if match_tok(tokens, start, n, "LBrace"):
+        return parse_let_destructure(tokens, start + 1, n)
     name = ident_of(at(tokens, start).tok)
     if name == "":
         return StmtStep{stmt: Let("", LitInt(0)), next: start, ok: false, error: "expected name after `let`"}
@@ -231,6 +691,156 @@ fn parse_let_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
     if not step.ok:
         return StmtStep{stmt: Let(name, LitInt(0)), next: step.next, ok: false, error: step.error}
     StmtStep{stmt: Let(name, step.value), next: step.next, ok: true, error: ""}
+
+# `let { a, b, c } = expr` — bind every listed name to the same-named
+# MapV field. Caller is responsible for ensuring expr yields a MapV;
+# missing field → NoneV binding.
+fn parse_let_destructure(tokens: [Token], start: int, n: int) -> StmtStep:
+    mut i = skip_newlines(tokens, start, n)
+    mut names = []
+    loop:
+        if i >= n:
+            break
+        if match_tok(tokens, i, n, "RBrace"):
+            break
+        nm = ident_of(at(tokens, i).tok)
+        if nm == "":
+            return StmtStep{stmt: Let("", LitInt(0)), next: i, ok: false, error: "expected field name in let-destructure"}
+        names = push(names, nm)
+        i = i + 1
+        if match_tok(tokens, i, n, "Comma"):
+            i = i + 1
+        i = skip_newlines(tokens, i, n)
+    if not match_tok(tokens, i, n, "RBrace"):
+        return StmtStep{stmt: Let("", LitInt(0)), next: i, ok: false, error: "expected `}` after destructure names"}
+    i = i + 1
+    if not match_tok(tokens, i, n, "Assign"):
+        return StmtStep{stmt: Let("", LitInt(0)), next: i, ok: false, error: "expected `=` after destructure pattern"}
+    i = i + 1
+    val = parse_expr(tokens, i, n)
+    if not val.ok:
+        return StmtStep{stmt: Let("", LitInt(0)), next: val.next, ok: false, error: val.error}
+    StmtStep{stmt: LetDestructure(names, val.value), next: val.next, ok: true, error: ""}
+
+# `spawn Kind { f: v, f: v, ... }` — re-uses the brace field-block
+# parser from emit. Host registers a constructor for Kind and acts on
+# the resulting AstraSpawnKind(kind, fields) effect.
+fn parse_spawn_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
+    if start >= n:
+        return StmtStep{stmt: SpawnEntity("", []), next: start, ok: false, error: "expected Kind after `spawn`"}
+    kind = ident_of(at(tokens, start).tok)
+    if kind == "":
+        return StmtStep{stmt: SpawnEntity("", []), next: start, ok: false, error: "expected Kind after `spawn`"}
+    mut i = start + 1
+    mut fields = []
+    if match_tok(tokens, i, n, "LBrace"):
+        brace = parse_field_block(tokens, i, n)
+        if not brace.ok:
+            return StmtStep{stmt: SpawnEntity(kind, []), next: brace.next, ok: false, error: brace.error}
+        fields = brace.fields
+        i = brace.next
+    StmtStep{stmt: SpawnEntity(kind, fields), next: i, ok: true, error: ""}
+
+# `destroy EXPR` — EXPR yields a RefV/IntV. For bulk delete use
+# `each x in list: destroy x.eid` — one consistent way to iterate.
+fn parse_destroy_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
+    step = parse_expr(tokens, start, n)
+    if not step.ok:
+        return StmtStep{stmt: DestroyEntity(LitInt(0)), next: step.next, ok: false, error: step.error}
+    StmtStep{stmt: DestroyEntity(step.value), next: step.next, ok: true, error: ""}
+
+# `set NAME = EXPR` (resource/var write) or `set EXPR.FIELD = EXPR`
+# (entity field write). Disambiguates by peeking after the first ident.
+fn parse_set_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
+    if start >= n:
+        return StmtStep{stmt: SetVar("", LitInt(0)), next: start, ok: false, error: "expected target after `set`"}
+    # Parse target as a postfix expression — VarRef or Field(...).
+    lhs = parse_postfix(tokens, start, n)
+    if not lhs.ok:
+        return StmtStep{stmt: SetVar("", LitInt(0)), next: lhs.next, ok: false, error: lhs.error}
+    mut i = lhs.next
+    if not match_tok(tokens, i, n, "Assign"):
+        return StmtStep{stmt: SetVar("", LitInt(0)), next: i, ok: false, error: "expected `=` after set target"}
+    i = i + 1
+    rhs = parse_expr(tokens, i, n)
+    if not rhs.ok:
+        return StmtStep{stmt: SetVar("", LitInt(0)), next: rhs.next, ok: false, error: rhs.error}
+    # Classify the LHS — VarRef → SetVar; Field → SetField.
+    classify_set(lhs.value, rhs.value, rhs.next)
+
+# Look ahead for `IDENT = ...` or `IDENT.field = ...` so we can treat
+# implicit assignments as set statements without the `set` keyword.
+fn looks_like_assignment(tokens: [Token], start: int, n: int) -> bool:
+    if start >= n:
+        return false
+    if ident_of(at(tokens, start).tok) == "":
+        return false
+    mut i = start + 1
+    loop:
+        if i >= n:
+            break
+        if match_tok(tokens, i, n, "Dot"):
+            i = i + 2
+        else:
+            break
+    match_tok(tokens, i, n, "Assign")
+
+# `if COND: body-stmt` — single-branch conditional. No else. For
+# expression-form conditionals use `if-then-else` inside an expression.
+fn parse_if_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
+    cond_step = parse_expr(tokens, start, n)
+    if not cond_step.ok:
+        return StmtStep{stmt: IfStmt(LitBool(false), []), next: cond_step.next, ok: false, error: cond_step.error}
+    mut i = cond_step.next
+    if not match_tok(tokens, i, n, "Colon"):
+        return StmtStep{stmt: IfStmt(cond_step.value, []), next: i, ok: false, error: "expected `:` after if condition"}
+    i = i + 1
+    i = skip_newlines(tokens, i, n)
+    body_step = parse_stmt(tokens, i, n)
+    if not body_step.ok:
+        return StmtStep{stmt: IfStmt(cond_step.value, []), next: body_step.next, ok: false, error: body_step.error}
+    StmtStep{stmt: IfStmt(cond_step.value, push([], body_step.stmt)), next: body_step.next, ok: true, error: ""}
+
+fn classify_set(lhs: Expr, rhs: Expr, next: int) -> StmtStep:
+    match lhs:
+        VarRef(name) -> StmtStep{stmt: SetVar(name, rhs), next: next, ok: true, error: ""}
+        Field(base, field_name) -> StmtStep{stmt: SetField(base, field_name, rhs), next: next, ok: true, error: ""}
+        _ -> StmtStep{stmt: SetVar("", rhs), next: next, ok: false, error: "set target must be a name or a field access"}
+
+# `for x in EXPR: <body-stmt>` — runtime list iteration inside a rule.
+# Body is one statement (commonly spawn/emit). The expression must
+# yield a ListV at eval time.
+fn parse_foreach_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
+    if start >= n:
+        return StmtStep{stmt: ForEach("", LitInt(0), LitBool(true), []), next: start, ok: false, error: "expected iter name after `for`"}
+    iter_name = ident_of(at(tokens, start).tok)
+    if iter_name == "":
+        return StmtStep{stmt: ForEach("", LitInt(0), LitBool(true), []), next: start, ok: false, error: "expected iter name after `for`"}
+    mut i = start + 1
+    if not match_tok(tokens, i, n, "In"):
+        return StmtStep{stmt: ForEach(iter_name, LitInt(0), LitBool(true), []), next: i, ok: false, error: "expected `in` after iter name"}
+    i = i + 1
+    list_step = parse_postfix(tokens, i, n)
+    if not list_step.ok:
+        return StmtStep{stmt: ForEach(iter_name, LitInt(0), LitBool(true), []), next: list_step.next, ok: false, error: list_step.error}
+    i = list_step.next
+    # Optional `where COND_EXPR`
+    mut filter = LitBool(true)
+    if match_tok(tokens, i, n, "Where"):
+        i = i + 1
+        f_step = parse_expr(tokens, i, n)
+        if not f_step.ok:
+            return StmtStep{stmt: ForEach(iter_name, list_step.value, LitBool(true), []), next: f_step.next, ok: false, error: f_step.error}
+        filter = f_step.value
+        i = f_step.next
+    if not match_tok(tokens, i, n, "Colon"):
+        return StmtStep{stmt: ForEach(iter_name, list_step.value, filter, []), next: i, ok: false, error: "expected `:` after for-each header"}
+    i = i + 1
+    i = skip_newlines(tokens, i, n)
+    body_step = parse_stmt(tokens, i, n)
+    if not body_step.ok:
+        return StmtStep{stmt: ForEach(iter_name, list_step.value, filter, []), next: body_step.next, ok: false, error: body_step.error}
+    StmtStep{stmt: ForEach(iter_name, list_step.value, filter, push([], body_step.stmt)), next: body_step.next, ok: true, error: ""}
 
 # ---- expression grammar (precedence climbing) ----
 #
@@ -314,6 +924,20 @@ fn parse_postfix(tokens: [Token], start: int, n: int) -> ExprStep:
     mut e = head.value
     mut i = head.next
     loop:
+        if match_tok(tokens, i, n, "To"):
+            rhs = parse_unary(tokens, i + 1, n)
+            if not rhs.ok:
+                return rhs
+            e = RangeExpr(e, rhs.value)
+            i = rhs.next
+        else:
+        if match_tok(tokens, i, n, "Through"):
+            rhs = parse_unary(tokens, i + 1, n)
+            if not rhs.ok:
+                return rhs
+            e = RangeExpr(e, Binop("+", rhs.value, LitInt(1)))
+            i = rhs.next
+        else:
         if match_tok(tokens, i, n, "Dot"):
             if i + 1 >= n:
                 return ExprStep{value: e, next: i, ok: false, error: "expected field name after `.`"}
@@ -342,6 +966,20 @@ fn parse_primary(tokens: [Token], start: int, n: int) -> ExprStep:
         return ExprStep{value: LitBool(false), next: start + 1, ok: true, error: ""}
     if match_tok(tokens, start, n, "If"):
         return parse_if_expr(tokens, start + 1, n)
+    if match_tok(tokens, start, n, "Count"):
+        return parse_count_query(tokens, start + 1, n)
+    if match_tok(tokens, start, n, "Exists"):
+        return parse_quantifier(tokens, start + 1, n, "exists")
+    if match_tok(tokens, start, n, "None"):
+        return parse_quantifier(tokens, start + 1, n, "none")
+    if match_tok(tokens, start, n, "Let"):
+        return parse_let_in_expr(tokens, start + 1, n)
+    if match_tok(tokens, start, n, "Match"):
+        return parse_match_expr(tokens, start + 1, n)
+    if match_tok(tokens, start, n, "LBracket"):
+        return parse_list_literal(tokens, start + 1, n)
+    if match_tok(tokens, start, n, "LBrace"):
+        return parse_map_literal(tokens, start + 1, n)
     if match_tok(tokens, start, n, "LParen"):
         inner = parse_expr(tokens, start + 1, n)
         if not inner.ok:
@@ -351,7 +989,8 @@ fn parse_primary(tokens: [Token], start: int, n: int) -> ExprStep:
         return ExprStep{value: inner.value, next: inner.next + 1, ok: true, error: ""}
     name = ident_of(t.tok)
     if name != "":
-        # Ident — could be VarRef or Call(name, args).
+        if match_tok(tokens, start + 1, n, "Assign"):
+            return parse_implicit_let_in(tokens, start, n, name)
         if match_tok(tokens, start + 1, n, "LParen"):
             return parse_call(tokens, start + 2, n, name)
         return ExprStep{value: VarRef(name), next: start + 1, ok: true, error: ""}
@@ -377,6 +1016,219 @@ fn parse_call(tokens: [Token], start: int, n: int, name: Text) -> ExprStep:
         return ExprStep{value: Call(name, args), next: i, ok: false, error: "expected `)` in call"}
     ExprStep{value: Call(name, args), next: i + 1, ok: true, error: ""}
 
+# After `count`, parse: `( NAME in LIST_EXPR where COND_EXPR )`. Iter
+# var binds to each list element when COND_EXPR is evaluated; the result
+# is the number of elements for which COND_EXPR is truthy.
+fn parse_count_query(tokens: [Token], start: int, n: int) -> ExprStep:
+    if not match_tok(tokens, start, n, "LParen"):
+        return ExprStep{value: LitInt(0), next: start, ok: false, error: "expected `(` after `count`"}
+    mut i = start + 1
+    if i >= n:
+        return ExprStep{value: LitInt(0), next: i, ok: false, error: "expected iter name in count"}
+    iter_name = ident_of(at(tokens, i).tok)
+    if iter_name == "":
+        return ExprStep{value: LitInt(0), next: i, ok: false, error: "expected iter name in count"}
+    i = i + 1
+    if not match_tok(tokens, i, n, "In"):
+        return ExprStep{value: LitInt(0), next: i, ok: false, error: "expected `in` after iter name"}
+    i = i + 1
+    list_step = parse_count_list_expr(tokens, i, n)
+    if not list_step.ok:
+        return list_step
+    i = list_step.next
+    if not match_tok(tokens, i, n, "Where"):
+        return ExprStep{value: LitInt(0), next: i, ok: false, error: "expected `where` after list"}
+    i = i + 1
+    cond = parse_expr(tokens, i, n)
+    if not cond.ok:
+        return cond
+    if not match_tok(tokens, cond.next, n, "RParen"):
+        return ExprStep{value: LitInt(0), next: cond.next, ok: false, error: "expected `)` to close count query"}
+    ExprStep{value: CountQuery(iter_name, list_step.value, cond.value), next: cond.next + 1, ok: true, error: ""}
+
+# Parse the list source of a count query — only postfix-level exprs (no
+# binops, since `where` would conflict). Accepts VarRef, Call, Field
+# chains — exactly the shapes a host pre-bakes into ctx.
+fn parse_count_list_expr(tokens: [Token], start: int, n: int) -> ExprStep:
+    parse_postfix(tokens, start, n)
+
+# `exists ITER in LIST where COND` → desugars to `count(...) > 0`.
+# `none   ITER in LIST where COND` → desugars to `count(...) == 0`.
+# Reads as natural English; clamps down the most common count idioms.
+fn parse_quantifier(tokens: [Token], start: int, n: int, kind: Text) -> ExprStep:
+    if start >= n:
+        return ExprStep{value: LitBool(false), next: start, ok: false, error: "expected iter name after quantifier"}
+    iter_name = ident_of(at(tokens, start).tok)
+    if iter_name == "":
+        return ExprStep{value: LitBool(false), next: start, ok: false, error: "expected iter name after quantifier"}
+    mut i = start + 1
+    if not match_tok(tokens, i, n, "In"):
+        return ExprStep{value: LitBool(false), next: i, ok: false, error: "expected `in` after iter name"}
+    i = i + 1
+    list_step = parse_postfix(tokens, i, n)
+    if not list_step.ok:
+        return list_step
+    i = list_step.next
+    if not match_tok(tokens, i, n, "Where"):
+        return ExprStep{value: LitBool(false), next: i, ok: false, error: "expected `where` in quantifier"}
+    i = i + 1
+    cond = parse_expr(tokens, i, n)
+    if not cond.ok:
+        return cond
+    counted = CountQuery(iter_name, list_step.value, cond.value)
+    desugared = if kind == "exists" then Binop(">", counted, LitInt(0)) else Binop("==", counted, LitInt(0))
+    ExprStep{value: desugared, next: cond.next, ok: true, error: ""}
+
+# `from A to B` — same as `A to B`, the `from` keyword just reads more
+# naturally at the start of a range expression. Both produce a RangeExpr.
+fn parse_from_to_range(tokens: [Token], start: int, n: int) -> ExprStep:
+    lo = parse_unary(tokens, start, n)
+    if not lo.ok:
+        return lo
+    mut i = lo.next
+    mut inclusive = false
+    if match_tok(tokens, i, n, "Through"):
+        inclusive = true
+    else:
+        if not match_tok(tokens, i, n, "To"):
+            return ExprStep{value: lo.value, next: i, ok: false, error: "expected `to` or `through` after `from`"}
+    i = i + 1
+    hi = parse_unary(tokens, i, n)
+    if not hi.ok:
+        return hi
+    upper = if inclusive then Binop("+", hi.value, LitInt(1)) else hi.value
+    ExprStep{value: RangeExpr(lo.value, upper), next: hi.next, ok: true, error: ""}
+
+# `match SCRUTINEE: PAT -> RESULT, PAT -> RESULT, _ -> DEFAULT`
+# Pattern is currently an int literal or `_` for wildcard. Arms are
+# comma- or newline-separated. Returns the body of the first matching
+# arm or NoneV when no arm matches and no wildcard is present.
+fn parse_match_expr(tokens: [Token], start: int, n: int) -> ExprStep:
+    scrut = parse_postfix(tokens, start, n)
+    if not scrut.ok:
+        return scrut
+    mut i = scrut.next
+    if not match_tok(tokens, i, n, "Colon"):
+        return ExprStep{value: scrut.value, next: i, ok: false, error: "expected : after match scrutinee"}
+    i = i + 1
+    i = skip_newlines(tokens, i, n)
+    mut arms = []
+    loop:
+        if i >= n:
+            break
+        pat = parse_match_pattern(tokens, i, n)
+        if not pat.ok:
+            break
+        i = pat.next
+        if not match_tok(tokens, i, n, "Arrow"):
+            return ExprStep{value: scrut.value, next: i, ok: false, error: "expected -> after match pattern"}
+        i = i + 1
+        body = parse_expr(tokens, i, n)
+        if not body.ok:
+            return body
+        arms = push(arms, MatchArm{pattern: pat.value, body: body.value})
+        i = body.next
+        if match_tok(tokens, i, n, "Comma"):
+            i = i + 1
+        i = skip_newlines(tokens, i, n)
+    ExprStep{value: MatchExpr(scrut.value, arms), next: i, ok: true, error: ""}
+
+fn parse_match_pattern(tokens: [Token], start: int, n: int) -> ExprStep:
+    if start >= n:
+        return ExprStep{value: LitInt(0), next: start, ok: false, error: "expected pattern"}
+    t = at(tokens, start)
+    name = ident_of(t.tok)
+    if name == "_":
+        return ExprStep{value: VarRef("_"), next: start + 1, ok: true, error: ""}
+    int_v = int_of(t.tok)
+    if int_v >= 0:
+        return ExprStep{value: LitInt(int_v), next: start + 1, ok: true, error: ""}
+    s = text_of(t.tok)
+    if s != "":
+        return ExprStep{value: LitText(s), next: start + 1, ok: true, error: ""}
+    ExprStep{value: LitInt(0), next: start, ok: false, error: "expected literal pattern or _"}
+
+# `NAME = VAL <body-expr>` without the leading `let` keyword. Triggered
+# from parse_primary when an identifier is followed by `=`. Same shape
+# as parse_let_in_expr but starts one token earlier.
+fn parse_implicit_let_in(tokens: [Token], start: int, n: int, name: Text) -> ExprStep:
+    mut i = start + 2
+    val_step = parse_expr(tokens, i, n)
+    if not val_step.ok:
+        return val_step
+    i = skip_newlines(tokens, val_step.next, n)
+    body_step = parse_expr(tokens, i, n)
+    if not body_step.ok:
+        return body_step
+    ExprStep{value: LetIn(name, val_step.value, body_step.value), next: body_step.next, ok: true, error: ""}
+
+# `let NAME = VAL <body-expr>` — binds NAME in scope of the body
+# expression. Newlines between val and body are permitted, so fn bodies
+# can stack lets without `in` glue: `let a = ...\nlet b = ...\na + b`.
+fn parse_let_in_expr(tokens: [Token], start: int, n: int) -> ExprStep:
+    if start >= n:
+        return ExprStep{value: LitInt(0), next: start, ok: false, error: "expected name after `let`"}
+    name = ident_of(at(tokens, start).tok)
+    if name == "":
+        return ExprStep{value: LitInt(0), next: start, ok: false, error: "expected name after `let`"}
+    mut i = start + 1
+    if not match_tok(tokens, i, n, "Assign"):
+        return ExprStep{value: LitInt(0), next: i, ok: false, error: "expected `=` after let name"}
+    i = i + 1
+    val_step = parse_expr(tokens, i, n)
+    if not val_step.ok:
+        return val_step
+    i = skip_newlines(tokens, val_step.next, n)
+    body_step = parse_expr(tokens, i, n)
+    if not body_step.ok:
+        return body_step
+    ExprStep{value: LetIn(name, val_step.value, body_step.value), next: body_step.next, ok: true, error: ""}
+
+# `[ e, e, e ]` list literal. Empty `[]` is allowed.
+fn parse_list_literal(tokens: [Token], start: int, n: int) -> ExprStep:
+    mut i = skip_newlines(tokens, start, n)
+    mut items = []
+    if match_tok(tokens, i, n, "RBracket"):
+        return ExprStep{value: LitList([]), next: i + 1, ok: true, error: ""}
+    loop:
+        item = parse_expr(tokens, i, n)
+        if not item.ok:
+            return item
+        items = push(items, item.value)
+        i = item.next
+        i = skip_newlines(tokens, i, n)
+        if match_tok(tokens, i, n, "Comma"):
+            i = i + 1
+            i = skip_newlines(tokens, i, n)
+        else:
+            break
+    if not match_tok(tokens, i, n, "RBracket"):
+        return ExprStep{value: LitList(items), next: i, ok: false, error: "expected `]` to close list literal"}
+    ExprStep{value: LitList(items), next: i + 1, ok: true, error: ""}
+
+# `{ f: v, f: v }` map literal — same field syntax as emit/spawn but as
+# an expression value. Empty `{}` makes an empty MapV.
+fn parse_map_literal(tokens: [Token], start: int, n: int) -> ExprStep:
+    mut i = skip_newlines(tokens, start, n)
+    mut fields = []
+    if match_tok(tokens, i, n, "RBrace"):
+        return ExprStep{value: MapLit([]), next: i + 1, ok: true, error: ""}
+    loop:
+        f_step = parse_field(tokens, i, n)
+        if not f_step.ok:
+            return ExprStep{value: MapLit(fields), next: f_step.next, ok: false, error: f_step.error}
+        fields = push(fields, f_step.field)
+        i = f_step.next
+        i = skip_newlines(tokens, i, n)
+        if match_tok(tokens, i, n, "Comma"):
+            i = i + 1
+            i = skip_newlines(tokens, i, n)
+        else:
+            break
+    if not match_tok(tokens, i, n, "RBrace"):
+        return ExprStep{value: MapLit(fields), next: i, ok: false, error: "expected RBrace to close map literal"}
+    ExprStep{value: MapLit(fields), next: i + 1, ok: true, error: ""}
+
 # After `if`, parse: cond `then` then_expr `else` else_expr.
 fn parse_if_expr(tokens: [Token], start: int, n: int) -> ExprStep:
     cond = parse_expr(tokens, start, n)
@@ -397,7 +1249,91 @@ fn parse_if_expr(tokens: [Token], start: int, n: int) -> ExprStep:
 # ---- token-matching helpers (string-based to avoid match-everywhere) ----
 
 fn empty_rule() -> Rule:
-    Rule{name: "", params: [], body: [], trigger: ""}
+    Rule{name: "", params: [], body: [], trigger: "", condition: LitBool(true)}
+
+# ---- Substitution: replace VarRef(name) → LitInt(value) throughout
+# an Expr/Stmt/Rule tree. Used by `for IDENT in N..<M: body` expansion
+# to clone the body M-N times with the loop var pinned to each value.
+
+fn subst_expr(e: Expr, name: Text, value: int) -> Expr:
+    match e:
+        LitInt(_) -> e
+        LitText(_) -> e
+        LitBool(_) -> e
+        VarRef(n) -> if n == name then LitInt(value) else VarRef(n)
+        Binop(op, a, b) -> Binop(op, subst_expr(a, name, value), subst_expr(b, name, value))
+        Unop(op, x) -> Unop(op, subst_expr(x, name, value))
+        IfExpr(c, t, e2) -> IfExpr(subst_expr(c, name, value), subst_expr(t, name, value), subst_expr(e2, name, value))
+        Call(n, args) -> Call(n, subst_args(args, name, value, 0, []))
+        Field(b, n) -> Field(subst_expr(b, name, value), n)
+        CountQuery(iter_n, le, ce) -> subst_count(iter_n, le, ce, name, value)
+        LetIn(let_n, ve, be) -> subst_let_in(let_n, ve, be, name, value)
+        LitList(items) -> LitList(subst_args(items, name, value, 0, []))
+        MapLit(fields) -> MapLit(subst_fields(fields, name, value, 0, []))
+        RangeExpr(a, b) -> RangeExpr(subst_expr(a, name, value), subst_expr(b, name, value))
+        MatchExpr(s, arms) -> MatchExpr(subst_expr(s, name, value), subst_match_arms(arms, name, value, 0, []))
+
+fn subst_match_arms(arms: [MatchArm], name: Text, value: int, i: int, acc: [MatchArm]) -> [MatchArm]:
+    if i >= len(arms):
+        acc
+    else:
+        a = at(arms, i)
+        subst_match_arms(arms, name, value, i + 1, push(acc, MatchArm{pattern: a.pattern, body: subst_expr(a.body, name, value)}))
+
+fn subst_let_in(let_n: Text, ve: Expr, be: Expr, name: Text, value: int) -> Expr:
+    new_ve = subst_expr(ve, name, value)
+    new_be = if let_n == name then be else subst_expr(be, name, value)
+    LetIn(let_n, new_ve, new_be)
+
+# CountQuery's iter binding shadows an outer name — if the loop var and
+# the count iter share a name, the count iter wins inside the predicate
+# (but the list-source still binds against the outer scope).
+fn subst_count(iter_n: Text, le: Expr, ce: Expr, name: Text, value: int) -> Expr:
+    new_le = subst_expr(le, name, value)
+    new_ce = if iter_n == name then ce else subst_expr(ce, name, value)
+    CountQuery(iter_n, new_le, new_ce)
+
+fn subst_args(args: [Expr], name: Text, value: int, i: int, acc: [Expr]) -> [Expr]:
+    if i >= len(args):
+        acc
+    else:
+        subst_args(args, name, value, i + 1, push(acc, subst_expr(at(args, i), name, value)))
+
+fn subst_stmt(s: Stmt, name: Text, value: int) -> Stmt:
+    match s:
+        EmitEffect(event, fields) -> EmitEffect(event, subst_fields(fields, name, value, 0, []))
+        Require(cond) -> Require(subst_expr(cond, name, value))
+        Let(n, ve) -> Let(n, subst_expr(ve, name, value))
+        LetDestructure(ns, ve) -> LetDestructure(ns, subst_expr(ve, name, value))
+        SpawnEntity(kind, fields) -> SpawnEntity(kind, subst_fields(fields, name, value, 0, []))
+        DestroyEntity(target) -> DestroyEntity(subst_expr(target, name, value))
+        SetVar(n, ve) -> SetVar(n, subst_expr(ve, name, value))
+        SetField(base, fn_, ve) -> SetField(subst_expr(base, name, value), fn_, subst_expr(ve, name, value))
+        ForEach(iter_n, le, filt, body) -> subst_foreach(iter_n, le, filt, body, name, value)
+        IfStmt(c, body) -> IfStmt(subst_expr(c, name, value), subst_stmts(body, name, value, 0, []))
+
+fn subst_foreach(iter_n: Text, le: Expr, filt: Expr, body: [Stmt], name: Text, value: int) -> Stmt:
+    new_le = subst_expr(le, name, value)
+    if iter_n == name:
+        ForEach(iter_n, new_le, filt, body)
+    else:
+        ForEach(iter_n, new_le, subst_expr(filt, name, value), subst_stmts(body, name, value, 0, []))
+
+fn subst_fields(fields: [FieldExpr], name: Text, value: int, i: int, acc: [FieldExpr]) -> [FieldExpr]:
+    if i >= len(fields):
+        acc
+    else:
+        f = at(fields, i)
+        subst_fields(fields, name, value, i + 1, push(acc, FieldExpr{name: f.name, value: subst_expr(f.value, name, value)}))
+
+fn subst_stmts(stmts: [Stmt], name: Text, value: int, i: int, acc: [Stmt]) -> [Stmt]:
+    if i >= len(stmts):
+        acc
+    else:
+        subst_stmts(stmts, name, value, i + 1, push(acc, subst_stmt(at(stmts, i), name, value)))
+
+fn subst_rule(r: Rule, name: Text, value: int) -> Rule:
+    Rule{name: r.name, params: r.params, body: subst_stmts(r.body, name, value, 0, []), trigger: r.trigger, condition: subst_expr(r.condition, name, value)}
 
 fn newline_token() -> Token:
     Token{tok: Newline, line: 0}
@@ -455,10 +1391,28 @@ fn tok_kind(t: Tok) -> Text:
         Not -> "Not"
         And -> "And"
         Or -> "Or"
+        When -> "When"
+        Every -> "Every"
+        Fn -> "Fn"
+        Const -> "Const"
+        Each -> "Each"
+        To -> "To"
+        From -> "From"
+        Through -> "Through"
+        Exists -> "Exists"
+        None -> "None"
+        Whenever -> "Whenever"
+        Becomes -> "Becomes"
+        Spawned -> "Spawned"
+        Destroyed -> "Destroyed"
+        Component -> "Component"
+        Arrow -> "Arrow"
         LParen -> "LParen"
         RParen -> "RParen"
         LBrace -> "LBrace"
         RBrace -> "RBrace"
+        LBracket -> "LBracket"
+        RBracket -> "RBracket"
         Comma -> "Comma"
         Dot -> "Dot"
         Colon -> "Colon"

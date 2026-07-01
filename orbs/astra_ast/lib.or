@@ -17,6 +17,14 @@ pub enum Expr:
     IfExpr(Expr, Expr, Expr)       # cond then else
     Call(Text, [Expr])             # callee + args
     Field(Expr, Text)              # base.name
+    CountQuery(Text, Expr, Expr)   # count(NAME in LIST where COND) — iter binding, list source, predicate
+    LetIn(Text, Expr, Expr)        # let NAME = VAL <expr> — binds NAME in scope of body expr
+    LitList([Expr])                # [a, b, c] — list literal, evaluates to ListV
+    MapLit([FieldExpr])            # { f: v, f: v } in expression position — evaluates to MapV
+    RangeExpr(Expr, Expr)          # a..<b — half-open int range, evaluates to ListV
+    MatchExpr(Expr, [MatchArm])    # match scrutinee: PAT -> RESULT, ...
+
+pub data MatchArm: pattern: Expr, body: Expr
 
 # A `name: expr` pair inside emit body.
 pub data FieldExpr: name: Text, value: Expr
@@ -26,10 +34,41 @@ pub enum Stmt:
     EmitEffect(Text, [FieldExpr])
     Require(Expr)                  # silent no-op if false
     Let(Text, Expr)                # bind name in env for rest of body
+    LetDestructure([Text], Expr)   # let { a, b } = mapv — bind every name to the same-named MapV field
+    SpawnEntity(Text, [FieldExpr]) # spawn Kind { f: v, ... } — host constructs the typed entity
+    DestroyEntity(Expr)            # destroy expr_yielding_ref — host despawns the ref
+    SetField(Expr, Text, Expr)     # set base.field = value — host applies field mutation
+    SetVar(Text, Expr)             # set name = value — host applies resource/var write
+    ForEach(Text, Expr, Expr, [Stmt])  # for x in list [where pred]: stmts — runtime list iteration with optional filter
+    IfStmt(Expr, [Stmt])               # if cond: body-stmt (single-branch conditional)
 
 # A rule's parameter.
 pub data Param: name: Text, type_name: Text
 
-# A whole rule. `trigger` is empty for plain rules (called by name) and
-# the event name for `on Event(...)` handlers (fired via dispatch).
-pub data Rule: name: Text, params: [Param], body: [Stmt], trigger: Text
+# A whole rule. `trigger` is empty for plain rules (called by name),
+# the event name for `on Event(...)` handlers (fired via dispatch),
+# or "$when"/"$every" for reactive rules (fired by astra_run::tick).
+# For `when EXPR:` the watch expression lives in `condition`; for all
+# other rule kinds it's LitBool(true) so eval logic can ignore it.
+pub data Rule: name: Text, params: [Param], body: [Stmt], trigger: Text, condition: Expr
+
+# A pure helper. Body is a single expression — `let x = ... <expr>`-style
+# multi-line bodies aren't supported yet; one expression suffices for
+# pixel-math / piece-catalog use cases. Called from rule expressions via
+# `Call(name, args)`; the runtime looks the name up in the parsed
+# function table and evaluates the body with args bound to params.
+pub data Function: name: Text, params: [Param], return_type: Text, body: Expr
+
+pub data ConstDecl: name: Text, value: Expr
+
+# An entity declaration — `entity Kind { f: type, ... }`. The host
+# registers a constructor for `Kind` so `spawn Kind { ... }` can produce
+# a real typed entity. Fields are parsed for documentation and future
+# type-checking; the runtime doesn't enforce them yet.
+pub data EntityDecl: name: Text, fields: [Param]
+
+# A component declaration — `component Kind: field:type, field:type`.
+# Declares an ECS component type inline in Astra. atlas_astra registers
+# the type in the world at load time so `spawn Kind { ... }` and
+# `for x in Kind` work without any Orion glue code.
+pub data ComponentDecl: name: Text, fields: [Param]
