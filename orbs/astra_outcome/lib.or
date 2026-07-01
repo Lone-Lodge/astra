@@ -1,0 +1,29 @@
+# astra_outcome — what a rule run yielded.
+#
+# The closed set: three writes (Set / Spawn / Destroy) + one signal
+# (Emit), nothing else. No IO, no mutation, no unbounded loop — the
+# sandbox is the grammar, not a runtime guard.
+
+use astra_value
+
+# One write or signal the rule proposed. Atlas turns these into
+# atlas_event::Event values at the seam.
+pub enum AstraEffect:
+    AstraSet(int, Text, Value)
+    AstraSpawn(int)
+    AstraDestroy(int)
+    AstraEmit(Text, Value)
+
+# One read trace — used by the typed Trace UI to show where a rule
+# looked when it computed its answer.
+pub data Read: entity: int, field: Text
+
+pub data Outcome: effects: [AstraEffect], reads: [Read]
+
+pub fn empty() -> Outcome:
+    Outcome{effects: [], reads: []}
+
+# A failed `require` proposes zero effects: an illegal move is a
+# silent no-op, exactly Atlas's contract.
+pub fn refused() -> Outcome:
+    empty()

@@ -1,0 +1,11 @@
+name = "astra_run"
+version = "0.0.1"
+description = "Astra — top-level run: source → Outcome"
+
+[orbs]
+astra_value = "path:../astra_value"
+astra_outcome = "path:../astra_outcome"
+astra_lexer = "path:../astra_lexer"
+astra_parser = "path:../astra_parser"
+astra_check = "path:../astra_check"
+astra_eval = "path:../astra_eval"

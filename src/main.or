@@ -1,0 +1,48 @@
+use astra_run
+use astra_value
+use astra_outcome
+use io
+
+fn main() -> int:
+    # M1 regression
+    src_rule = "rule scale(x): require x > 0 let d = x*2 emit Scaled()"
+    outcome1 = run(src_rule, "scale", [IntV(5)])
+    print_line("rule scale(5) effects:")
+    print_line(show_int(eff_count(outcome1)))
+
+    # M2: on-event dispatch
+    src_handler = "on Click(x, y): require x > 0 emit Confirmed()"
+    outcome2 = dispatch(src_handler, "Click", [IntV(10), IntV(20)])
+    print_line("dispatch Click(10,20) effects:")
+    print_line(show_int(eff_count(outcome2)))
+    outcome3 = dispatch(src_handler, "Click", [IntV(0 - 1), IntV(20)])
+    print_line("dispatch Click(-1,20) effects (refused):")
+    print_line(show_int(eff_count(outcome3)))
+
+    # Multiple handlers for same event — both fire
+    src_multi = "on Tick(): emit A()\non Tick(): emit B()"
+    outcome4 = dispatch(src_multi, "Tick", [])
+    print_line("dispatch Tick (two handlers) effects:")
+    print_line(show_int(eff_count(outcome4)))
+    0
+
+fn eff_count(o: Outcome) -> int:
+    mut c = 0
+    for _e in o.effects:
+        c = c + 1
+    c
+
+fn show_int(value: int) -> Text:
+    if value == 0:
+        "0"
+    else:
+        digits(value)
+
+fn digits(value: int) -> Text:
+    if value == 0:
+        ""
+    else:
+        digits(value / 10) + glyph(value - (value / 10) * 10)
+
+fn glyph(d: int) -> Text:
+    if d == 0 then "0" else if d == 1 then "1" else if d == 2 then "2" else if d == 3 then "3" else if d == 4 then "4" else if d == 5 then "5" else if d == 6 then "6" else if d == 7 then "7" else if d == 8 then "8" else "9"

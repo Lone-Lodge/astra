@@ -1,0 +1,8 @@
+name = "astra_eval"
+version = "0.0.1"
+description = "Astra — evaluator AST → Outcome"
+
+[orbs]
+astra_ast = "path:../astra_ast"
+astra_outcome = "path:../astra_outcome"
+astra_value = "path:../astra_value"

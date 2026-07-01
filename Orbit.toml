@@ -1,0 +1,9 @@
+[package]
+name = "astra"
+version = "0.0.1"
+description = "Astra — a small typed host-agnostic language for authored game logic. Pure Orion."
+
+[orbs]
+astra = "path:orbs/astra"
+io = "*"
+bytes = "*"
