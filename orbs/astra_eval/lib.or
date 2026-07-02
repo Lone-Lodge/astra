@@ -1,7 +1,9 @@
 # astra_eval — walk a Rule's body, produce an Outcome.
 #
-# M1 features: require / let / emit statements; expressions with
+# M1+M2 features: require / let / emit statements; expressions with
 # binops / unops / if-then-else / field access / function calls.
+# Helper `fn` definitions are resolved via the `funcs` table threaded
+# through every evaluator entry point.
 
 use astra_ast
 use astra_outcome
@@ -13,18 +15,54 @@ pub data Binding: name: Text, value: Value
 # A failed `require` aborts the rule with an empty outcome.
 pub data EvalState: env: [Binding], effects: [AstraEffect], refused: bool
 
-# Run a rule body against positional args. Returns an Outcome whose
-# `effects` is the list of proposed effects in source order.
-pub fn run_rule(r: Rule, args: [Value]) -> Outcome:
+# Run a rule body against positional args. `funcs` is the table of pure
+# helpers `Call(name, args)` expressions can dispatch to — pass [] when
+# none are defined.
+pub fn run_rule(r: Rule, args: [Value], funcs: [Function]) -> Outcome:
     env = bind_params(r.params, args, 0, [])
+    run_rule_env(r, env, funcs)
+
+# Run a rule with both positional params AND a ctx-binding list. ctx
+# binds host-supplied free names (e.g. `tray`, `blocks`); params come
+# in after so they shadow ctx on name collision.
+pub fn run_rule_args_ctx(r: Rule, args: [Value], ctx: [Binding], funcs: [Function]) -> Outcome:
+    env = bind_args_into(r.params, args, 0, ctx)
+    run_rule_env(r, env, funcs)
+
+fn bind_args_into(params: [Param], args: [Value], i: int, acc: [Binding]) -> [Binding]:
+    if i >= len(params):
+        acc
+    else:
+        p = at(params, i)
+        v = if i < len(args) then at(args, i) else NoneV
+        bind_args_into(params, args, i + 1, push(acc, Binding{name: p.name, value: v}))
+
+# Same as `run_rule` but the caller supplies the env directly. Used
+# by `astra_run::tick` to inject world-state bindings into `when` rules
+# whose body references free names (e.g. `score`, `hp`) instead of
+# positional params.
+pub fn run_rule_env(r: Rule, env: [Binding], funcs: [Function]) -> Outcome:
     mut state = EvalState{env: env, effects: [], refused: false}
     for stmt in r.body:
         if not state.refused:
-            state = step_stmt(stmt, state)
+            state = step_stmt(stmt, state, funcs)
     if state.refused:
         empty()
     else:
         Outcome{effects: state.effects, reads: []}
+
+# Evaluate an arbitrary expression in `env`. The reactive runtime uses
+# this to test a `when` rule's `condition` *before* deciding whether to
+# fire the body, so a false condition doesn't waste work or accidentally
+# emit effects via partial body evaluation.
+pub fn eval_in_env(e: Expr, env: [Binding], funcs: [Function]) -> Value:
+    eval_expr(e, env, funcs)
+
+# Truthiness check exposed for the runtime — same semantics as the
+# internal `is_truthy` (BoolV → b, IntV → !=0, TextV → non-empty,
+# RefV → true, NoneV → false).
+pub fn value_is_truthy(v: Value) -> bool:
+    is_truthy(v)
 
 fn bind_params(params: [Param], args: [Value], i: int, acc: [Binding]) -> [Binding]:
     if i >= len(params):
@@ -43,14 +81,72 @@ fn lookup(env: [Binding], name: Text) -> Value:
             found = b.value
     found
 
-fn step_stmt(s: Stmt, state: EvalState) -> EvalState:
-    match s:
-        EmitEffect(event, fields) -> EvalState{env: state.env, effects: push(state.effects, emit_to_effect(event, fields, state.env)), refused: false}
-        Require(cond) -> apply_require(cond, state)
-        Let(name, value_expr) -> EvalState{env: push(state.env, Binding{name: name, value: eval_expr(value_expr, state.env)}), effects: state.effects, refused: false}
+fn lookup_func(funcs: [Function], name: Text) -> Function:
+    n = len(funcs)
+    mut found = empty_func()
+    for i in 0..<n:
+        f = at(funcs, i)
+        if f.name == name:
+            found = f
+    found
 
-fn apply_require(cond: Expr, state: EvalState) -> EvalState:
-    v = eval_expr(cond, state.env)
+fn empty_func() -> Function:
+    Function{name: "", params: [], return_type: "", body: LitInt(0)}
+
+fn step_stmt(s: Stmt, state: EvalState, funcs: [Function]) -> EvalState:
+    match s:
+        EmitEffect(event, fields) -> EvalState{env: state.env, effects: push(state.effects, emit_to_effect(event, fields, state.env, funcs)), refused: false}
+        Require(cond) -> apply_require(cond, state, funcs)
+        Let(name, value_expr) -> EvalState{env: push(state.env, Binding{name: name, value: eval_expr(value_expr, state.env, funcs)}), effects: state.effects, refused: false}
+        LetDestructure(names, value_expr) -> apply_let_destructure(names, eval_expr(value_expr, state.env, funcs), state)
+        SpawnEntity(kind, fields) -> EvalState{env: state.env, effects: push(state.effects, spawn_to_effect(kind, fields, state.env, funcs)), refused: false}
+        DestroyEntity(target) -> EvalState{env: state.env, effects: push(state.effects, destroy_to_effect(target, state.env, funcs)), refused: false}
+        SetVar(name, value_expr) -> EvalState{env: state.env, effects: push(state.effects, AstraSetVar(name, eval_expr(value_expr, state.env, funcs))), refused: false}
+        SetField(base, field_name, value_expr) -> EvalState{env: state.env, effects: push(state.effects, set_field_to_effect(base, field_name, value_expr, state.env, funcs)), refused: false}
+        ForEach(iter_name, list_expr, filter_expr, body) -> apply_foreach(iter_name, list_expr, filter_expr, body, state, funcs)
+        IfStmt(cond, body) -> apply_if_stmt(cond, body, state, funcs)
+
+fn apply_if_stmt(cond: Expr, body: [Stmt], state: EvalState, funcs: [Function]) -> EvalState:
+    if is_truthy(eval_expr(cond, state.env, funcs)):
+        run_body_stmts(body, state, funcs, 0)
+    else:
+        state
+
+fn apply_foreach(iter_name: Text, list_expr: Expr, filter_expr: Expr, body: [Stmt], state: EvalState, funcs: [Function]) -> EvalState:
+    src = eval_expr(list_expr, state.env, funcs)
+    match src:
+        ListV(items) -> foreach_items(iter_name, items, filter_expr, body, state, funcs, 0)
+        _ -> state
+
+fn foreach_items(iter_name: Text, items: [Value], filter_expr: Expr, body: [Stmt], state: EvalState, funcs: [Function], i: int) -> EvalState:
+    if i >= len(items) or state.refused:
+        state
+    else:
+        item = at(items, i)
+        iter_env = push(state.env, Binding{name: iter_name, value: item})
+        passes = is_truthy(eval_expr(filter_expr, iter_env, funcs))
+        if passes:
+            iter_state = EvalState{env: iter_env, effects: state.effects, refused: state.refused}
+            after_body = run_body_stmts(body, iter_state, funcs, 0)
+            next_state = EvalState{env: state.env, effects: after_body.effects, refused: after_body.refused}
+            foreach_items(iter_name, items, filter_expr, body, next_state, funcs, i + 1)
+        else:
+            foreach_items(iter_name, items, filter_expr, body, state, funcs, i + 1)
+
+fn run_body_stmts(body: [Stmt], state: EvalState, funcs: [Function], i: int) -> EvalState:
+    if i >= len(body) or state.refused:
+        state
+    else:
+        run_body_stmts(body, step_stmt(at(body, i), state, funcs), funcs, i + 1)
+
+fn apply_let_destructure(names: [Text], src: Value, state: EvalState) -> EvalState:
+    mut env = state.env
+    for name in names:
+        env = push(env, Binding{name: name, value: eval_field(src, name)})
+    EvalState{env: env, effects: state.effects, refused: false}
+
+fn apply_require(cond: Expr, state: EvalState, funcs: [Function]) -> EvalState:
+    v = eval_expr(cond, state.env, funcs)
     if is_truthy(v):
         state
     else:
@@ -62,26 +158,212 @@ fn is_truthy(v: Value) -> bool:
         IntV(n) -> n != 0
         TextV(s) -> len(s) > 0
         RefV(_) -> true
+        MapV(entries) -> len(entries) > 0
+        ListV(items) -> len(items) > 0
         NoneV -> false
 
-fn emit_to_effect(event: Text, fields: [FieldExpr], env: [Binding]) -> AstraEffect:
-    mut first_value = NoneV
-    if len(fields) > 0:
-        f = at(fields, 0)
-        first_value = eval_expr(f.value, env)
-    AstraEmit(event, first_value)
+fn emit_to_effect(event: Text, fields: [FieldExpr], env: [Binding], funcs: [Function]) -> AstraEffect:
+    n = len(fields)
+    if n == 0:
+        AstraEmit(event, NoneV)
+    else:
+        mut entries = []
+        for f in fields:
+            entries = push(entries, ValueField{name: f.name, value: eval_expr(f.value, env, funcs)})
+        AstraEmit(event, MapV(entries))
 
-fn eval_expr(e: Expr, env: [Binding]) -> Value:
+fn spawn_to_effect(kind: Text, fields: [FieldExpr], env: [Binding], funcs: [Function]) -> AstraEffect:
+    mut entries = []
+    for f in fields:
+        entries = push(entries, ValueField{name: f.name, value: eval_expr(f.value, env, funcs)})
+    AstraSpawnKind(kind, entries)
+
+fn destroy_to_effect(target: Expr, env: [Binding], funcs: [Function]) -> AstraEffect:
+    v = eval_expr(target, env, funcs)
+    match v:
+        RefV(id) -> AstraDestroy(id)
+        IntV(id) -> AstraDestroy(id)
+        _ -> AstraDestroy(0 - 1)
+
+fn set_field_to_effect(base: Expr, field_name: Text, value_expr: Expr, env: [Binding], funcs: [Function]) -> AstraEffect:
+    base_v = eval_expr(base, env, funcs)
+    value = eval_expr(value_expr, env, funcs)
+    match base_v:
+        RefV(id) -> AstraSet(id, field_name, value)
+        IntV(id) -> AstraSet(id, field_name, value)
+        _ -> AstraSet(0 - 1, field_name, value)
+
+fn eval_expr(e: Expr, env: [Binding], funcs: [Function]) -> Value:
     match e:
         LitInt(n) -> IntV(n)
         LitText(s) -> TextV(s)
         LitBool(b) -> BoolV(b)
         VarRef(name) -> lookup(env, name)
-        Binop(op, a, b) -> eval_binop(op, eval_expr(a, env), eval_expr(b, env))
-        Unop(op, x) -> eval_unop(op, eval_expr(x, env))
-        IfExpr(c, t, e2) -> if is_truthy(eval_expr(c, env)) then eval_expr(t, env) else eval_expr(e2, env)
-        Call(_name, _args) -> NoneV
-        Field(_base, _name) -> NoneV
+        Binop(op, a, b) -> eval_binop(op, eval_expr(a, env, funcs), eval_expr(b, env, funcs))
+        Unop(op, x) -> eval_unop(op, eval_expr(x, env, funcs))
+        IfExpr(c, t, e2) -> if is_truthy(eval_expr(c, env, funcs)) then eval_expr(t, env, funcs) else eval_expr(e2, env, funcs)
+        Call(name, args) -> eval_call(name, args, env, funcs)
+        Field(base, name) -> eval_field(eval_expr(base, env, funcs), name)
+        CountQuery(iter_name, list_expr, cond_expr) -> eval_count(iter_name, list_expr, cond_expr, env, funcs)
+        LetIn(name, val_expr, body_expr) -> eval_expr(body_expr, push(env, Binding{name: name, value: eval_expr(val_expr, env, funcs)}), funcs)
+        LitList(items) -> ListV(eval_args(items, env, funcs, 0, []))
+        MapLit(fields) -> MapV(eval_map_fields(fields, env, funcs, 0, []))
+        RangeExpr(a, b) -> ListV(build_range(as_int(eval_expr(a, env, funcs)), as_int(eval_expr(b, env, funcs)), []))
+        MatchExpr(scrut, arms) -> eval_match(scrut, arms, env, funcs)
+
+fn eval_match(scrut: Expr, arms: [MatchArm], env: [Binding], funcs: [Function]) -> Value:
+    target = eval_expr(scrut, env, funcs)
+    pick_match_arm(arms, target, env, funcs, 0)
+
+fn pick_match_arm(arms: [MatchArm], target: Value, env: [Binding], funcs: [Function], i: int) -> Value:
+    if i >= len(arms):
+        NoneV
+    else:
+        arm = at(arms, i)
+        if arm_matches(arm.pattern, target, env, funcs):
+            eval_expr(arm.body, env, funcs)
+        else:
+            pick_match_arm(arms, target, env, funcs, i + 1)
+
+fn arm_matches(pattern: Expr, target: Value, env: [Binding], funcs: [Function]) -> bool:
+    match pattern:
+        VarRef(name) -> name == "_"
+        _ -> values_equal(eval_expr(pattern, env, funcs), target)
+
+fn values_equal(a: Value, b: Value) -> bool:
+    if is_text_value(a) or is_text_value(b):
+        text_of_value(a) == text_of_value(b)
+    else:
+        as_int(a) == as_int(b)
+
+# Look up `name` in the function table, bind evaluated args to its
+# params, evaluate its body in the resulting env. Unknown names return
+# NoneV — keeps the language graceful when a rule references a helper
+# that hasn't been defined yet (e.g. during hot-reload mid-edit).
+fn eval_call(name: Text, args: [Expr], env: [Binding], funcs: [Function]) -> Value:
+    if name == "size":
+        eval_builtin_size_of(args, env, funcs)
+    else:
+        if name == "at":
+            eval_builtin_at(args, env, funcs)
+        else:
+            if name == "concat":
+                eval_builtin_concat(args, env, funcs)
+            else:
+                f = lookup_func(funcs, name)
+                if f.name == "":
+                    NoneV
+                else:
+                    evaluated = eval_args(args, env, funcs, 0, [])
+                    # Inherit outer env (consts + ctx bindings), then bind
+                    # params on top so a param can shadow but a fn body still
+                    # sees top-level constants like `board_width`.
+                    call_env = bind_params(f.params, evaluated, 0, env)
+                    eval_expr(f.body, call_env, funcs)
+
+fn eval_builtin_at(args: [Expr], env: [Binding], funcs: [Function]) -> Value:
+    if len(args) < 2:
+        NoneV
+    else:
+        list_v = eval_expr(at(args, 0), env, funcs)
+        i = as_int(eval_expr(at(args, 1), env, funcs))
+        match list_v:
+            ListV(items) -> if i >= 0 and i < len(items) then at(items, i) else NoneV
+            _ -> NoneV
+
+fn eval_builtin_concat(args: [Expr], env: [Binding], funcs: [Function]) -> Value:
+    if len(args) < 2:
+        ListV([])
+    else:
+        a_v = eval_expr(at(args, 0), env, funcs)
+        b_v = eval_expr(at(args, 1), env, funcs)
+        match a_v:
+            ListV(a_items) -> concat_list(a_items, b_v)
+            _ -> b_v
+
+fn concat_list(a_items: [Value], b: Value) -> Value:
+    match b:
+        ListV(b_items) -> ListV(concat_items(a_items, b_items, 0, a_items))
+        _ -> ListV(a_items)
+
+fn concat_items(a: [Value], b: [Value], i: int, acc: [Value]) -> [Value]:
+    if i >= len(b):
+        acc
+    else:
+        concat_items(a, b, i + 1, push(acc, at(b, i)))
+
+fn eval_builtin_range(args: [Expr], env: [Binding], funcs: [Function]) -> Value:
+    if len(args) < 2:
+        ListV([])
+    else:
+        start = as_int(eval_expr(at(args, 0), env, funcs))
+        finish = as_int(eval_expr(at(args, 1), env, funcs))
+        ListV(build_range(start, finish, []))
+
+fn build_range(i: int, finish: int, acc: [Value]) -> [Value]:
+    if i >= finish:
+        acc
+    else:
+        build_range(i + 1, finish, push(acc, IntV(i)))
+
+fn eval_builtin_size_of(args: [Expr], env: [Binding], funcs: [Function]) -> Value:
+    if len(args) == 0:
+        IntV(0)
+    else:
+        v = eval_expr(at(args, 0), env, funcs)
+        match v:
+            ListV(items) -> IntV(len(items))
+            MapV(entries) -> IntV(len(entries))
+            TextV(s) -> IntV(len(s))
+            _ -> IntV(0)
+
+fn eval_args(args: [Expr], env: [Binding], funcs: [Function], i: int, acc: [Value]) -> [Value]:
+    if i >= len(args):
+        acc
+    else:
+        eval_args(args, env, funcs, i + 1, push(acc, eval_expr(at(args, i), env, funcs)))
+
+fn eval_map_fields(fields: [FieldExpr], env: [Binding], funcs: [Function], i: int, acc: [ValueField]) -> [ValueField]:
+    if i >= len(fields):
+        acc
+    else:
+        f = at(fields, i)
+        eval_map_fields(fields, env, funcs, i + 1, push(acc, ValueField{name: f.name, value: eval_expr(f.value, env, funcs)}))
+
+# Field access — `b.col` against a MapV walks its entries for a matching
+# name. Non-MapV bases are NoneV (silent miss, consistent with VarRef on
+# unknown names — the language stays graceful under hot-reload).
+fn eval_field(base: Value, name: Text) -> Value:
+    match base:
+        MapV(entries) -> lookup_field(entries, name)
+        _ -> NoneV
+
+fn lookup_field(entries: [ValueField], name: Text) -> Value:
+    n = len(entries)
+    mut found = NoneV
+    for i in 0..<n:
+        f = at(entries, i)
+        if f.name == name:
+            found = f.value
+    found
+
+# Iterate a ListV, bind each element to `iter_name` in env, evaluate
+# `cond_expr`, count truthy results. Returns IntV(count). Non-list source
+# evaluates as 0 — same gracefulness as Field on a non-MapV.
+fn eval_count(iter_name: Text, list_expr: Expr, cond_expr: Expr, env: [Binding], funcs: [Function]) -> Value:
+    src = eval_expr(list_expr, env, funcs)
+    match src:
+        ListV(items) -> IntV(count_matching(iter_name, items, cond_expr, env, funcs, 0, 0))
+        _ -> IntV(0)
+
+fn count_matching(iter_name: Text, items: [Value], cond_expr: Expr, env: [Binding], funcs: [Function], i: int, acc: int) -> int:
+    if i >= len(items):
+        acc
+    else:
+        item = at(items, i)
+        iter_env = push(env, Binding{name: iter_name, value: item})
+        hit = if is_truthy(eval_expr(cond_expr, iter_env, funcs)) then 1 else 0
+        count_matching(iter_name, items, cond_expr, env, funcs, i + 1, acc + hit)
 
 fn eval_binop(op: Text, a: Value, b: Value) -> Value:
     if op == "and":
@@ -90,7 +372,21 @@ fn eval_binop(op: Text, a: Value, b: Value) -> Value:
         if op == "or":
             BoolV(is_truthy(a) or is_truthy(b))
         else:
-            eval_binop_numeric(op, a, b)
+            if (op == "==" or op == "!=") and (is_text_value(a) or is_text_value(b)):
+                eq = text_of_value(a) == text_of_value(b)
+                if op == "==" then BoolV(eq) else BoolV(not eq)
+            else:
+                eval_binop_numeric(op, a, b)
+
+fn is_text_value(v: Value) -> bool:
+    match v:
+        TextV(_) -> true
+        _ -> false
+
+fn text_of_value(v: Value) -> Text:
+    match v:
+        TextV(s) -> s
+        _ -> ""
 
 fn eval_binop_numeric(op: Text, a: Value, b: Value) -> Value:
     ai = as_int(a)
@@ -123,4 +419,6 @@ fn as_int(v: Value) -> int:
         BoolV(b) -> if b then 1 else 0
         TextV(_) -> 0
         RefV(id) -> id
+        MapV(_) -> 0
+        ListV(items) -> len(items)
         NoneV -> 0

@@ -1,6 +1,7 @@
 use astra_run
 use astra_value
 use astra_outcome
+use astra_eval
 use io
 
 fn main() -> int:
@@ -24,7 +25,209 @@ fn main() -> int:
     outcome4 = dispatch(src_multi, "Tick", [])
     print_line("dispatch Tick (two handlers) effects:")
     print_line(show_int(eff_count(outcome4)))
+
+    # M2.2: reactive `when` — edge-triggered milestones
+    src_when = "when score >= 100: emit Milestone()"
+    ctx_low = [Binding{name: "score", value: IntV(50)}]
+    ctx_hit = [Binding{name: "score", value: IntV(100)}]
+    t1 = tick(src_when, ctx_low, [])
+    print_line("tick score=50 effects (expect 0):")
+    print_line(show_int(eff_count(t1.outcome)))
+    t2 = tick(src_when, ctx_hit, t1.truths)
+    print_line("tick score=100 effects (expect 1, edge):")
+    print_line(show_int(eff_count(t2.outcome)))
+    t3 = tick(src_when, ctx_hit, t2.truths)
+    print_line("tick score=100 again effects (expect 0, level):")
+    print_line(show_int(eff_count(t3.outcome)))
+
+    # M2.3: `every N` periodic — sugar for when(tick % N == 0)
+    src_every = "every 3: emit Pulse()"
+    # Walk ticks 0..6 and count fires per tick. Expected fire ticks: 0, 3, 6.
+    mut prev = []
+    mut total = 0
+    for t in 0..<7:
+        ctx_t = [Binding{name: "tick", value: IntV(t)}]
+        r = tick(src_every, ctx_t, prev)
+        total = total + eff_count(r.outcome)
+        prev = r.truths
+    print_line("every 3 over ticks 0..6 fires (expect 3):")
+    print_line(show_int(total))
+
+    # M2 multi-field: emit Place {col, row, color} carries all 3 fields.
+    # Loaded from disk because Orion interpolates `{...}` inside string
+    # literals, which would clobber the astra field-block syntax.
+    src_mf = read_file("fixtures/multi_field.astra")
+    out_mf = run(src_mf, "place", [])
+    print_line("multi-field effects (expect 1):")
+    print_line(show_int(eff_count(out_mf)))
+    print_line("multi-field emit fields (expect 3):")
+    print_line(show_int(first_effect_field_count(out_mf)))
+
+    # M2 fn helpers: rule body calls pure functions defined in same file
+    src_fn = read_file("fixtures/fn_call.astra")
+    out_dbl = run(src_fn, "scaled", [IntV(7)])
+    print_line("double(7) via fn helper (expect 14):")
+    print_line(show_int(first_field_int(out_dbl)))
+    out_px = run(src_fn, "click", [IntV(220)])
+    print_line("pixel_to_col(220) via fn helper (expect 2):")
+    print_line(show_int(first_field_int(out_px)))
+
+    # M3 queries: bind a ListV of entity-record MapVs into ctx, run
+    # `count(x in items where x.field == value)` over it.
+    src_q = read_file("fixtures/count_query.astra")
+    item_records = build_items()
+    items = ListV(item_records)
+    ctx_q = [Binding{name: "items", value: items}]
+    out_reds = run_rule_in_ctx(src_q, "reds", ctx_q)
+    print_line("count reds (expect 2):")
+    print_line(show_int(first_field_int(out_reds)))
+    out_row3 = run_rule_in_ctx(src_q, "row3", ctx_q)
+    print_line("count row==3 (expect 2):")
+    print_line(show_int(first_field_int(out_row3)))
+
+    # M3 bounded `for` — expands at parse time to N copies of the body
+    # with iter var substituted. Verify only r=2 fires (the matching
+    # `when r == 2:` rule).
+    src_for = read_file("fixtures/for_loop.astra")
+    # tick all three rules in one shot; cold start so all true conditions
+    # fire on first transition.
+    fr1 = tick(src_for, [], [])
+    print_line("for-loop fires at cold tick (expect 1, only r=2):")
+    print_line(show_int(eff_count(fr1.outcome)))
+    fr2 = tick(src_for, [], fr1.truths)
+    print_line("for-loop second tick (expect 0, no edges):")
+    print_line(show_int(eff_count(fr2.outcome)))
+
+    # Typed Spawn: `entity Kind { ... }` + `spawn Kind { ... }` produces
+    # AstraSpawnKind(kind, fields) which atlas routes to a per-kind
+    # channel for the host to construct the real component.
+    src_sp = read_file("fixtures/entity_spawn.astra")
+    out_sp = run(src_sp, "make_block", [IntV(3), IntV(5)])
+    print_line("spawn Block effect count (expect 1):")
+    print_line(show_int(eff_count(out_sp)))
+    print_line("spawn fields (expect 3):")
+    print_line(show_int(spawn_field_count(out_sp)))
+
+    # Runtime foreach: on PlacePiece(col, row, color, cells) fans
+    # `spawn Block` per cell. Pass a 4-cell square piece.
+    src_fe = read_file("fixtures/foreach_spawn.astra")
+    sq_cells = build_square_cells()
+    out_fe = dispatch(src_fe, "PlacePiece", [IntV(2), IntV(7), TextV("magenta"), ListV(sq_cells)])
+    print_line("PlacePiece spawns (expect 4):")
+    print_line(show_int(eff_count(out_fe)))
+
+    # Iter 16: implicit let-in (no `let` keyword)
+    src_imp = read_file("fixtures/implicit_let.astra")
+    print_line("implicit let (double_plus(5) expect 11):")
+    print_line(show_int(int_of_value(eval_fn(src_imp, "double_plus", [IntV(5)]))))
+
+    # Iter 18: type-free params + no fn keyword
+    src_nt = read_file("fixtures/notypes.astra")
+    print_line("stack(3, 4) expect 8:")
+    print_line(show_int(int_of_value(eval_fn(src_nt, "stack", [IntV(3), IntV(4)]))))
+
+    # Iter 5: list/map literals + eval_fn
+    src_lit = read_file("fixtures/literals.astra")
+    v1 = eval_fn(src_lit, "pick_a", [IntV(2)])
+    print_line("count records with a==2 (expect 1):")
+    print_line(show_int(int_of_value(v1)))
+    v2 = eval_fn(src_lit, "pick_a", [IntV(99)])
+    print_line("count records with a==99 (expect 0):")
+    print_line(show_int(int_of_value(v2)))
     0
+
+# 2x2 square piece, encoded as MapV records {dc, dr}.
+fn build_square_cells() -> [Value]:
+    a = cell_map(0, 0)
+    b = cell_map(1, 0)
+    c = cell_map(0, 1)
+    d = cell_map(1, 1)
+    push(push(push(push([], a), b), c), d)
+
+fn cell_map(dc: int, dr: int) -> Value:
+    fields = push(push([], ValueField{name: "dc", value: IntV(dc)}), ValueField{name: "dr", value: IntV(dr)})
+    MapV(fields)
+
+# Pull the first effect, assert it's AstraSpawnKind, return field count.
+fn spawn_field_count(o: Outcome) -> int:
+    if len(o.effects) == 0:
+        0
+    else:
+        e = at(o.effects, 0)
+        match e:
+            AstraSpawnKind(_kind, fields) -> len(fields)
+            _ -> 0
+
+# Small helper: run a parameterless rule with a pre-built env. The
+# regular `run` binds args to rule params; here we want free names
+# (`items`) bound directly. We use `tick` semantics? No — that's `when`-
+# only. Instead use the dispatch path with a synthetic event handler.
+# Simpler: inject by re-using run() but with a paren-form rule that
+# has no params; the rule body references the ctx names which are
+# absent — fails. We have to plumb env into a named-rule call.
+#
+# Approach: write the fixtures so the rule takes `items` as a param,
+# then pass [items] to run().
+fn run_rule_in_ctx(src: Text, rule_name: Text, ctx: [Binding]) -> Outcome:
+    # Re-use the public `tick` machinery: dummy-source a `when true: emit ...`
+    # would over-fire. Instead: call run() with the ctx bindings flattened
+    # to positional args matching the rule's params, by name order. The
+    # fixtures here use `items` as the first param so [items.value] works.
+    args = ctx_values_in_order(ctx)
+    run(src, rule_name, args)
+
+fn ctx_values_in_order(ctx: [Binding]) -> [Value]:
+    n = len(ctx)
+    mut out = []
+    for i in 0..<n:
+        out = push(out, at(ctx, i).value)
+    out
+
+# Three synthetic entity records: two red (rows 3 and 5), one blue (row 3).
+fn build_items() -> [Value]:
+    a = make_record("red", 3)
+    b = make_record("red", 5)
+    c = make_record("blue", 3)
+    push(push(push([], a), b), c)
+
+fn make_record(color: Text, row: int) -> Value:
+    fields = push(push([], ValueField{name: "color", value: TextV(color)}), ValueField{name: "row", value: IntV(row)})
+    MapV(fields)
+
+fn first_effect_field_count(o: Outcome) -> int:
+    if len(o.effects) == 0:
+        0
+    else:
+        e = at(o.effects, 0)
+        match e:
+            AstraEmit(_event, v) -> map_value_size(v)
+            _ -> 0
+
+fn map_value_size(v: Value) -> int:
+    match v:
+        MapV(entries) -> len(entries)
+        _ -> 0
+
+# Pull the first MapV entry's IntV out — used by fn-helper tests to
+# assert the emitted payload value.
+fn first_field_int(o: Outcome) -> int:
+    if len(o.effects) == 0:
+        0 - 1
+    else:
+        e = at(o.effects, 0)
+        match e:
+            AstraEmit(_event, v) -> first_map_int(v)
+            _ -> 0 - 1
+
+fn first_map_int(v: Value) -> int:
+    match v:
+        MapV(entries) -> if len(entries) == 0 then 0 - 1 else int_of_value(at(entries, 0).value)
+        _ -> 0 - 1
+
+fn int_of_value(v: Value) -> int:
+    match v:
+        IntV(n) -> n
+        _ -> 0 - 1
 
 fn eff_count(o: Outcome) -> int:
     mut c = 0

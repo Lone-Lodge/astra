@@ -57,55 +57,55 @@ pub fn parse(tokens: [Token]) -> ParseResult:
                     err_msg = cstep.error
                     err_line = t.line
             else:
-            if match_tok(tokens, i, n, "Const"):
-                cstep = parse_const_decl(tokens, i + 1, n)
-                if cstep.ok:
-                    consts = push(consts, cstep.cnst)
-                    i = cstep.next
-                else:
-                    failed = true
-                    err_msg = cstep.error
-                    err_line = t.line
-            else:
-            if match_tok(tokens, i, n, "Fn"):
-                fstep = parse_function(tokens, i + 1, n)
-                if fstep.ok:
-                    functions = push(functions, fstep.func)
-                    i = fstep.next
-                else:
-                    failed = true
-                    err_msg = fstep.error
-                    err_line = t.line
-            else:
-                if match_tok(tokens, i, n, "Entity"):
-                    estep = parse_entity_decl(tokens, i + 1, n)
-                    if estep.ok:
-                        entities = push(entities, estep.entity)
-                        i = estep.next
+                if match_tok(tokens, i, n, "Const"):
+                    kstep = parse_const_decl(tokens, i + 1, n)
+                    if kstep.ok:
+                        consts = push(consts, kstep.cnst)
+                        i = kstep.next
                     else:
                         failed = true
-                        err_msg = estep.error
+                        err_msg = kstep.error
                         err_line = t.line
                 else:
-                    if match_tok(tokens, i, n, "Each"):
-                        fstep = parse_for_loop(tokens, i + 1, n)
+                    if match_tok(tokens, i, n, "Fn"):
+                        fstep = parse_function(tokens, i + 1, n)
                         if fstep.ok:
-                            for r in fstep.rules:
-                                rules = push(rules, r)
+                            functions = push(functions, fstep.func)
                             i = fstep.next
                         else:
                             failed = true
                             err_msg = fstep.error
                             err_line = t.line
                     else:
-                        step = parse_rule(tokens, i, n)
-                        if step.ok:
-                            rules = push(rules, step.rule)
-                            i = step.next
+                        if match_tok(tokens, i, n, "Entity"):
+                            estep = parse_entity_decl(tokens, i + 1, n)
+                            if estep.ok:
+                                entities = push(entities, estep.entity)
+                                i = estep.next
+                            else:
+                                failed = true
+                                err_msg = estep.error
+                                err_line = t.line
                         else:
-                            failed = true
-                            err_msg = step.error
-                            err_line = t.line
+                            if match_tok(tokens, i, n, "Each"):
+                                floop = parse_for_loop(tokens, i + 1, n)
+                                if floop.ok:
+                                    for r in floop.rules:
+                                        rules = push(rules, r)
+                                    i = floop.next
+                                else:
+                                    failed = true
+                                    err_msg = floop.error
+                                    err_line = t.line
+                            else:
+                                step = parse_rule(tokens, i, n)
+                                if step.ok:
+                                    rules = push(rules, step.rule)
+                                    i = step.next
+                                else:
+                                    failed = true
+                                    err_msg = step.error
+                                    err_line = t.line
     if failed:
         ParseResult{rules: [], functions: [], entities: [], consts: [], components: [], ok: false, error: ParseError{message: err_msg, line: err_line}}
     else:
@@ -754,8 +754,11 @@ fn parse_destroy_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
 fn parse_set_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
     if start >= n:
         return StmtStep{stmt: SetVar("", LitInt(0)), next: start, ok: false, error: "expected target after `set`"}
-    # Parse target as a postfix expression — VarRef or Field(...).
-    lhs = parse_postfix(tokens, start, n)
+    # Parse target as bare IDENT (+ optional .field chain). Cannot use
+    # parse_postfix here because parse_primary would grab `IDENT = VAL`
+    # as an implicit let-in expression, consuming the RHS and leaving
+    # nothing for our own Assign match.
+    lhs = parse_assign_target(tokens, start, n)
     if not lhs.ok:
         return StmtStep{stmt: SetVar("", LitInt(0)), next: lhs.next, ok: false, error: lhs.error}
     mut i = lhs.next
@@ -767,6 +770,30 @@ fn parse_set_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
         return StmtStep{stmt: SetVar("", LitInt(0)), next: rhs.next, ok: false, error: rhs.error}
     # Classify the LHS — VarRef → SetVar; Field → SetField.
     classify_set(lhs.value, rhs.value, rhs.next)
+
+# Parse `IDENT[.field]*` as a set target. Standalone helper (not going
+# through parse_postfix/primary) because the primary path hijacks
+# `IDENT = ...` into an implicit let-in expression.
+fn parse_assign_target(tokens: [Token], start: int, n: int) -> ExprStep:
+    if start >= n:
+        return ExprStep{value: LitInt(0), next: start, ok: false, error: "expected assign target"}
+    name = ident_of(at(tokens, start).tok)
+    if name == "":
+        return ExprStep{value: LitInt(0), next: start, ok: false, error: "expected assign target name"}
+    mut e = VarRef(name)
+    mut i = start + 1
+    loop:
+        if match_tok(tokens, i, n, "Dot"):
+            if i + 1 >= n:
+                return ExprStep{value: e, next: i, ok: false, error: "expected field name after `.`"}
+            field = ident_of(at(tokens, i + 1).tok)
+            if field == "":
+                return ExprStep{value: e, next: i, ok: false, error: "expected field name after `.`"}
+            e = Field(e, field)
+            i = i + 2
+        else:
+            break
+    ExprStep{value: e, next: i, ok: true, error: ""}
 
 # Look ahead for `IDENT = ...` or `IDENT.field = ...` so we can treat
 # implicit assignments as set statements without the `set` keyword.
@@ -837,10 +864,26 @@ fn parse_foreach_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
         return StmtStep{stmt: ForEach(iter_name, list_step.value, filter, []), next: i, ok: false, error: "expected `:` after for-each header"}
     i = i + 1
     i = skip_newlines(tokens, i, n)
-    body_step = parse_stmt(tokens, i, n)
-    if not body_step.ok:
-        return StmtStep{stmt: ForEach(iter_name, list_step.value, filter, []), next: body_step.next, ok: false, error: body_step.error}
-    StmtStep{stmt: ForEach(iter_name, list_step.value, filter, push([], body_step.stmt)), next: body_step.next, ok: true, error: ""}
+    # Body: consume stmts until next rule-starter or EOF. Astra has no
+    # INDENT/DEDENT tokens so we can't detect exact dedent; we rely on
+    # scripts terminating the each's body with either the next rule/on/when
+    # or EOF. Same convention as parse_rule's body reader.
+    mut body_stmts = []
+    loop:
+        if i >= n:
+            break
+        if at_rule_starter(tokens, i, n):
+            break
+        t = at(tokens, i)
+        if is_newline(t.tok):
+            i = i + 1
+        else:
+            step = parse_stmt(tokens, i, n)
+            if not step.ok:
+                return StmtStep{stmt: ForEach(iter_name, list_step.value, filter, body_stmts), next: step.next, ok: false, error: step.error}
+            body_stmts = push(body_stmts, step.stmt)
+            i = step.next
+    StmtStep{stmt: ForEach(iter_name, list_step.value, filter, body_stmts), next: i, ok: true, error: ""}
 
 # ---- expression grammar (precedence climbing) ----
 #
@@ -1230,18 +1273,26 @@ fn parse_map_literal(tokens: [Token], start: int, n: int) -> ExprStep:
     ExprStep{value: MapLit(fields), next: i + 1, ok: true, error: ""}
 
 # After `if`, parse: cond `then` then_expr `else` else_expr.
+# Newlines/indent between `then EXPR` and `else` are permitted so fn
+# bodies can use the layout.astra style:
+#   if cond then A
+#   else
+#       B
 fn parse_if_expr(tokens: [Token], start: int, n: int) -> ExprStep:
     cond = parse_expr(tokens, start, n)
     if not cond.ok:
         return cond
-    if not match_tok(tokens, cond.next, n, "Then"):
-        return ExprStep{value: cond.value, next: cond.next, ok: false, error: "expected `then`"}
-    then_step = parse_expr(tokens, cond.next + 1, n)
+    cond_next = skip_newlines(tokens, cond.next, n)
+    if not match_tok(tokens, cond_next, n, "Then"):
+        return ExprStep{value: cond.value, next: cond_next, ok: false, error: "expected `then`"}
+    then_step = parse_expr(tokens, cond_next + 1, n)
     if not then_step.ok:
         return then_step
-    if not match_tok(tokens, then_step.next, n, "Else"):
-        return ExprStep{value: then_step.value, next: then_step.next, ok: false, error: "expected `else`"}
-    else_step = parse_expr(tokens, then_step.next + 1, n)
+    then_next = skip_newlines(tokens, then_step.next, n)
+    if not match_tok(tokens, then_next, n, "Else"):
+        return ExprStep{value: then_step.value, next: then_next, ok: false, error: "expected `else`"}
+    else_start = skip_newlines(tokens, then_next + 1, n)
+    else_step = parse_expr(tokens, else_start, n)
     if not else_step.ok:
         return else_step
     ExprStep{value: IfExpr(cond.value, then_step.value, else_step.value), next: else_step.next, ok: true, error: ""}

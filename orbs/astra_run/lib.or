@@ -133,6 +133,14 @@ pub fn compile_parse_result(source: Text) -> ParseResult:
     parse(lex_result.tokens)
 
 fn compile(source: Text) -> Compiled:
+    # Memoise on source text — the same script bundle is dispatched
+    # every frame (60Hz) so lex+parse dominates without a cache.
+    # Slot map keys on source directly; the runtime hashes the String
+    # once per lookup, which is O(N) but a single memcmp vs re-lexing.
+    cache_key = "astra:compiled_v1:" + source
+    cached = slot_get(cache_key)
+    if type_of(cached) == "data":
+        return cached
     lex_result = lex(source)
     if not lex_result.ok:
         return Compiled{rules: [], functions: [], consts: []}
@@ -140,7 +148,9 @@ fn compile(source: Text) -> Compiled:
     if not parse_result.ok:
         return Compiled{rules: [], functions: [], consts: []}
     consts = eval_consts(parse_result.consts, parse_result.functions, 0, [])
-    Compiled{rules: parse_result.rules, functions: parse_result.functions, consts: consts}
+    fresh = Compiled{rules: parse_result.rules, functions: parse_result.functions, consts: consts}
+    slot_set(cache_key, fresh)
+    fresh
 
 fn eval_consts(decls: [ConstDecl], funcs: [Function], i: int, acc: [Binding]) -> [Binding]:
     if i >= len(decls):

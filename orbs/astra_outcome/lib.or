@@ -8,10 +8,17 @@ use astra_value
 
 # One write or signal the rule proposed. Atlas turns these into
 # atlas_event::Event values at the seam.
+#
+# `AstraSpawnKind(kind, fields)` carries the type name + per-field
+# values so the host can construct a real typed component. The atlas
+# bridge fans it out as ToChannel("astra:spawn:Kind", payload_map);
+# the host listens per-kind and does the actual ECS insert.
 pub enum AstraEffect:
     AstraSet(int, Text, Value)
     AstraSpawn(int)
+    AstraSpawnKind(Text, [ValueField])
     AstraDestroy(int)
+    AstraSetVar(Text, Value)
     AstraEmit(Text, Value)
 
 # One read trace — used by the typed Trace UI to show where a rule

@@ -370,7 +370,8 @@ fn keyword_of(text: Text) -> Tok:
     else if text == "test" then Test
     else if text == "apply" then Apply
     else if text == "expect" then Expect
-    else if text == "tick" then Tick
+    # `tick` intentionally not reserved — atlas_astra auto-injects it
+    # as a ctx binding so scripts use it as a regular identifier.
     else if text == "if" then If
     else if text == "then" then Then
     else if text == "else" then Else

@@ -1,0 +1,5 @@
+fn double(n: int) -> int: n * 2
+fn pixel_to_col(x: int) -> int: (x - 100) / 60
+
+rule scaled(x): emit Out { v: double(x) }
+rule click(x): emit Hit { col: pixel_to_col(x) }
