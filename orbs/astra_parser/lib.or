@@ -14,7 +14,7 @@ pub data ParseError: message: Text, line: int
 # `rule`/`on`/`when`/`every` bodies; `entities` are typed authoring
 # declarations the host uses to register constructors for `spawn Kind`;
 # `components` are ECS component type declarations (`component Kind: f:t`).
-pub data ParseResult: rules: [Rule], functions: [Function], entities: [EntityDecl], consts: [ConstDecl], components: [ComponentDecl], ok: bool, error: ParseError
+pub data ParseResult: rules: [Rule], functions: [Function], entities: [EntityDecl], consts: [ConstDecl], components: [ComponentDecl], uses: [Text], ok: bool, error: ParseError
 
 pub fn parse(tokens: [Token]) -> ParseResult:
     n = len(tokens)
@@ -24,18 +24,32 @@ pub fn parse(tokens: [Token]) -> ParseResult:
     mut entities = []
     mut consts = []
     mut components = []
+    mut uses = []
     mut failed = false
     mut err_msg = ""
     mut err_line = 0
-    # Skip leading newlines.
+    # Leading newlines + `use NAME` directives (engine bundling metadata,
+    # conventionally first in the file).
     loop:
         if i >= n:
             break
-        t = at(tokens, i)
-        if is_newline(t.tok):
+        if failed:
+            break
+        t0 = at(tokens, i)
+        if is_newline(t0.tok):
             i = i + 1
         else:
-            break
+            if match_tok(tokens, i, n, "Use"):
+                ustep = parse_use_decl(tokens, i + 1, n)
+                if ustep.ok:
+                    uses = push(uses, ustep.name)
+                    i = ustep.next
+                else:
+                    failed = true
+                    err_msg = ustep.error
+                    err_line = t0.line
+            else:
+                break
     loop:
         if i >= n:
             break
@@ -107,9 +121,20 @@ pub fn parse(tokens: [Token]) -> ParseResult:
                                     err_msg = step.error
                                     err_line = t.line
     if failed:
-        ParseResult{rules: [], functions: [], entities: [], consts: [], components: [], ok: false, error: ParseError{message: err_msg, line: err_line}}
+        ParseResult{rules: [], functions: [], entities: [], consts: [], components: [], uses: [], ok: false, error: ParseError{message: err_msg, line: err_line}}
     else:
-        ParseResult{rules: rules, functions: functions, entities: entities, consts: consts, components: components, ok: true, error: ParseError{message: "", line: 0}}
+        ParseResult{rules: rules, functions: functions, entities: entities, consts: consts, components: components, uses: uses, ok: true, error: ParseError{message: "", line: 0}}
+
+data UseStep: name: Text, next: int, ok: bool, error: Text
+
+fn parse_use_decl(tokens: [Token], start: int, n: int) -> UseStep:
+    if start >= n:
+        UseStep{name: "", next: start, ok: false, error: "expected a name after `use`"}
+    else:
+        t = at(tokens, start)
+        match t.tok:
+            Ident(name) -> UseStep{name: name, next: start + 1, ok: true, error: ""}
+            _ -> UseStep{name: "", next: start, ok: false, error: "expected a name after `use`"}
 
 # ---- rule = "rule" IDENT "(" ")" ":" NEWLINE stmts ----
 
@@ -1415,6 +1440,7 @@ fn tok_kind(t: Tok) -> Text:
         Rule -> "Rule"
         Record -> "Record"
         RequireKw -> "Require"
+        UseKw -> "Use"
         LetKw -> "Let"
         Set -> "Set"
         SpawnKw -> "Spawn"

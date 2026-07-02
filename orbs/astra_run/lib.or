@@ -129,7 +129,7 @@ fn prev_truth_at(prev: [bool], i: int) -> bool:
 pub fn compile_parse_result(source: Text) -> ParseResult:
     lex_result = lex(source)
     if not lex_result.ok:
-        return ParseResult{rules: [], functions: [], entities: [], consts: [], components: [], ok: false, error: ParseError{message: lex_result.error.message, line: lex_result.error.line}}
+        return ParseResult{rules: [], functions: [], entities: [], consts: [], components: [], uses: [], ok: false, error: ParseError{message: lex_result.error.message, line: lex_result.error.line}}
     parse(lex_result.tokens)
 
 fn compile(source: Text) -> Compiled:

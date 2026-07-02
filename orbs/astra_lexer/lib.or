@@ -58,6 +58,7 @@ pub enum Tok:
     Exists
     None
     Whenever
+    UseKw
     Becomes
     Spawned
     Destroyed
@@ -393,6 +394,7 @@ fn keyword_of(text: Text) -> Tok:
     else if text == "const" then Const
     else if text == "each" then Each
     else if text == "to" then To
+    else if text == "use" then UseKw
     else if text == "exists" then Exists
     else if text == "none" then None
     else if text == "becomes" then Becomes
