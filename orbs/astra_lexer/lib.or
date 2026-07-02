@@ -139,7 +139,7 @@ pub fn lex(source: Text) -> LexResult:
                             err_line = line
                     else:
                         # digit → int
-                        if is_digit(c):
+                        if alx_is_digit(c):
                             res = scan_int(bs, i, n, line)
                             if res.ok:
                                 tokens = push(tokens, Token{tok: Int(res.value), line: line})
@@ -173,14 +173,14 @@ pub fn lex(source: Text) -> LexResult:
 
 # ---- char predicates ----
 
-fn is_digit(c: int) -> bool:
+fn alx_is_digit(c: int) -> bool:
     c >= 48 and c <= 57
 
 fn is_alpha(c: int) -> bool:
     (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or c == 95
 
 fn is_alnum(c: int) -> bool:
-    is_alpha(c) or is_digit(c)
+    is_alpha(c) or alx_is_digit(c)
 
 # ---- scanners ----
 
@@ -230,7 +230,7 @@ fn scan_int(bs: [int], start: int, n: int, line: int) -> IntStep:
         if i >= n:
             break
         c = at(bs, i)
-        if not is_digit(c):
+        if not alx_is_digit(c):
             break
         value = value * 10 + (c - 48)
         i = i + 1

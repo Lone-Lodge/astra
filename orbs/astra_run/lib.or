@@ -137,10 +137,11 @@ fn compile(source: Text) -> Compiled:
     # every frame (60Hz) so lex+parse dominates without a cache.
     # Slot map keys on source directly; the runtime hashes the String
     # once per lookup, which is O(N) but a single memcmp vs re-lexing.
+    # slot_has instead of type_of-probing — identical semantics
+    # interpreted and native (native values carry no type tags).
     cache_key = "astra:compiled_v1:" + source
-    cached = slot_get(cache_key)
-    if type_of(cached) == "data":
-        return cached
+    if slot_has(cache_key):
+        return slot_get(cache_key)
     lex_result = lex(source)
     if not lex_result.ok:
         return Compiled{rules: [], functions: [], consts: []}
