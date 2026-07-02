@@ -19,8 +19,9 @@ use astra_eval
 
 pub extern fn orion_arena_active() -> int
 
-# What `compile` produces — both rule list and helper function table.
-data Compiled: rules: [Rule], functions: [Function], consts: [Binding]
+# What `compile` produces — rules, helper functions, evaluated consts
+# and component declarations (the ECS auto-pack schema).
+data Compiled: rules: [Rule], functions: [Function], consts: [Binding], components: [ComponentDecl]
 
 # Lex + parse + (MVP: skip check) + evaluate the first rule by NAME.
 # Errors at any stage collapse to an empty Outcome — atlas pipes silent
@@ -166,12 +167,18 @@ fn compile(source: Text) -> Compiled:
 fn compile_fresh(source: Text) -> Compiled:
     lex_result = lex(source)
     if not lex_result.ok:
-        return Compiled{rules: [], functions: [], consts: []}
+        return Compiled{rules: [], functions: [], consts: [], components: []}
     parse_result = parse(lex_result.tokens)
     if not parse_result.ok:
-        return Compiled{rules: [], functions: [], consts: []}
+        return Compiled{rules: [], functions: [], consts: [], components: []}
     consts = eval_consts(parse_result.consts, parse_result.functions, 0, [])
-    Compiled{rules: parse_result.rules, functions: parse_result.functions, consts: consts}
+    Compiled{rules: parse_result.rules, functions: parse_result.functions, consts: consts, components: parse_result.components}
+
+# Component declarations from the memoized compile — the ECS auto-pack
+# path must not re-parse the bundle per dispatch.
+pub fn compiled_components(source: Text) -> [ComponentDecl]:
+    c = compile(source)
+    c.components
 
 fn eval_consts(decls: [ConstDecl], funcs: [Function], i: int, acc: [Binding]) -> [Binding]:
     if i >= len(decls):
