@@ -19,10 +19,10 @@ pub enum Tok:
     Ident(Text)
     Rule
     Record
-    Require
-    Let
+    RequireKw
+    LetKw
     Set
-    Spawn
+    SpawnKw
     Destroy
     Emit
     On
@@ -358,10 +358,10 @@ fn is_newline_token(t: Token) -> bool:
 fn keyword_of(text: Text) -> Tok:
     if text == "rule" then Rule
     else if text == "record" then Record
-    else if text == "require" then Require
-    else if text == "let" then Let
+    else if text == "require" then RequireKw
+    else if text == "let" then LetKw
     else if text == "set" then Set
-    else if text == "spawn" then Spawn
+    else if text == "spawn" then SpawnKw
     else if text == "destroy" then Destroy
     else if text == "emit" then Emit
     else if text == "on" then On
