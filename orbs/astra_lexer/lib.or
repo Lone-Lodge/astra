@@ -136,7 +136,7 @@ pub fn lex(source: Text) -> LexResult:
                     if c == 34:
                         res = scan_string(bs, i + 1, n, line)
                         if res.ok:
-                            tokens = push(tokens, Token{tok: Str(res.text), line: line, col: i - line_start + 1})
+                            tokens = push_mut(tokens, Token{tok: Str(res.text), line: line, col: i - line_start + 1})
                             i = res.next
                         else:
                             failed = true
@@ -147,7 +147,7 @@ pub fn lex(source: Text) -> LexResult:
                         if alx_is_digit(c):
                             res = scan_int(bs, i, n, line)
                             if res.ok:
-                                tokens = push(tokens, Token{tok: Int(res.value), line: line, col: i - line_start + 1})
+                                tokens = push_mut(tokens, Token{tok: Int(res.value), line: line, col: i - line_start + 1})
                                 i = res.next
                             else:
                                 failed = true
@@ -157,13 +157,13 @@ pub fn lex(source: Text) -> LexResult:
                             # alpha → ident or keyword
                             if is_alpha(c):
                                 step = scan_ident(bs, i, n)
-                                tokens = push(tokens, Token{tok: keyword_of(step.text), line: line, col: i - line_start + 1})
+                                tokens = push_mut(tokens, Token{tok: keyword_of(step.text), line: line, col: i - line_start + 1})
                                 i = step.next
                             else:
                                 # punct/symbol
                                 step = scan_symbol(bs, i, n, line)
                                 if step.ok:
-                                    tokens = push(tokens, Token{tok: step.tok, line: line, col: i - line_start + 1})
+                                    tokens = push_mut(tokens, Token{tok: step.tok, line: line, col: i - line_start + 1})
                                     i = step.next
                                 else:
                                     failed = true
@@ -351,7 +351,9 @@ fn push_newline(tokens: [Token], line: int) -> [Token]:
         if is_newline_token(last):
             tokens
         else:
-            push(tokens, Token{tok: Newline, line: line, col: 0})
+            # In-place append is audited here: every caller rebinds
+            # `tokens = push_newline(tokens, line)` immediately.
+            push_mut(tokens, Token{tok: Newline, line: line, col: 0})
 
 fn is_newline_token(t: Token) -> bool:
     # Pattern-match-via-fold — Orion's enum match should handle this.

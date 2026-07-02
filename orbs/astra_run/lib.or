@@ -73,25 +73,25 @@ pub fn dispatch(source: Text, event: Text, args: [Value]) -> Outcome:
 pub fn dispatch_ctx(source: Text, event: Text, args: [Value], ctx: [Binding]) -> Outcome:
     c = compile(source)
     full_ctx = merge_bindings(c.consts, ctx)
+    # effects is owned (fresh []) until returned — in-place merge.
     mut effects = []
     for r in c.rules:
         if r.trigger == event:
             outcome = run_rule_args_ctx(r, args, full_ctx, c.functions)
             for e in outcome.effects:
-                effects = push(effects, e)
+                effects = push_mut(effects, e)
     Outcome{effects: effects, reads: []}
 
 # Start from a fresh list — `mut out = a` would alias the cached consts
-# and the self-push fast path (in-place when capacity allows) would then
-# append arena-lived ctx bindings INTO the compile cache. That was the
-# wandering dangling-cache crash: every dispatch quietly grew the cached
-# consts list with pointers that died at the next arena reset.
+# and an in-place push would then append arena-lived ctx bindings INTO
+# the compile cache. That was the wandering dangling-cache crash.
+# push_mut is audited here BECAUSE out starts owned from [].
 fn merge_bindings(a: [Binding], b: [Binding]) -> [Binding]:
     mut out = []
     for binding in a:
-        out = push(out, binding)
+        out = push_mut(out, binding)
     for binding in b:
-        out = push(out, binding)
+        out = push_mut(out, binding)
     out
 
 # Result of a reactive tick. `truths` is parallel to the `when` rules in
@@ -119,11 +119,11 @@ pub fn tick(source: Text, ctx: [Binding], prev_truths: [bool]) -> TickOutcome:
             v = eval_in_env(r.condition, full_ctx, c.functions)
             now = value_is_truthy(v)
             was = prev_truth_at(prev_truths, idx)
-            truths = push(truths, now)
+            truths = push_mut(truths, now)
             if now and not was:
                 outcome = run_rule_env(r, full_ctx, c.functions)
                 for e in outcome.effects:
-                    effects = push(effects, e)
+                    effects = push_mut(effects, e)
             idx = idx + 1
     TickOutcome{outcome: Outcome{effects: effects, reads: []}, truths: truths}
 

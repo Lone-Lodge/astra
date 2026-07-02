@@ -230,13 +230,13 @@ fn emit_to_effect(event: Text, fields: [FieldExpr], env: [Binding], funcs: [Func
     else:
         mut entries = []
         for f in fields:
-            entries = push(entries, ValueField{name: f.name, value: eval_expr(f.value, env, funcs)})
+            entries = push_mut(entries, ValueField{name: f.name, value: eval_expr(f.value, env, funcs)})
         AstraEmit(event, MapV(entries))
 
 fn spawn_to_effect(kind: Text, fields: [FieldExpr], env: [Binding], funcs: [Function]) -> AstraEffect:
     mut entries = []
     for f in fields:
-        entries = push(entries, ValueField{name: f.name, value: eval_expr(f.value, env, funcs)})
+        entries = push_mut(entries, ValueField{name: f.name, value: eval_expr(f.value, env, funcs)})
     AstraSpawnKind(kind, entries)
 
 fn destroy_to_effect(target: Expr, env: [Binding], funcs: [Function]) -> AstraEffect:

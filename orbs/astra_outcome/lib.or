@@ -54,7 +54,8 @@ fn fields_copy(fields: [ValueField], i: int, acc: [ValueField]) -> [ValueField]:
 
 pub fn outcome_copy(o: Outcome) -> Outcome:
     n = len(o.effects)
+    # fx is owned (fresh []) until wrapped — in-place accumulation.
     mut fx = []
     for i in 0..<n:
-        fx = push(fx, effect_copy(at(o.effects, i)))
+        fx = push_mut(fx, effect_copy(at(o.effects, i)))
     Outcome{effects: fx, reads: o.reads}
