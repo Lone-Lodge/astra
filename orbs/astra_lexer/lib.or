@@ -87,8 +87,10 @@ pub enum Tok:
     Percent
     Newline
 
-# A token + its source line — enough to point an error at a line.
-pub data Token: tok: Tok, line: int
+# A token + its source line and start column (1-based). The column of
+# a statement's first token is what block parsers compare to detect
+# dedent — Astra has no INDENT/DEDENT tokens.
+pub data Token: tok: Tok, line: int, col: int
 
 # Lex error with the offending line.
 pub data LexError: message: Text, line: int
@@ -105,6 +107,7 @@ pub fn lex(source: Text) -> LexResult:
     mut tokens = []
     mut i = 0
     mut line = 1
+    mut line_start = 0
     mut failed = false
     mut err_msg = ""
     mut err_line = 0
@@ -118,6 +121,7 @@ pub fn lex(source: Text) -> LexResult:
         if c == 10:
             tokens = push_newline(tokens, line)
             line = line + 1
+            line_start = i + 1
             i = i + 1
         else:
             # whitespace
@@ -132,7 +136,7 @@ pub fn lex(source: Text) -> LexResult:
                     if c == 34:
                         res = scan_string(bs, i + 1, n, line)
                         if res.ok:
-                            tokens = push(tokens, Token{tok: Str(res.text), line: line})
+                            tokens = push(tokens, Token{tok: Str(res.text), line: line, col: i - line_start + 1})
                             i = res.next
                         else:
                             failed = true
@@ -143,7 +147,7 @@ pub fn lex(source: Text) -> LexResult:
                         if alx_is_digit(c):
                             res = scan_int(bs, i, n, line)
                             if res.ok:
-                                tokens = push(tokens, Token{tok: Int(res.value), line: line})
+                                tokens = push(tokens, Token{tok: Int(res.value), line: line, col: i - line_start + 1})
                                 i = res.next
                             else:
                                 failed = true
@@ -153,13 +157,13 @@ pub fn lex(source: Text) -> LexResult:
                             # alpha → ident or keyword
                             if is_alpha(c):
                                 step = scan_ident(bs, i, n)
-                                tokens = push(tokens, Token{tok: keyword_of(step.text), line: line})
+                                tokens = push(tokens, Token{tok: keyword_of(step.text), line: line, col: i - line_start + 1})
                                 i = step.next
                             else:
                                 # punct/symbol
                                 step = scan_symbol(bs, i, n, line)
                                 if step.ok:
-                                    tokens = push(tokens, Token{tok: step.tok, line: line})
+                                    tokens = push(tokens, Token{tok: step.tok, line: line, col: i - line_start + 1})
                                     i = step.next
                                 else:
                                     failed = true
@@ -347,7 +351,7 @@ fn push_newline(tokens: [Token], line: int) -> [Token]:
         if is_newline_token(last):
             tokens
         else:
-            push(tokens, Token{tok: Newline, line: line})
+            push(tokens, Token{tok: Newline, line: line, col: 0})
 
 fn is_newline_token(t: Token) -> bool:
     # Pattern-match-via-fold — Orion's enum match should handle this.

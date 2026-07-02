@@ -17,6 +17,8 @@ use astra_lexer
 use astra_parser
 use astra_eval
 
+pub extern fn orion_arena_active() -> int
+
 # What `compile` produces — both rule list and helper function table.
 data Compiled: rules: [Rule], functions: [Function], consts: [Binding]
 
@@ -79,8 +81,15 @@ pub fn dispatch_ctx(source: Text, event: Text, args: [Value], ctx: [Binding]) ->
                 effects = push(effects, e)
     Outcome{effects: effects, reads: []}
 
+# Start from a fresh list — `mut out = a` would alias the cached consts
+# and the self-push fast path (in-place when capacity allows) would then
+# append arena-lived ctx bindings INTO the compile cache. That was the
+# wandering dangling-cache crash: every dispatch quietly grew the cached
+# consts list with pointers that died at the next arena reset.
 fn merge_bindings(a: [Binding], b: [Binding]) -> [Binding]:
-    mut out = a
+    mut out = []
+    for binding in a:
+        out = push(out, binding)
     for binding in b:
         out = push(out, binding)
     out
@@ -142,6 +151,19 @@ fn compile(source: Text) -> Compiled:
     cache_key = "astra:compiled_v1:" + source
     if slot_has(cache_key):
         return slot_get(cache_key)
+    # The cached tree outlives every frame, so it must NEVER be built
+    # inside an arena epoch — a first dispatch can happen mid-epoch
+    # (any host callsite), and a reset would leave the cache dangling.
+    was_on = orion_arena_active()
+    if was_on == 1:
+        orion_arena_off()
+    fresh = compile_fresh(source)
+    slot_set(cache_key, fresh)
+    if was_on == 1:
+        orion_arena_on()
+    fresh
+
+fn compile_fresh(source: Text) -> Compiled:
     lex_result = lex(source)
     if not lex_result.ok:
         return Compiled{rules: [], functions: [], consts: []}
@@ -149,9 +171,7 @@ fn compile(source: Text) -> Compiled:
     if not parse_result.ok:
         return Compiled{rules: [], functions: [], consts: []}
     consts = eval_consts(parse_result.consts, parse_result.functions, 0, [])
-    fresh = Compiled{rules: parse_result.rules, functions: parse_result.functions, consts: consts}
-    slot_set(cache_key, fresh)
-    fresh
+    Compiled{rules: parse_result.rules, functions: parse_result.functions, consts: consts}
 
 fn eval_consts(decls: [ConstDecl], funcs: [Function], i: int, acc: [Binding]) -> [Binding]:
     if i >= len(decls):
