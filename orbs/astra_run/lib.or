@@ -173,3 +173,10 @@ fn find_named_rule(rules: [Rule], name: Text) -> Rule:
 
 fn empty_sentinel() -> Rule:
     Rule{name: "", params: [], body: [], trigger: "", condition: LitBool(true)}
+
+# Warm the compile cache from OUTSIDE any arena window. Compiled rule
+# trees live in slots across frames — they must never be allocated
+# inside an arena epoch (the reset would leave the cache dangling).
+pub fn astra_warm(source: Text) -> int:
+    c = compile(source)
+    len(c.rules)
