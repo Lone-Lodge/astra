@@ -5,12 +5,13 @@
 # Helper `fn` definitions are resolved via the `funcs` table threaded
 # through every evaluator entry point.
 
-# Frame-arena hooks (no-op builtins under the interpreter).
-extern fn orion_arena_on() -> int
-extern fn orion_arena_off() -> int
-extern fn orion_arena_reset() -> int
-extern fn orion_arena_used() -> int
-extern fn orion_arena_rewind(mark: int) -> int
+# Frame-arena hooks (no-op builtins under the interpreter). pub so
+# games sharing the arena resolve the same declarations.
+pub extern fn orion_arena_on() -> int
+pub extern fn orion_arena_off() -> int
+pub extern fn orion_arena_reset() -> int
+pub extern fn orion_arena_used() -> int
+pub extern fn orion_arena_rewind(mark: int) -> int
 
 use astra_ast
 use astra_outcome
