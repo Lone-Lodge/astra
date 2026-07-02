@@ -122,22 +122,32 @@ fn rewound_ref(x: int, mark: int) -> Value:
     orion_arena_rewind(mark)
     RefV(x)
 
+# Backward scan: params/lets sit at the end, so shadowing is "last
+# wins" — first hit from the back, usually within a couple of probes.
 fn lookup(env: [Binding], name: Text) -> Value:
-    n = len(env)
     mut found = NoneV
-    for i in 0..<n:
+    mut i = len(env) - 1
+    loop:
+        if i < 0:
+            break
         b = at(env, i)
         if b.name == name:
             found = b.value
+            break
+        i = i - 1
     found
 
 fn lookup_func(funcs: [Function], name: Text) -> Function:
-    n = len(funcs)
     mut found = empty_func()
-    for i in 0..<n:
+    mut i = len(funcs) - 1
+    loop:
+        if i < 0:
+            break
         f = at(funcs, i)
         if f.name == name:
             found = f
+            break
+        i = i - 1
     found
 
 fn empty_func() -> Function:
