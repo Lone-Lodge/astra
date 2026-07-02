@@ -19,3 +19,27 @@ pub enum Value:
 # (`tier` for `emit Milestone { tier: 100 }`); value can be any Value
 # including another MapV — host bridges decide how deep to flatten.
 pub data ValueField: name: Text, value: Value
+
+# Deep copy — evacuates a call result out of the eval frame arena.
+pub fn value_copy(v: Value) -> Value:
+    match v:
+        IntV(n) -> IntV(n)
+        TextV(s) -> TextV("" + s)
+        BoolV(b) -> BoolV(b)
+        RefV(r) -> RefV(r)
+        MapV(fields) -> MapV(copy_fields(fields, 0, []))
+        ListV(items) -> ListV(copy_items(items, 0, []))
+        NoneV -> NoneV
+
+fn copy_fields(fields: [ValueField], i: int, acc: [ValueField]) -> [ValueField]:
+    if i >= len(fields):
+        acc
+    else:
+        f = at(fields, i)
+        copy_fields(fields, i + 1, push(acc, ValueField{name: "" + f.name, value: value_copy(f.value)}))
+
+fn copy_items(items: [Value], i: int, acc: [Value]) -> [Value]:
+    if i >= len(items):
+        acc
+    else:
+        copy_items(items, i + 1, push(acc, value_copy(at(items, i))))

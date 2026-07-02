@@ -34,3 +34,27 @@ pub fn empty() -> Outcome:
 # silent no-op, exactly Atlas's contract.
 pub fn refused() -> Outcome:
     empty()
+
+# Deep copies — evacuate a rule's outcome out of the eval frame arena.
+pub fn effect_copy(e: AstraEffect) -> AstraEffect:
+    match e:
+        AstraSet(eid, field, v) -> AstraSet(eid, "" + field, value_copy(v))
+        AstraSpawn(eid) -> AstraSpawn(eid)
+        AstraSpawnKind(kind, fields) -> AstraSpawnKind("" + kind, fields_copy(fields, 0, []))
+        AstraDestroy(eid) -> AstraDestroy(eid)
+        AstraSetVar(name, v) -> AstraSetVar("" + name, value_copy(v))
+        AstraEmit(event, v) -> AstraEmit("" + event, value_copy(v))
+
+fn fields_copy(fields: [ValueField], i: int, acc: [ValueField]) -> [ValueField]:
+    if i >= len(fields):
+        acc
+    else:
+        f = at(fields, i)
+        fields_copy(fields, i + 1, push(acc, ValueField{name: "" + f.name, value: value_copy(f.value)}))
+
+pub fn outcome_copy(o: Outcome) -> Outcome:
+    n = len(o.effects)
+    mut fx = []
+    for i in 0..<n:
+        fx = push(fx, effect_copy(at(o.effects, i)))
+    Outcome{effects: fx, reads: o.reads}

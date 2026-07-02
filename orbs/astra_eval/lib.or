@@ -5,6 +5,13 @@
 # Helper `fn` definitions are resolved via the `funcs` table threaded
 # through every evaluator entry point.
 
+# Frame-arena hooks (no-op builtins under the interpreter).
+extern fn orion_arena_on() -> int
+extern fn orion_arena_off() -> int
+extern fn orion_arena_reset() -> int
+extern fn orion_arena_used() -> int
+extern fn orion_arena_rewind(mark: int) -> int
+
 use astra_ast
 use astra_outcome
 use astra_value
@@ -41,15 +48,24 @@ fn bind_args_into(params: [Param], args: [Value], i: int, acc: [Binding]) -> [Bi
 # by `astra_run::tick` to inject world-state bindings into `when` rules
 # whose body references free names (e.g. `score`, `hp`) instead of
 # positional params.
+# The whole body evals inside the frame arena (same depth counter as
+# eval_call, so nested fn calls take the cheap rewind path); only the
+# outcome is evacuated. Effects/env garbage never reaches the heap.
 pub fn run_rule_env(r: Rule, env: [Binding], funcs: [Function]) -> Outcome:
-    mut state = EvalState{env: env, effects: [], refused: false}
-    for stmt in r.body:
-        if not state.refused:
-            state = step_stmt(stmt, state, funcs)
-    if state.refused:
-        empty()
+    d = if slot_has("astra:call_depth") then slot_get_int("astra:call_depth") else 0
+    slot_set("astra:call_depth", d + 1)
+    if d == 0:
+        orion_arena_reset()
+        orion_arena_on()
+    result = eval_rule_body(r, env, funcs)
+    slot_set("astra:call_depth", d)
+    if d == 0:
+        orion_arena_off()
+        out = outcome_copy(result)
+        orion_arena_reset()
+        out
     else:
-        Outcome{effects: state.effects, reads: []}
+        result
 
 # Evaluate an arbitrary expression in `env`. The reactive runtime uses
 # this to test a `when` rule's `condition` *before* deciding whether to
@@ -71,6 +87,40 @@ fn bind_params(params: [Param], args: [Value], i: int, acc: [Binding]) -> [Bindi
         p = at(params, i)
         v = if i < len(args) then at(args, i) else NoneV
         bind_params(params, args, i + 1, push(acc, Binding{name: p.name, value: v}))
+
+fn eval_rule_body(r: Rule, env: [Binding], funcs: [Function]) -> Outcome:
+    mut state = EvalState{env: env, effects: [], refused: false}
+    for stmt in r.body:
+        if not state.refused:
+            state = step_stmt(stmt, state, funcs)
+    state_outcome(state)
+
+fn state_outcome(state: EvalState) -> Outcome:
+    if state.refused:
+        empty()
+    else:
+        Outcome{effects: state.effects, reads: []}
+
+# Scalar payloads land in registers via the match binding, so re-boxing
+# after the rewind is safe; aggregates keep their arena block untouched.
+fn rewind_scalar(r: Value, mark: int) -> Value:
+    match r:
+        IntV(n) -> rewound_int(n, mark)
+        BoolV(b) -> rewound_bool(b, mark)
+        RefV(x) -> rewound_ref(x, mark)
+        _ -> r
+
+fn rewound_int(n: int, mark: int) -> Value:
+    orion_arena_rewind(mark)
+    IntV(n)
+
+fn rewound_bool(b: bool, mark: int) -> Value:
+    orion_arena_rewind(mark)
+    BoolV(b)
+
+fn rewound_ref(x: int, mark: int) -> Value:
+    orion_arena_rewind(mark)
+    RefV(x)
 
 fn lookup(env: [Binding], name: Text) -> Value:
     n = len(env)
@@ -254,12 +304,36 @@ fn eval_call(name: Text, args: [Expr], env: [Binding], funcs: [Function]) -> Val
                 if f.name == "":
                     NoneV
                 else:
+                    # Helper fns are pure: everything a call allocates is
+                    # garbage except its result. Calls run in the frame
+                    # arena as an obstack — each call saves a watermark,
+                    # scalar results are re-boxed after rewinding to it, so
+                    # env copies and value boxes cost nothing and the arena
+                    # high-water stays at the live call chain. Non-scalar
+                    # results keep their arena block (rare in hot paths);
+                    # the top-level call evacuates by deep copy and resets.
+                    # (Depth slot is written BEFORE arena_on so the slot
+                    # entry itself never lives in the arena.)
+                    d = if slot_has("astra:call_depth") then slot_get_int("astra:call_depth") else 0
+                    slot_set("astra:call_depth", d + 1)
+                    if d == 0:
+                        orion_arena_reset()
+                        orion_arena_on()
+                    mark = orion_arena_used()
                     evaluated = eval_args(args, env, funcs, 0, [])
                     # Inherit outer env (consts + ctx bindings), then bind
                     # params on top so a param can shadow but a fn body still
                     # sees top-level constants like `board_width`.
                     call_env = bind_params(f.params, evaluated, 0, env)
-                    eval_expr(f.body, call_env, funcs)
+                    r = eval_expr(f.body, call_env, funcs)
+                    slot_set("astra:call_depth", d)
+                    if d == 0:
+                        orion_arena_off()
+                        rc = value_copy(r)
+                        orion_arena_reset()
+                        rc
+                    else:
+                        rewind_scalar(r, mark)
 
 fn eval_builtin_at(args: [Expr], env: [Binding], funcs: [Function]) -> Value:
     if len(args) < 2:
@@ -356,14 +430,23 @@ fn eval_count(iter_name: Text, list_expr: Expr, cond_expr: Expr, env: [Binding],
         ListV(items) -> IntV(count_matching(iter_name, items, cond_expr, env, funcs, 0, 0))
         _ -> IntV(0)
 
+# Hot path — one env slot is reused across elements (set, not push).
+# A fresh env copy per element made count-heavy scripts allocate tens
+# of MB per tick (gamestate: 58MB -> negligible).
 fn count_matching(iter_name: Text, items: [Value], cond_expr: Expr, env: [Binding], funcs: [Function], i: int, acc: int) -> int:
-    if i >= len(items):
-        acc
-    else:
-        item = at(items, i)
-        iter_env = push(env, Binding{name: iter_name, value: item})
-        hit = if is_truthy(eval_expr(cond_expr, iter_env, funcs)) then 1 else 0
-        count_matching(iter_name, items, cond_expr, env, funcs, i + 1, acc + hit)
+    n = len(items)
+    mut iter_env = push(env, Binding{name: iter_name, value: NoneV})
+    slot = len(iter_env) - 1
+    mut total = acc
+    mut j = i
+    loop:
+        if j >= n:
+            break
+        iter_env = set(iter_env, slot, Binding{name: iter_name, value: at(items, j)})
+        if is_truthy(eval_expr(cond_expr, iter_env, funcs)):
+            total = total + 1
+        j = j + 1
+    total
 
 fn eval_binop(op: Text, a: Value, b: Value) -> Value:
     if op == "and":
