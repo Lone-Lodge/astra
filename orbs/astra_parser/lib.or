@@ -3,6 +3,14 @@
 # Pure-Orion recursive descent. Cursor + helpers follow the Rust
 # LodgeEngine/astra/src/parser/mod.rs structure 1:1, but the grammar
 # subset is intentionally tiny for the first iteration.
+#
+# push_mut audit (applies to every accumulator in this file): each is
+# a fresh `mut xs = []` local, appended in one loop, stored once into
+# the result record, never aliased before that store. Value-semantic
+# push here cost a spine copy per node — the parse of cubsy's 10KB of
+# scripts allocated 6.4MB of permanent heap (compile runs under the
+# persist guard). The recursive subst_* helpers keep plain push: their
+# accumulator threads through call arguments.
 
 use astra_ast
 use astra_lexer
@@ -42,7 +50,7 @@ pub fn parse(tokens: [Token]) -> ParseResult:
             if match_tok(tokens, i, n, "Use"):
                 ustep = parse_use_decl(tokens, i + 1, n)
                 if ustep.ok:
-                    uses = push(uses, ustep.name)
+                    uses = push_mut(uses, ustep.name)
                     i = ustep.next
                 else:
                     failed = true
@@ -64,7 +72,7 @@ pub fn parse(tokens: [Token]) -> ParseResult:
             if match_tok(tokens, i, n, "Component"):
                 cstep = parse_component_decl(tokens, i + 1, n)
                 if cstep.ok:
-                    components = push(components, cstep.component)
+                    components = push_mut(components, cstep.component)
                     i = cstep.next
                 else:
                     failed = true
@@ -74,7 +82,7 @@ pub fn parse(tokens: [Token]) -> ParseResult:
                 if match_tok(tokens, i, n, "Const"):
                     kstep = parse_const_decl(tokens, i + 1, n)
                     if kstep.ok:
-                        consts = push(consts, kstep.cnst)
+                        consts = push_mut(consts, kstep.cnst)
                         i = kstep.next
                     else:
                         failed = true
@@ -84,7 +92,7 @@ pub fn parse(tokens: [Token]) -> ParseResult:
                     if match_tok(tokens, i, n, "Fn"):
                         fstep = parse_function(tokens, i + 1, n)
                         if fstep.ok:
-                            functions = push(functions, fstep.func)
+                            functions = push_mut(functions, fstep.func)
                             i = fstep.next
                         else:
                             failed = true
@@ -94,7 +102,7 @@ pub fn parse(tokens: [Token]) -> ParseResult:
                         if match_tok(tokens, i, n, "Entity"):
                             estep = parse_entity_decl(tokens, i + 1, n)
                             if estep.ok:
-                                entities = push(entities, estep.entity)
+                                entities = push_mut(entities, estep.entity)
                                 i = estep.next
                             else:
                                 failed = true
@@ -105,7 +113,7 @@ pub fn parse(tokens: [Token]) -> ParseResult:
                                 floop = parse_for_loop(tokens, i + 1, n)
                                 if floop.ok:
                                     for r in floop.rules:
-                                        rules = push(rules, r)
+                                        rules = push_mut(rules, r)
                                     i = floop.next
                                 else:
                                     failed = true
@@ -114,7 +122,7 @@ pub fn parse(tokens: [Token]) -> ParseResult:
                             else:
                                 step = parse_rule(tokens, i, n)
                                 if step.ok:
-                                    rules = push(rules, step.rule)
+                                    rules = push_mut(rules, step.rule)
                                     i = step.next
                                 else:
                                     failed = true
@@ -181,7 +189,7 @@ fn parse_rule(tokens: [Token], start: int, n: int) -> RuleStep:
         p_name = ident_of(at(tokens, i).tok)
         if p_name == "":
             return RuleStep{rule: empty_rule(), next: i, ok: false, error: "expected param name or `)`"}
-        params = push(params, Param{name: p_name, type_name: ""})
+        params = push_mut(params, Param{name: p_name, type_name: ""})
         i = i + 1
         if match_tok(tokens, i, n, "Comma"):
             i = i + 1
@@ -213,7 +221,7 @@ fn parse_rule(tokens: [Token], start: int, n: int) -> RuleStep:
         else:
             step = parse_stmt(tokens, i, n)
             if step.ok:
-                body = push(body, step.stmt)
+                body = push_mut(body, step.stmt)
                 i = step.next
             else:
                 return RuleStep{rule: empty_rule(), next: i, ok: false, error: step.error}
@@ -260,7 +268,7 @@ fn parse_when_rule(tokens: [Token], start: int, n: int) -> RuleStep:
             else:
                 step = parse_stmt(tokens, i, n)
                 if step.ok:
-                    body = push(body, step.stmt)
+                    body = push_mut(body, step.stmt)
                     i = step.next
                 else:
                     return RuleStep{rule: empty_rule(), next: i, ok: false, error: step.error}
@@ -292,7 +300,7 @@ fn parse_when_rule(tokens: [Token], start: int, n: int) -> RuleStep:
         else:
             step = parse_stmt(tokens, i, n)
             if step.ok:
-                body = push(body, step.stmt)
+                body = push_mut(body, step.stmt)
                 i = step.next
             else:
                 return RuleStep{rule: empty_rule(), next: i, ok: false, error: step.error}
@@ -334,7 +342,7 @@ fn parse_function(tokens: [Token], start: int, n: int) -> FuncStep:
                 if p_type == "":
                     return FuncStep{func: empty_function(), next: i, ok: false, error: "expected type name"}
                 i = i + 1
-        params = push(params, Param{name: p_name, type_name: p_type})
+        params = push_mut(params, Param{name: p_name, type_name: p_type})
         if match_tok(tokens, i, n, "Comma"):
             i = i + 1
     if not match_tok(tokens, i, n, "RParen"):
@@ -404,7 +412,7 @@ fn parse_entity_decl(tokens: [Token], start: int, n: int) -> EntityStep:
                 if f_type == "":
                     return EntityStep{entity: empty_entity_decl(), next: i, ok: false, error: "expected field type"}
                 i = i + 1
-        fields = push(fields, Param{name: f_name, type_name: f_type})
+        fields = push_mut(fields, Param{name: f_name, type_name: f_type})
         if match_tok(tokens, i, n, "Comma"):
             i = i + 1
         i = skip_newlines(tokens, i, n)
@@ -449,7 +457,7 @@ fn parse_component_decl(tokens: [Token], start: int, n: int) -> ComponentStep:
                 if f_type == "":
                     return ComponentStep{component: empty_component_decl(), next: i, ok: false, error: "expected field type in component"}
                 i = i + 1
-        fields = push(fields, Param{name: f_name, type_name: f_type})
+        fields = push_mut(fields, Param{name: f_name, type_name: f_type})
         if match_tok(tokens, i, n, "Comma"):
             i = i + 1
         i = skip_newlines(tokens, i, n)
@@ -529,7 +537,7 @@ fn parse_for_loop(tokens: [Token], start: int, n: int) -> ForStep:
     loop:
         if v >= range_end:
             break
-        out = push(out, subst_rule(body_step.rule, iter_name, v))
+        out = push_mut(out, subst_rule(body_step.rule, iter_name, v))
         v = v + 1
     ForStep{rules: out, next: body_step.next, ok: true, error: ""}
 
@@ -565,7 +573,7 @@ fn parse_every_rule(tokens: [Token], start: int, n: int) -> RuleStep:
         else:
             step = parse_stmt(tokens, i, n)
             if step.ok:
-                body = push(body, step.stmt)
+                body = push_mut(body, step.stmt)
                 i = step.next
             else:
                 return RuleStep{rule: empty_rule(), next: i, ok: false, error: step.error}
@@ -638,7 +646,7 @@ fn parse_field_block(tokens: [Token], start: int, n: int) -> FieldBlockStep:
         step = parse_field(tokens, i, n)
         if not step.ok:
             return FieldBlockStep{fields: out, next: i, ok: false, error: step.error}
-        out = push(out, step.field)
+        out = push_mut(out, step.field)
         i = step.next
         if match_tok(tokens, i, n, "Comma"):
             i = i + 1
@@ -731,7 +739,7 @@ fn parse_let_destructure(tokens: [Token], start: int, n: int) -> StmtStep:
         nm = ident_of(at(tokens, i).tok)
         if nm == "":
             return StmtStep{stmt: Let("", LitInt(0)), next: i, ok: false, error: "expected field name in let-destructure"}
-        names = push(names, nm)
+        names = push_mut(names, nm)
         i = i + 1
         if match_tok(tokens, i, n, "Comma"):
             i = i + 1
@@ -910,7 +918,7 @@ fn parse_foreach_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
             step = parse_stmt(tokens, i, n)
             if not step.ok:
                 return StmtStep{stmt: ForEach(iter_name, list_step.value, filter, body_stmts), next: step.next, ok: false, error: step.error}
-            body_stmts = push(body_stmts, step.stmt)
+            body_stmts = push_mut(body_stmts, step.stmt)
             i = step.next
     StmtStep{stmt: ForEach(iter_name, list_step.value, filter, body_stmts), next: i, ok: true, error: ""}
 
@@ -1078,7 +1086,7 @@ fn parse_call(tokens: [Token], start: int, n: int, name: Text) -> ExprStep:
         step = parse_expr(tokens, i, n)
         if not step.ok:
             return step
-        args = push(args, step.value)
+        args = push_mut(args, step.value)
         i = step.next
         if match_tok(tokens, i, n, "Comma"):
             i = i + 1
@@ -1198,7 +1206,7 @@ fn parse_match_expr(tokens: [Token], start: int, n: int) -> ExprStep:
         body = parse_expr(tokens, i, n)
         if not body.ok:
             return body
-        arms = push(arms, MatchArm{pattern: pat.value, body: body.value})
+        arms = push_mut(arms, MatchArm{pattern: pat.value, body: body.value})
         i = body.next
         if match_tok(tokens, i, n, "Comma"):
             i = i + 1
@@ -1266,7 +1274,7 @@ fn parse_list_literal(tokens: [Token], start: int, n: int) -> ExprStep:
         item = parse_expr(tokens, i, n)
         if not item.ok:
             return item
-        items = push(items, item.value)
+        items = push_mut(items, item.value)
         i = item.next
         i = skip_newlines(tokens, i, n)
         if match_tok(tokens, i, n, "Comma"):
@@ -1289,7 +1297,7 @@ fn parse_map_literal(tokens: [Token], start: int, n: int) -> ExprStep:
         f_step = parse_field(tokens, i, n)
         if not f_step.ok:
             return ExprStep{value: MapLit(fields), next: f_step.next, ok: false, error: f_step.error}
-        fields = push(fields, f_step.field)
+        fields = push_mut(fields, f_step.field)
         i = f_step.next
         i = skip_newlines(tokens, i, n)
         if match_tok(tokens, i, n, "Comma"):

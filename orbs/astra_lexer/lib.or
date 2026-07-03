@@ -216,7 +216,7 @@ fn scan_string(bs: [int], start: int, n: int, line: int) -> StrStep:
         if c == 10:
             bad = true
             break
-        chars = push(chars, c)
+        chars = push_mut(chars, c)
         i = i + 1
     if bad:
         StrStep{text: "", next: i, ok: false, error: "unterminated string"}
@@ -252,7 +252,7 @@ fn scan_ident(bs: [int], start: int, n: int) -> IdentStep:
         c = at(bs, i)
         if not is_alnum(c):
             break
-        chars = push(chars, c)
+        chars = push_mut(chars, c)
         i = i + 1
     IdentStep{text: bytes_to_text(chars), next: i}
 
