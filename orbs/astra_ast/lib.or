@@ -72,3 +72,134 @@ pub data EntityDecl: name: Text, fields: [Param]
 # the type in the world at load time so `spawn Kind { ... }` and
 # `for x in Kind` work without any Orion glue code.
 pub data ComponentDecl: name: Text, fields: [Param]
+
+# ---- Deep copy: compile-epoch evacuation ----
+#
+# astra_run::compile runs lex+parse inside an arena epoch — tokens and
+# parse garbage die at the epoch reset, and ONLY this copy of the live
+# tree survives into the persist heap. Every variant MUST be covered:
+# a missed one shares an arena pointer into the cache, and the poison
+# turns that into a deterministic crash on first dispatch. Texts copy
+# via "" + s (allocates in the active scope, persist during
+# evacuation). Accumulators are fresh owned locals — push_mut.
+
+pub fn ast_copy_expr(e: Expr) -> Expr:
+    match e:
+        LitInt(n) -> LitInt(n)
+        LitText(s) -> LitText("" + s)
+        LitBool(b) -> LitBool(b)
+        VarRef(name) -> VarRef("" + name)
+        Binop(op, l, r) -> Binop("" + op, ast_copy_expr(l), ast_copy_expr(r))
+        Unop(op, x) -> Unop("" + op, ast_copy_expr(x))
+        IfExpr(c, t, f) -> IfExpr(ast_copy_expr(c), ast_copy_expr(t), ast_copy_expr(f))
+        Call(name, args) -> Call("" + name, ast_copy_exprs(args))
+        Field(base, name) -> Field(ast_copy_expr(base), "" + name)
+        CountQuery(name, src, pred) -> CountQuery("" + name, ast_copy_expr(src), ast_copy_expr(pred))
+        LetIn(name, val, body) -> LetIn("" + name, ast_copy_expr(val), ast_copy_expr(body))
+        LitList(items) -> LitList(ast_copy_exprs(items))
+        MapLit(fields) -> MapLit(ast_copy_field_exprs(fields))
+        RangeExpr(a, b) -> RangeExpr(ast_copy_expr(a), ast_copy_expr(b))
+        MatchExpr(s, arms) -> MatchExpr(ast_copy_expr(s), ast_copy_arms(arms))
+
+fn ast_copy_exprs(xs: [Expr]) -> [Expr]:
+    n = len(xs)
+    mut out = []
+    for i in 0..<n:
+        out = push_mut(out, ast_copy_expr(at(xs, i)))
+    out
+
+fn ast_copy_field_exprs(xs: [FieldExpr]) -> [FieldExpr]:
+    n = len(xs)
+    mut out = []
+    for i in 0..<n:
+        f = fe_at(xs, i)
+        out = push_mut(out, FieldExpr{name: "" + f.name, value: ast_copy_expr(f.value)})
+    out
+
+fn fe_at(xs: [FieldExpr], i: int) -> FieldExpr:
+    at(xs, i)
+
+fn ast_copy_arms(xs: [MatchArm]) -> [MatchArm]:
+    n = len(xs)
+    mut out = []
+    for i in 0..<n:
+        a = arm_at(xs, i)
+        out = push_mut(out, MatchArm{pattern: ast_copy_expr(a.pattern), body: ast_copy_expr(a.body)})
+    out
+
+fn arm_at(xs: [MatchArm], i: int) -> MatchArm:
+    at(xs, i)
+
+pub fn ast_copy_stmt(s: Stmt) -> Stmt:
+    match s:
+        EmitEffect(name, fields) -> EmitEffect("" + name, ast_copy_field_exprs(fields))
+        Require(e) -> Require(ast_copy_expr(e))
+        Let(name, e) -> Let("" + name, ast_copy_expr(e))
+        LetDestructure(names, e) -> LetDestructure(ast_copy_texts(names), ast_copy_expr(e))
+        SpawnEntity(kind, fields) -> SpawnEntity("" + kind, ast_copy_field_exprs(fields))
+        DestroyEntity(e) -> DestroyEntity(ast_copy_expr(e))
+        SetField(base, name, val) -> SetField(ast_copy_expr(base), "" + name, ast_copy_expr(val))
+        SetVar(name, val) -> SetVar("" + name, ast_copy_expr(val))
+        ForEach(name, src, pred, body) -> ForEach("" + name, ast_copy_expr(src), ast_copy_expr(pred), ast_copy_stmts(body))
+        IfStmt(cond, body) -> IfStmt(ast_copy_expr(cond), ast_copy_stmts(body))
+
+pub fn ast_copy_stmts(xs: [Stmt]) -> [Stmt]:
+    n = len(xs)
+    mut out = []
+    for i in 0..<n:
+        out = push_mut(out, ast_copy_stmt(at(xs, i)))
+    out
+
+fn ast_copy_texts(xs: [Text]) -> [Text]:
+    n = len(xs)
+    mut out = []
+    for i in 0..<n:
+        out = push_mut(out, "" + txt_at(xs, i))
+    out
+
+fn txt_at(xs: [Text], i: int) -> Text:
+    at(xs, i)
+
+pub fn ast_copy_params(xs: [Param]) -> [Param]:
+    n = len(xs)
+    mut out = []
+    for i in 0..<n:
+        p = param_at(xs, i)
+        out = push_mut(out, Param{name: "" + p.name, type_name: "" + p.type_name})
+    out
+
+fn param_at(xs: [Param], i: int) -> Param:
+    at(xs, i)
+
+pub fn ast_copy_rules(xs: [Rule]) -> [Rule]:
+    n = len(xs)
+    mut out = []
+    for i in 0..<n:
+        r = rule_at(xs, i)
+        out = push_mut(out, Rule{name: "" + r.name, params: ast_copy_params(r.params), body: ast_copy_stmts(r.body), trigger: "" + r.trigger, condition: ast_copy_expr(r.condition)})
+    out
+
+fn rule_at(xs: [Rule], i: int) -> Rule:
+    at(xs, i)
+
+pub fn ast_copy_functions(xs: [Function]) -> [Function]:
+    n = len(xs)
+    mut out = []
+    for i in 0..<n:
+        f = fn_at(xs, i)
+        out = push_mut(out, Function{name: "" + f.name, params: ast_copy_params(f.params), return_type: "" + f.return_type, body: ast_copy_expr(f.body)})
+    out
+
+fn fn_at(xs: [Function], i: int) -> Function:
+    at(xs, i)
+
+pub fn ast_copy_components(xs: [ComponentDecl]) -> [ComponentDecl]:
+    n = len(xs)
+    mut out = []
+    for i in 0..<n:
+        c = comp_at(xs, i)
+        out = push_mut(out, ComponentDecl{name: "" + c.name, fields: ast_copy_params(c.fields)})
+    out
+
+fn comp_at(xs: [ComponentDecl], i: int) -> ComponentDecl:
+    at(xs, i)

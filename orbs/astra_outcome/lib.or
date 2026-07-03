@@ -8,10 +8,17 @@ use astra_value
 
 # One write or signal the rule proposed. Atlas turns these into
 # atlas_event::Event values at the seam.
+#
+# `AstraSpawnKind(kind, fields)` carries the type name + per-field
+# values so the host can construct a real typed component. The atlas
+# bridge fans it out as ToChannel("astra:spawn:Kind", payload_map);
+# the host listens per-kind and does the actual ECS insert.
 pub enum AstraEffect:
     AstraSet(int, Text, Value)
     AstraSpawn(int)
+    AstraSpawnKind(Text, [ValueField])
     AstraDestroy(int)
+    AstraSetVar(Text, Value)
     AstraEmit(Text, Value)
 
 # One read trace — used by the typed Trace UI to show where a rule
@@ -27,3 +34,28 @@ pub fn empty() -> Outcome:
 # silent no-op, exactly Atlas's contract.
 pub fn refused() -> Outcome:
     empty()
+
+# Deep copies — evacuate a rule's outcome out of the eval frame arena.
+pub fn effect_copy(e: AstraEffect) -> AstraEffect:
+    match e:
+        AstraSet(eid, field, v) -> AstraSet(eid, "" + field, value_copy(v))
+        AstraSpawn(eid) -> AstraSpawn(eid)
+        AstraSpawnKind(kind, fields) -> AstraSpawnKind("" + kind, fields_copy(fields, 0, []))
+        AstraDestroy(eid) -> AstraDestroy(eid)
+        AstraSetVar(name, v) -> AstraSetVar("" + name, value_copy(v))
+        AstraEmit(event, v) -> AstraEmit("" + event, value_copy(v))
+
+fn fields_copy(fields: [ValueField], i: int, acc: [ValueField]) -> [ValueField]:
+    if i >= len(fields):
+        acc
+    else:
+        f = at(fields, i)
+        fields_copy(fields, i + 1, push(acc, ValueField{name: "" + f.name, value: value_copy(f.value)}))
+
+pub fn outcome_copy(o: Outcome) -> Outcome:
+    n = len(o.effects)
+    # fx is owned (fresh []) until wrapped — in-place accumulation.
+    mut fx = []
+    for i in 0..<n:
+        fx = push_mut(fx, effect_copy(at(o.effects, i)))
+    Outcome{effects: fx, reads: o.reads}

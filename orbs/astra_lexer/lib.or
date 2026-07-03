@@ -19,10 +19,10 @@ pub enum Tok:
     Ident(Text)
     Rule
     Record
-    Require
-    Let
+    RequireKw
+    LetKw
     Set
-    Spawn
+    SpawnKw
     Destroy
     Emit
     On
@@ -58,6 +58,7 @@ pub enum Tok:
     Exists
     None
     Whenever
+    UseKw
     Becomes
     Spawned
     Destroyed
@@ -86,8 +87,10 @@ pub enum Tok:
     Percent
     Newline
 
-# A token + its source line — enough to point an error at a line.
-pub data Token: tok: Tok, line: int
+# A token + its source line and start column (1-based). The column of
+# a statement's first token is what block parsers compare to detect
+# dedent — Astra has no INDENT/DEDENT tokens.
+pub data Token: tok: Tok, line: int, col: int
 
 # Lex error with the offending line.
 pub data LexError: message: Text, line: int
@@ -104,6 +107,7 @@ pub fn lex(source: Text) -> LexResult:
     mut tokens = []
     mut i = 0
     mut line = 1
+    mut line_start = 0
     mut failed = false
     mut err_msg = ""
     mut err_line = 0
@@ -117,6 +121,7 @@ pub fn lex(source: Text) -> LexResult:
         if c == 10:
             tokens = push_newline(tokens, line)
             line = line + 1
+            line_start = i + 1
             i = i + 1
         else:
             # whitespace
@@ -131,7 +136,7 @@ pub fn lex(source: Text) -> LexResult:
                     if c == 34:
                         res = scan_string(bs, i + 1, n, line)
                         if res.ok:
-                            tokens = push(tokens, Token{tok: Str(res.text), line: line})
+                            tokens = push_mut(tokens, Token{tok: Str(res.text), line: line, col: i - line_start + 1})
                             i = res.next
                         else:
                             failed = true
@@ -139,10 +144,10 @@ pub fn lex(source: Text) -> LexResult:
                             err_line = line
                     else:
                         # digit → int
-                        if is_digit(c):
+                        if alx_is_digit(c):
                             res = scan_int(bs, i, n, line)
                             if res.ok:
-                                tokens = push(tokens, Token{tok: Int(res.value), line: line})
+                                tokens = push_mut(tokens, Token{tok: Int(res.value), line: line, col: i - line_start + 1})
                                 i = res.next
                             else:
                                 failed = true
@@ -152,13 +157,13 @@ pub fn lex(source: Text) -> LexResult:
                             # alpha → ident or keyword
                             if is_alpha(c):
                                 step = scan_ident(bs, i, n)
-                                tokens = push(tokens, Token{tok: keyword_of(step.text), line: line})
+                                tokens = push_mut(tokens, Token{tok: keyword_of(step.text), line: line, col: i - line_start + 1})
                                 i = step.next
                             else:
                                 # punct/symbol
                                 step = scan_symbol(bs, i, n, line)
                                 if step.ok:
-                                    tokens = push(tokens, Token{tok: step.tok, line: line})
+                                    tokens = push_mut(tokens, Token{tok: step.tok, line: line, col: i - line_start + 1})
                                     i = step.next
                                 else:
                                     failed = true
@@ -173,14 +178,14 @@ pub fn lex(source: Text) -> LexResult:
 
 # ---- char predicates ----
 
-fn is_digit(c: int) -> bool:
+fn alx_is_digit(c: int) -> bool:
     c >= 48 and c <= 57
 
 fn is_alpha(c: int) -> bool:
     (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or c == 95
 
 fn is_alnum(c: int) -> bool:
-    is_alpha(c) or is_digit(c)
+    is_alpha(c) or alx_is_digit(c)
 
 # ---- scanners ----
 
@@ -211,7 +216,7 @@ fn scan_string(bs: [int], start: int, n: int, line: int) -> StrStep:
         if c == 10:
             bad = true
             break
-        chars = push(chars, c)
+        chars = push_mut(chars, c)
         i = i + 1
     if bad:
         StrStep{text: "", next: i, ok: false, error: "unterminated string"}
@@ -230,7 +235,7 @@ fn scan_int(bs: [int], start: int, n: int, line: int) -> IntStep:
         if i >= n:
             break
         c = at(bs, i)
-        if not is_digit(c):
+        if not alx_is_digit(c):
             break
         value = value * 10 + (c - 48)
         i = i + 1
@@ -247,7 +252,7 @@ fn scan_ident(bs: [int], start: int, n: int) -> IdentStep:
         c = at(bs, i)
         if not is_alnum(c):
             break
-        chars = push(chars, c)
+        chars = push_mut(chars, c)
         i = i + 1
     IdentStep{text: bytes_to_text(chars), next: i}
 
@@ -346,7 +351,9 @@ fn push_newline(tokens: [Token], line: int) -> [Token]:
         if is_newline_token(last):
             tokens
         else:
-            push(tokens, Token{tok: Newline, line: line})
+            # In-place append is audited here: every caller rebinds
+            # `tokens = push_newline(tokens, line)` immediately.
+            push_mut(tokens, Token{tok: Newline, line: line, col: 0})
 
 fn is_newline_token(t: Token) -> bool:
     # Pattern-match-via-fold — Orion's enum match should handle this.
@@ -358,10 +365,10 @@ fn is_newline_token(t: Token) -> bool:
 fn keyword_of(text: Text) -> Tok:
     if text == "rule" then Rule
     else if text == "record" then Record
-    else if text == "require" then Require
-    else if text == "let" then Let
+    else if text == "require" then RequireKw
+    else if text == "let" then LetKw
     else if text == "set" then Set
-    else if text == "spawn" then Spawn
+    else if text == "spawn" then SpawnKw
     else if text == "destroy" then Destroy
     else if text == "emit" then Emit
     else if text == "on" then On
@@ -370,7 +377,8 @@ fn keyword_of(text: Text) -> Tok:
     else if text == "test" then Test
     else if text == "apply" then Apply
     else if text == "expect" then Expect
-    else if text == "tick" then Tick
+    # `tick` intentionally not reserved — atlas_astra auto-injects it
+    # as a ctx binding so scripts use it as a regular identifier.
     else if text == "if" then If
     else if text == "then" then Then
     else if text == "else" then Else
@@ -392,6 +400,7 @@ fn keyword_of(text: Text) -> Tok:
     else if text == "const" then Const
     else if text == "each" then Each
     else if text == "to" then To
+    else if text == "use" then UseKw
     else if text == "exists" then Exists
     else if text == "none" then None
     else if text == "becomes" then Becomes

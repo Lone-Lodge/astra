@@ -1,0 +1,55 @@
+use astra_run
+use fs
+use io
+use bytes
+
+# Parse-smoke harness: runs compile_parse_result over every cubsy
+# script standalone and reports OK/FAIL per file. Run after any
+# astra_lexer/astra_parser change:
+#
+#   cd astra/test_parse
+#   <lodge-orion>/orbit.exe run src/main.or main
+#
+# All 13 files must print OK. This caught the top-level if/else
+# dispatch bug, the IDENT-assign/let-in collision, and the reserved
+# `tick` keyword — see git log 2026-07-01.
+
+fn test_file(path: Text):
+    print("--- ")
+    print(path)
+    src = read_file(path)
+    print("bytes:")
+    print(len(bytes_from_text(src)))
+    pr = compile_parse_result(src)
+    er = pr.error
+    if pr.ok:
+        print("OK")
+        print("rules:")
+        print(len(pr.rules))
+        print("consts:")
+        print(len(pr.consts))
+        print("functions:")
+        print(len(pr.functions))
+    else:
+        print("FAIL line:")
+        print(er.line)
+        print("msg:")
+        print(er.message)
+
+
+fn main() -> int:
+    print("Testing each cubsy script standalone:")
+    test_file("../../cubsy/scripts/board.astra")
+    test_file("../../cubsy/scripts/pieces.astra")
+    test_file("../../cubsy/scripts/font.astra")
+    test_file("../../cubsy/scripts/render.astra")
+    test_file("../../cubsy/scripts/on_click.astra")
+    test_file("../../cubsy/scripts/drop.astra")
+    test_file("../../cubsy/scripts/init.astra")
+    test_file("../../cubsy/scripts/layout.astra")
+    test_file("../../cubsy/scripts/line_clear.astra")
+    test_file("../../cubsy/scripts/refill.astra")
+    test_file("../../cubsy/scripts/milestones.astra")
+    test_file("../../cubsy/scripts/game_state.astra")
+    test_file("../../cubsy/scripts/placement.astra")
+    0

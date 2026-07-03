@@ -16,9 +16,18 @@ use astra_ast
 use astra_lexer
 use astra_parser
 use astra_eval
+use log
 
-# What `compile` produces — both rule list and helper function table.
-data Compiled: rules: [Rule], functions: [Function], consts: [Binding]
+pub extern fn orion_arena_active() -> int
+pub extern fn orion_arena_on() -> int
+pub extern fn orion_arena_off() -> int
+pub extern fn orion_arena_reset() -> int
+pub extern fn orion_persist_on() -> int
+pub extern fn orion_persist_off() -> int
+
+# What `compile` produces — rules, helper functions, evaluated consts
+# and component declarations (the ECS auto-pack schema).
+data Compiled: rules: [Rule], functions: [Function], consts: [Binding], components: [ComponentDecl]
 
 # Lex + parse + (MVP: skip check) + evaluate the first rule by NAME.
 # Errors at any stage collapse to an empty Outcome — atlas pipes silent
@@ -71,18 +80,25 @@ pub fn dispatch(source: Text, event: Text, args: [Value]) -> Outcome:
 pub fn dispatch_ctx(source: Text, event: Text, args: [Value], ctx: [Binding]) -> Outcome:
     c = compile(source)
     full_ctx = merge_bindings(c.consts, ctx)
+    # effects is owned (fresh []) until returned — in-place merge.
     mut effects = []
     for r in c.rules:
         if r.trigger == event:
             outcome = run_rule_args_ctx(r, args, full_ctx, c.functions)
             for e in outcome.effects:
-                effects = push(effects, e)
+                effects = push_mut(effects, e)
     Outcome{effects: effects, reads: []}
 
+# Start from a fresh list — `mut out = a` would alias the cached consts
+# and an in-place push would then append arena-lived ctx bindings INTO
+# the compile cache. That was the wandering dangling-cache crash.
+# push_mut is audited here BECAUSE out starts owned from [].
 fn merge_bindings(a: [Binding], b: [Binding]) -> [Binding]:
-    mut out = a
+    mut out = []
+    for binding in a:
+        out = push_mut(out, binding)
     for binding in b:
-        out = push(out, binding)
+        out = push_mut(out, binding)
     out
 
 # Result of a reactive tick. `truths` is parallel to the `when` rules in
@@ -110,11 +126,11 @@ pub fn tick(source: Text, ctx: [Binding], prev_truths: [bool]) -> TickOutcome:
             v = eval_in_env(r.condition, full_ctx, c.functions)
             now = value_is_truthy(v)
             was = prev_truth_at(prev_truths, idx)
-            truths = push(truths, now)
+            truths = push_mut(truths, now)
             if now and not was:
                 outcome = run_rule_env(r, full_ctx, c.functions)
                 for e in outcome.effects:
-                    effects = push(effects, e)
+                    effects = push_mut(effects, e)
             idx = idx + 1
     TickOutcome{outcome: Outcome{effects: effects, reads: []}, truths: truths}
 
@@ -129,18 +145,81 @@ fn prev_truth_at(prev: [bool], i: int) -> bool:
 pub fn compile_parse_result(source: Text) -> ParseResult:
     lex_result = lex(source)
     if not lex_result.ok:
-        return ParseResult{rules: [], functions: [], entities: [], consts: [], components: [], ok: false, error: ParseError{message: lex_result.error.message, line: lex_result.error.line}}
+        return ParseResult{rules: [], functions: [], entities: [], consts: [], components: [], uses: [], ok: false, error: ParseError{message: lex_result.error.message, line: lex_result.error.line}}
     parse(lex_result.tokens)
 
 fn compile(source: Text) -> Compiled:
+    # Memoise on source text — the same script bundle is dispatched
+    # every frame (60Hz) so lex+parse dominates without a cache.
+    # Slot map keys on source directly; the runtime hashes the String
+    # once per lookup, which is O(N) but a single memcmp vs re-lexing.
+    # slot_has instead of type_of-probing — identical semantics
+    # interpreted and native (native values carry no type tags).
+    cache_key = "astra:compiled_v1:" + source
+    if slot_has(cache_key):
+        return slot_get(cache_key)
+    # Compile INSIDE an arena epoch: tokens and parse garbage die at
+    # the reset. Only the live tree is evacuated to persist below,
+    # with the arena OFF (the arena outranks the persist scope while
+    # on). Persisting the whole compile cost 4.4MB of permanent heap
+    # for cubsy's 10KB of scripts; the live tree is a fraction of it.
+    was_on = orion_arena_active()
+    if was_on == 0:
+        orion_arena_on()
+    fresh = compile_fresh(source)
+    orion_arena_off()
+    orion_persist_on()
+    safe = compiled_copy(fresh)
+    slot_set(cache_key, safe)
+    orion_persist_off()
+    if was_on == 1:
+        orion_arena_on()
+    if was_on == 0:
+        # We owned the epoch: reclaim the garbage now. Arena content is
+        # dead whenever the arena is off (epochs reset when they close).
+        orion_arena_reset()
+    safe
+
+fn compiled_copy(c: Compiled) -> Compiled:
+    Compiled{rules: ast_copy_rules(c.rules), functions: ast_copy_functions(c.functions), consts: copy_bindings(c.consts), components: ast_copy_components(c.components)}
+
+fn copy_bindings(bs: [Binding]) -> [Binding]:
+    n = len(bs)
+    mut out = []
+    for i in 0..<n:
+        b = binding_at(bs, i)
+        out = push_mut(out, Binding{name: "" + b.name, value: value_copy(b.value)})
+    out
+
+fn binding_at(bs: [Binding], i: int) -> Binding:
+    at(bs, i)
+
+# A bundle that fails to compile becomes an EMPTY program (rules just
+# stop firing) — say WHY on the error channel instead of silently
+# rendering nothing. astra_check gates hot reload the same way.
+fn compile_fresh(source: Text) -> Compiled:
     lex_result = lex(source)
     if not lex_result.ok:
-        return Compiled{rules: [], functions: [], consts: []}
+        le = lex_result.error
+        lmsg = le.message
+        lline = le.line
+        log_error("astra", "lex failed line {lline}: {lmsg}")
+        return Compiled{rules: [], functions: [], consts: [], components: []}
     parse_result = parse(lex_result.tokens)
     if not parse_result.ok:
-        return Compiled{rules: [], functions: [], consts: []}
+        pe = parse_result.error
+        pmsg = pe.message
+        pline = pe.line
+        log_error("astra", "parse failed line {pline}: {pmsg}")
+        return Compiled{rules: [], functions: [], consts: [], components: []}
     consts = eval_consts(parse_result.consts, parse_result.functions, 0, [])
-    Compiled{rules: parse_result.rules, functions: parse_result.functions, consts: consts}
+    Compiled{rules: parse_result.rules, functions: parse_result.functions, consts: consts, components: parse_result.components}
+
+# Component declarations from the memoized compile — the ECS auto-pack
+# path must not re-parse the bundle per dispatch.
+pub fn compiled_components(source: Text) -> [ComponentDecl]:
+    c = compile(source)
+    c.components
 
 fn eval_consts(decls: [ConstDecl], funcs: [Function], i: int, acc: [Binding]) -> [Binding]:
     if i >= len(decls):
@@ -162,3 +241,9 @@ fn find_named_rule(rules: [Rule], name: Text) -> Rule:
 
 fn empty_sentinel() -> Rule:
     Rule{name: "", params: [], body: [], trigger: "", condition: LitBool(true)}
+
+# Warm the compile cache. compile() owns its epoch/evacuation dance —
+# safe to call from anywhere (load, reload poll, mid-dispatch).
+pub fn astra_warm(source: Text) -> int:
+    c = compile(source)
+    len(c.rules)

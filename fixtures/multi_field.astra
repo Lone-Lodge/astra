@@ -1,0 +1,1 @@
+rule place(): emit Place { col: 3, row: 5, color: "red" }

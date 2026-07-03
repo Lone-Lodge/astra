@@ -1,0 +1,2 @@
+fn three_records() -> List: [{a: 1, b: "x"}, {a: 2, b: "y"}, {a: 3, b: "z"}]
+fn pick_a(id: int) -> int: count(r in three_records() where r.a == id)
