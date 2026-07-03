@@ -18,6 +18,8 @@ use astra_parser
 use astra_eval
 
 pub extern fn orion_arena_active() -> int
+pub extern fn orion_persist_on() -> int
+pub extern fn orion_persist_off() -> int
 
 # What `compile` produces — rules, helper functions, evaluated consts
 # and component declarations (the ECS auto-pack schema).
@@ -158,8 +160,10 @@ fn compile(source: Text) -> Compiled:
     was_on = orion_arena_active()
     if was_on == 1:
         orion_arena_off()
+    orion_persist_on()
     fresh = compile_fresh(source)
     slot_set(cache_key, fresh)
+    orion_persist_off()
     if was_on == 1:
         orion_arena_on()
     fresh

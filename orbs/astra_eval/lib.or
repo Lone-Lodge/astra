@@ -12,6 +12,8 @@ pub extern fn orion_arena_off() -> int
 pub extern fn orion_arena_reset() -> int
 pub extern fn orion_arena_used() -> int
 pub extern fn orion_arena_rewind(mark: int) -> int
+pub extern fn orion_persist_on() -> int
+pub extern fn orion_persist_off() -> int
 
 use astra_ast
 use astra_outcome
@@ -62,7 +64,9 @@ pub fn run_rule_env(r: Rule, env: [Binding], funcs: [Function]) -> Outcome:
     slot_set("astra:call_depth", d)
     if d == 0:
         orion_arena_off()
+        orion_persist_on()
         out = outcome_copy(result)
+        orion_persist_off()
         orion_arena_reset()
         out
     else:
@@ -340,7 +344,9 @@ fn eval_call(name: Text, args: [Expr], env: [Binding], funcs: [Function]) -> Val
                     slot_set("astra:call_depth", d)
                     if d == 0:
                         orion_arena_off()
+                        orion_persist_on()
                         rc = value_copy(r)
+                        orion_persist_off()
                         orion_arena_reset()
                         rc
                     else:
