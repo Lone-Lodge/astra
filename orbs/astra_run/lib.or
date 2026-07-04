@@ -148,7 +148,7 @@ pub fn compile_parse_result(source: Text) -> ParseResult:
         return ParseResult{rules: [], functions: [], entities: [], consts: [], components: [], uses: [], ok: false, error: ParseError{message: lex_result.error.message, line: lex_result.error.line}}
     parse(lex_result.tokens)
 
-fn compile(source: Text) -> Compiled:
+pub fn compile(source: Text) -> Compiled:
     # Memoise on source text — the same script bundle is dispatched
     # every frame (60Hz) so lex+parse dominates without a cache.
     # Slot map keys on source directly; the runtime hashes the String

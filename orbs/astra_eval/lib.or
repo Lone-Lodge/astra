@@ -264,7 +264,7 @@ fn eval_expr(e: Expr, env: [Binding], funcs: [Function]) -> Value:
         LitText(s) -> TextV(s)
         LitBool(b) -> BoolV(b)
         VarRef(name) -> lookup(env, name)
-        Binop(op, a, b) -> eval_binop(op, eval_expr(a, env, funcs), eval_expr(b, env, funcs))
+        Binop(op, a, b) -> eval_binop_lazy(op, a, b, env, funcs)
         Unop(op, x) -> eval_unop(op, eval_expr(x, env, funcs))
         IfExpr(c, t, e2) -> if is_truthy(eval_expr(c, env, funcs)) then eval_expr(t, env, funcs) else eval_expr(e2, env, funcs)
         Call(name, args) -> eval_call(name, args, env, funcs)
@@ -464,6 +464,25 @@ fn count_matching(iter_name: Text, items: [Value], cond_expr: Expr, env: [Bindin
             total = total + 1
         j = j + 1
     total
+
+# and/or SHORT-CIRCUIT: a false guard means the heavy right side is
+# never evaluated. `when board_dirty == 1 and expensive(...)` costs
+# one int compare on quiet passes — without this every when-rule
+# paid its full worst case every sims pass.
+fn eval_binop_lazy(op: Text, a: Expr, b: Expr, env: [Binding], funcs: [Function]) -> Value:
+    if op == "and":
+        if is_truthy(eval_expr(a, env, funcs)):
+            BoolV(is_truthy(eval_expr(b, env, funcs)))
+        else:
+            BoolV(false)
+    else:
+        if op == "or":
+            if is_truthy(eval_expr(a, env, funcs)):
+                BoolV(true)
+            else:
+                BoolV(is_truthy(eval_expr(b, env, funcs)))
+        else:
+            eval_binop(op, eval_expr(a, env, funcs), eval_expr(b, env, funcs))
 
 fn eval_binop(op: Text, a: Value, b: Value) -> Value:
     if op == "and":
