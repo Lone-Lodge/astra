@@ -148,6 +148,9 @@ pub fn compile_parse_result(source: Text) -> ParseResult:
         return ParseResult{rules: [], functions: [], entities: [], consts: [], components: [], uses: [], ok: false, error: ParseError{message: lex_result.error.message, line: lex_result.error.line}}
     parse(lex_result.tokens)
 
+pub extern fn orion_ledger_tag(name: Text) -> int
+pub extern fn orion_ledger_off() -> int
+
 pub fn compile(source: Text) -> Compiled:
     # Memoise on source text — the same script bundle is dispatched
     # every frame (60Hz) so lex+parse dominates without a cache.
@@ -169,8 +172,10 @@ pub fn compile(source: Text) -> Compiled:
     fresh = compile_fresh(source)
     orion_arena_off()
     orion_persist_on()
+    orion_ledger_tag("astra-evac")
     safe = compiled_copy(fresh)
     slot_set(cache_key, safe)
+    orion_ledger_off()
     orion_persist_off()
     if was_on == 1:
         orion_arena_on()
