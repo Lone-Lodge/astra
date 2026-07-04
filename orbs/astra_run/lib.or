@@ -78,7 +78,16 @@ pub fn dispatch(source: Text, event: Text, args: [Value]) -> Outcome:
 # free names (e.g. `tray`, `blocks`). atlas_astra::astra_event_ctx
 # auto-injects `tick`.
 pub fn dispatch_ctx(source: Text, event: Text, args: [Value], ctx: [Binding]) -> Outcome:
-    c = compile(source)
+    dispatch_with(compile(source), event, args, ctx)
+
+# Short-key twin: dispatch-hot callers pass a stable bundle id so
+# the cache lookup is a ~15-byte compare instead of rebuilding and
+# comparing the whole source per call (6us/hit on a big bundle —
+# a double-digit share of a dirty sims frame across the fixpoint).
+pub fn dispatch_ctx_c(cid: Text, source: Text, event: Text, args: [Value], ctx: [Binding]) -> Outcome:
+    dispatch_with(compile_c(cid, source), event, args, ctx)
+
+fn dispatch_with(c: Compiled, event: Text, args: [Value], ctx: [Binding]) -> Outcome:
     full_ctx = merge_bindings(c.consts, ctx)
     # effects is owned (fresh []) until returned — in-place merge.
     mut effects = []
@@ -116,7 +125,12 @@ pub data TickOutcome: outcome: Outcome, truths: [bool]
 # Out-of-bounds prev_truths entries default to `false` (cold start), so
 # any condition that's true on first tick fires once.
 pub fn tick(source: Text, ctx: [Binding], prev_truths: [bool]) -> TickOutcome:
-    c = compile(source)
+    tick_with(compile(source), ctx, prev_truths)
+
+pub fn tick_c(cid: Text, source: Text, ctx: [Binding], prev_truths: [bool]) -> TickOutcome:
+    tick_with(compile_c(cid, source), ctx, prev_truths)
+
+fn tick_with(c: Compiled, ctx: [Binding], prev_truths: [bool]) -> TickOutcome:
     full_ctx = merge_bindings(c.consts, ctx)
     mut effects = []
     mut truths = []
@@ -252,3 +266,39 @@ fn empty_sentinel() -> Rule:
 pub fn astra_warm(source: Text) -> int:
     c = compile(source)
     len(c.rules)
+
+# ---- Short-key cache layer ----
+# The content cache stays correct but its key IS the source: every
+# lookup rebuilds and compares a bundle-sized string. Hot callers
+# bind bundle -> tree ONCE under a short stable id; (re)load is the
+# invalidation point — astra_warm_c recompiles by CONTENT (an edit
+# misses the content cache) and rebinds the short key.
+pub fn compile_c(cid: Text, source: Text) -> Compiled:
+    tkey = "astra:t:" + cid
+    if slot_has(tkey):
+        return slot_get(tkey)
+    c = compile(source)
+    store_tree(tkey, c)
+    c
+
+pub fn astra_warm_c(cid: Text, source: Text) -> int:
+    c = compile(source)
+    store_tree("astra:t:" + cid, c)
+    len(c.rules)
+
+# The store runs with the arena OFF — the arena outranks persist,
+# and a slot key copied into an open epoch is the wandering
+# dangling-cache crash all over again.
+fn store_tree(tkey: Text, c: Compiled):
+    was_on = orion_arena_active()
+    if was_on == 1:
+        orion_arena_off()
+    orion_persist_on()
+    slot_set("" + tkey, c)
+    orion_persist_off()
+    if was_on == 1:
+        orion_arena_on()
+
+pub fn compiled_components_c(cid: Text, source: Text) -> [ComponentDecl]:
+    c = compile_c(cid, source)
+    c.components
