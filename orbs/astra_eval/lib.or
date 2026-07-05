@@ -127,6 +127,8 @@ fn rewound_ref(x: int, mark: int) -> Value:
     orion_arena_rewind(mark)
     RefV(x)
 
+pub extern fn octr_add(i: int, n: int)
+
 # Backward scan: params/lets sit at the end, so shadowing is "last
 # wins" — first hit from the back, usually within a couple of probes.
 fn lookup(env: [Binding], name: Text) -> Value:
