@@ -135,14 +135,25 @@ pub fn parse(tokens: [Token]) -> ParseResult:
                                         err_msg = dstep.error
                                         err_line = t.line
                                 else:
-                                    step = parse_rule(tokens, i, n)
-                                    if step.ok:
-                                        rules = push_mut(rules, step.rule)
-                                        i = step.next
+                                    if match_tok(tokens, i, n, "Law"):
+                                        # `law NAME:` names the following rule.
+                                        lstep = parse_law_decl(tokens, i + 1, n)
+                                        if lstep.ok:
+                                            rules = push_mut(rules, lstep.rule)
+                                            i = lstep.next
+                                        else:
+                                            failed = true
+                                            err_msg = lstep.error
+                                            err_line = t.line
                                     else:
-                                        failed = true
-                                        err_msg = step.error
-                                        err_line = t.line
+                                        step = parse_rule(tokens, i, n)
+                                        if step.ok:
+                                            rules = push_mut(rules, step.rule)
+                                            i = step.next
+                                        else:
+                                            failed = true
+                                            err_msg = step.error
+                                            err_line = t.line
     if failed:
         ParseResult{rules: [], functions: [], entities: [], consts: [], components: [], uses: [], ok: false, error: ParseError{message: err_msg, line: err_line}}
     else:
@@ -524,6 +535,29 @@ fn parse_derive_decl(tokens: [Token], start: int, n: int) -> RuleStep:
     body = push([], SetVar(name, val_step.value))
     r = Rule{name: "derive:" + name, params: [], body: body, trigger: "Tick", condition: LitBool(true)}
     RuleStep{rule: r, next: val_step.next, ok: true, error: ""}
+
+# `law NAME:` then a rule — names the rule after the law. Pure sugar
+# over the following when/on rule (A2, idea #7): `law Gravity: when ...`
+# reads as a world law and gives an otherwise-anonymous rule a name, so
+# facts, the why-engine, and quarantine all identify it as `Gravity`.
+fn parse_law_decl(tokens: [Token], start: int, n: int) -> RuleStep:
+    empty = Rule{name: "", params: [], body: [], trigger: "", condition: LitBool(true)}
+    if start >= n:
+        return RuleStep{rule: empty, next: start, ok: false, error: "expected name after `law`"}
+    name = ident_of(at(tokens, start).tok)
+    if name == "":
+        return RuleStep{rule: empty, next: start, ok: false, error: "expected name after `law`"}
+    mut i = start + 1
+    if not match_tok(tokens, i, n, "Colon"):
+        return RuleStep{rule: empty, next: i, ok: false, error: "expected `:` after law name"}
+    i = i + 1
+    i = skip_newlines(tokens, i, n)
+    rstep = parse_rule(tokens, i, n)
+    if not rstep.ok:
+        return rstep
+    src = rstep.rule
+    named = Rule{name: name, params: src.params, body: src.body, trigger: src.trigger, condition: src.condition}
+    RuleStep{rule: named, next: rstep.next, ok: true, error: ""}
 
 # `for IDENT in INT..<INT: body` — top-level macro. Body must be a
 # single rule construct (typically `when EXPR: stmts`). At parse time
@@ -1529,6 +1563,7 @@ fn tok_kind(t: Tok) -> Text:
         Fn -> "Fn"
         Const -> "Const"
         Derive -> "Derive"
+        Law -> "Law"
         Each -> "Each"
         To -> "To"
         From -> "From"
