@@ -940,8 +940,45 @@ fn parse_set_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
     rhs = parse_expr(tokens, i, n)
     if not rhs.ok:
         return StmtStep{stmt: SetVar("", LitInt(0)), next: rhs.next, ok: false, error: rhs.error}
+    # Optional `confidence N` suffix (B2, uncertainty-as-type): tags the
+    # fact with a 0-100 certainty stored as a parallel `conf:<fact>`
+    # resource, read back by the `confidence(fact)` query. Pure sugar —
+    # `x = v confidence n` becomes SetVar(x, v) + SetVar(conf:x, n).
+    if match_tok(tokens, rhs.next, n, "Confidence"):
+        cname = varref_name_of(lhs.value)
+        if cname == "":
+            return StmtStep{stmt: SetVar("", LitInt(0)), next: rhs.next, ok: false, error: "confidence can only tag a plain `name = value` fact"}
+        cstep = parse_expr(tokens, rhs.next + 1, n)
+        if not cstep.ok:
+            return StmtStep{stmt: SetVar("", LitInt(0)), next: cstep.next, ok: false, error: cstep.error}
+        setv = SetVar(cname, rhs.value)
+        setc = SetVar("conf:" + cname, cstep.value)
+        return StmtStep{stmt: IfStmt(LitBool(true), push(push([], setv), setc)), next: cstep.next, ok: true, error: ""}
     # Classify the LHS — VarRef → SetVar; Field → SetField.
     classify_set(lhs.value, rhs.value, rhs.next)
+
+fn varref_name_of(e: Expr) -> Text:
+    match e:
+        VarRef(nm) -> nm
+        _ -> ""
+
+# `confidence(FACT)` -> VarRef("conf:FACT") — reads the parallel
+# certainty resource a `= v confidence n` fact wrote (B2). Pure sugar:
+# the conf: resource is auto-ctx bound, so a rule can `when
+# confidence(enemy_at) > 50: ...` reason over how sure it is. Unset
+# confidence reads 0 (unknown), so a plain fact is implicitly uncertain.
+fn parse_confidence_query(tokens: [Token], start: int, n: int) -> ExprStep:
+    if not match_tok(tokens, start, n, "LParen"):
+        return ExprStep{value: LitInt(0), next: start, ok: false, error: "expected `(` after `confidence`"}
+    i = start + 1
+    fact = ident_of(at(tokens, i).tok)
+    if fact == "":
+        return ExprStep{value: LitInt(0), next: i, ok: false, error: "expected fact name in confidence(...)"}
+    mut j = i + 1
+    if not match_tok(tokens, j, n, "RParen"):
+        return ExprStep{value: LitInt(0), next: j, ok: false, error: "expected `)` after confidence fact"}
+    j = j + 1
+    ExprStep{value: VarRef("conf:" + fact), next: j, ok: true, error: ""}
 
 # Parse `IDENT[.field]*` as a set target. Standalone helper (not going
 # through parse_postfix/primary) because the primary path hijacks
@@ -1241,6 +1278,8 @@ fn parse_primary(tokens: [Token], start: int, n: int) -> ExprStep:
         return parse_if_expr(tokens, start + 1, n)
     if match_tok(tokens, start, n, "Count"):
         return parse_count_query(tokens, start + 1, n)
+    if match_tok(tokens, start, n, "Confidence"):
+        return parse_confidence_query(tokens, start + 1, n)
     if match_tok(tokens, start, n, "Exists"):
         return parse_quantifier(tokens, start + 1, n, "exists")
     if match_tok(tokens, start, n, "None"):
@@ -1683,6 +1722,7 @@ fn tok_kind(t: Tok) -> Text:
         RelateKw -> "RelateKw"
         After -> "After"
         Belief -> "Belief"
+        Confidence -> "Confidence"
         Each -> "Each"
         To -> "To"
         From -> "From"

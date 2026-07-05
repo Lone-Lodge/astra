@@ -56,6 +56,7 @@ pub enum Tok:
     RelateKw
     After
     Belief
+    Confidence
     Each
     To
     From
@@ -408,6 +409,7 @@ fn keyword_of(text: Text) -> Tok:
     else if text == "relate" then RelateKw
     else if text == "after" then After
     else if text == "belief" then Belief
+    else if text == "confidence" then Confidence
     else if text == "each" then Each
     else if text == "to" then To
     else if text == "use" then UseKw
