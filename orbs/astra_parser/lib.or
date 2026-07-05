@@ -146,28 +146,18 @@ pub fn parse(tokens: [Token]) -> ParseResult:
                                             err_msg = lstep.error
                                             err_line = t.line
                                     else:
-                                        if match_tok(tokens, i, n, "Belief"):
-                                            # `belief NAME:` seeds an agent's
-                                            # believed facts as a resource
-                                            # namespace that can diverge from
-                                            # reality (B1).
-                                            bstep = parse_belief_decl(tokens, i + 1, n)
-                                            if bstep.ok:
-                                                rules = push_mut(rules, bstep.rule)
-                                                i = bstep.next
-                                            else:
-                                                failed = true
-                                                err_msg = bstep.error
-                                                err_line = t.line
+                                        # belief/goal/constraint declarations,
+                                        # else a plain rule — flattened into
+                                        # one helper to keep this dispatch from
+                                        # pyramiding further.
+                                        step = parse_belief_goal_or_rule(tokens, i, n)
+                                        if step.ok:
+                                            rules = push_mut(rules, step.rule)
+                                            i = step.next
                                         else:
-                                            step = parse_rule(tokens, i, n)
-                                            if step.ok:
-                                                rules = push_mut(rules, step.rule)
-                                                i = step.next
-                                            else:
-                                                failed = true
-                                                err_msg = step.error
-                                                err_line = t.line
+                                            failed = true
+                                            err_msg = step.error
+                                            err_line = t.line
     if failed:
         ParseResult{rules: [], functions: [], entities: [], consts: [], components: [], uses: [], ok: false, error: ParseError{message: err_msg, line: err_line}}
     else:
@@ -617,6 +607,49 @@ fn parse_belief_decl(tokens: [Token], start: int, n: int) -> RuleStep:
             i = vexpr.next
     r = Rule{name: "belief:" + name, params: [], body: body, trigger: "Tick", condition: LitBool(true)}
     RuleStep{rule: r, next: i, ok: true, error: ""}
+
+# Top-level dispatch tail: a belief/goal/constraint declaration, else a
+# plain rule. Kept in one helper so the parse() dispatch doesn't pyramid.
+fn parse_belief_goal_or_rule(tokens: [Token], start: int, n: int) -> RuleStep:
+    if match_tok(tokens, start, n, "Belief"):
+        return parse_belief_decl(tokens, start + 1, n)
+    if match_tok(tokens, start, n, "Goal"):
+        return parse_prefixed_derive(tokens, start + 1, n, "goal:")
+    if match_tok(tokens, start, n, "Constraint"):
+        return parse_prefixed_derive(tokens, start + 1, n, "constraint:")
+    parse_rule(tokens, start, n)
+
+# `goal NAME = COND` / `constraint NAME = COND` — the world describes its
+# intent, not the behavior (B3). Both desugar (like derive) to a Tick
+# rule that keeps `<ns>NAME` equal to the condition, so the engine
+# TRACKS whether each goal is met (goal:NAME == 1) and whether each
+# constraint holds (constraint:NAME == 1, violated when 0). This is the
+# declaration + evaluation layer — goals/constraints as first-class,
+# queryable, always-current facts (atlas goals_met / constraints_
+# violated). The SOLVER that plans HOW to achieve a goal under the
+# constraints is a distinct future slice; here the world states its
+# intent and the engine continuously scores it.
+fn parse_prefixed_derive(tokens: [Token], start: int, n: int, ns: Text) -> RuleStep:
+    empty = Rule{name: "", params: [], body: [], trigger: "", condition: LitBool(true)}
+    if start >= n:
+        return RuleStep{rule: empty, next: start, ok: false, error: "expected name after goal/constraint"}
+    name = ident_of(at(tokens, start).tok)
+    if name == "":
+        return RuleStep{rule: empty, next: start, ok: false, error: "expected name after goal/constraint"}
+    mut i = start + 1
+    if not match_tok(tokens, i, n, "Assign"):
+        return RuleStep{rule: empty, next: i, ok: false, error: "expected `=` after goal/constraint name"}
+    i = i + 1
+    val = parse_expr(tokens, i, n)
+    if not val.ok:
+        return RuleStep{rule: empty, next: val.next, ok: false, error: val.error}
+    # Coerce the predicate to 1/0 so it stores as an int resource (the
+    # set-drain drops raw bool payloads — see apply_set). goal:NAME==1
+    # means met; constraint:NAME==1 means satisfied.
+    scored = IfExpr(val.value, LitInt(1), LitInt(0))
+    body = push([], SetVar(ns + name, scored))
+    r = Rule{name: ns + name, params: [], body: body, trigger: "Tick", condition: LitBool(true)}
+    RuleStep{rule: r, next: val.next, ok: true, error: ""}
 
 # `for IDENT in INT..<INT: body` — top-level macro. Body must be a
 # single rule construct (typically `when EXPR: stmts`). At parse time
@@ -1723,6 +1756,8 @@ fn tok_kind(t: Tok) -> Text:
         After -> "After"
         Belief -> "Belief"
         Confidence -> "Confidence"
+        Goal -> "Goal"
+        Constraint -> "Constraint"
         Each -> "Each"
         To -> "To"
         From -> "From"
