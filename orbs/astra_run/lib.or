@@ -302,3 +302,201 @@ fn store_tree(tkey: Text, c: Compiled):
 pub fn compiled_components_c(cid: Text, source: Text) -> [ComponentDecl]:
     c = compile_c(cid, source)
     c.components
+
+# ---- Facts: rules as data (H2 — one machinery, three fruits) ----
+# Per rule: what it reads (free names), writes (set targets), emits
+# (channels), spawns (kinds), calls (helper fns). This IS the static
+# footprint (deterministic parallelism), the AI query surface
+# ("which rules write score?"), and the substrate for field-law
+# linting. Locals (params, let, foreach vars) are subtracted.
+
+pub data RuleFacts: rule_name: Text, trigger: Text, reads: [Text], writes: [Text], emits: [Text], spawns: [Text], calls: [Text]
+
+data FAcc: reads: [Text], writes: [Text], emits: [Text], spawns: [Text], calls: [Text], bound: [Text]
+
+pub fn astra_facts_c(cid: Text, source: Text) -> [RuleFacts]:
+    c = compile_c(cid, source)
+    n = len(c.rules)
+    mut out = []
+    for i in 0..<n:
+        out = push_mut(out, rule_facts(frule_at(c.rules, i)))
+    out
+
+fn frule_at(rs: [Rule], i: int) -> Rule:
+    at(rs, i)
+
+fn rule_facts(r: Rule) -> RuleFacts:
+    mut bound = []
+    np = len(r.params)
+    for i in 0..<np:
+        p = fparam_at(r.params, i)
+        bound = push_mut(bound, p.name)
+    a0 = FAcc{reads: [], writes: [], emits: [], spawns: [], calls: [], bound: bound}
+    a1 = expr_facts(r.condition, a0)
+    a2 = stmts_facts(r.body, a1)
+    RuleFacts{rule_name: r.name, trigger: r.trigger, reads: a2.reads, writes: a2.writes, emits: a2.emits, spawns: a2.spawns, calls: a2.calls}
+
+fn fparam_at(ps: [Param], i: int) -> Param:
+    at(ps, i)
+
+fn f_has(xs: [Text], x: Text) -> bool:
+    n = len(xs)
+    for i in 0..<n:
+        if text_item(xs, i) == x:
+            return true
+    false
+
+fn text_item(xs: [Text], i: int) -> Text:
+    at(xs, i)
+
+fn f_add(xs: [Text], x: Text) -> [Text]:
+    if f_has(xs, x) then xs else push(xs, x)
+
+fn f_read(a: FAcc, name: Text) -> FAcc:
+    if name == "_" or f_has(a.bound, name) then a else FAcc{reads: f_add(a.reads, name), writes: a.writes, emits: a.emits, spawns: a.spawns, calls: a.calls, bound: a.bound}
+
+fn f_callee(a: FAcc, callee: Text) -> FAcc:
+    FAcc{reads: a.reads, writes: a.writes, emits: a.emits, spawns: a.spawns, calls: f_add(a.calls, callee), bound: a.bound}
+
+fn f_bind(a: FAcc, name: Text) -> FAcc:
+    FAcc{reads: a.reads, writes: a.writes, emits: a.emits, spawns: a.spawns, calls: a.calls, bound: push(a.bound, name)}
+
+fn cq_facts(binder: Text, src: Expr, pred: Expr, a: FAcc) -> FAcc:
+    expr_facts(pred, f_bind(expr_facts(src, a), binder))
+
+fn letin_facts(name: Text, v: Expr, body: Expr, a: FAcc) -> FAcc:
+    expr_facts(body, f_bind(expr_facts(v, a), name))
+
+fn expr_facts(e: Expr, a: FAcc) -> FAcc:
+    match e:
+        VarRef(name) -> f_read(a, name)
+        Binop(_, l, r) -> expr_facts(r, expr_facts(l, a))
+        Unop(_, x) -> expr_facts(x, a)
+        IfExpr(c, t, f) -> expr_facts(f, expr_facts(t, expr_facts(c, a)))
+        Call(callee, args) -> exprs_facts(args, f_callee(a, callee))
+        Field(base, _) -> expr_facts(base, a)
+        CountQuery(binder, src, pred) -> cq_facts(binder, src, pred, a)
+        LetIn(name, v, body) -> letin_facts(name, v, body, a)
+        LitList(xs) -> exprs_facts(xs, a)
+        MapLit(fs) -> fields_facts(fs, a)
+        RangeExpr(lo, hi) -> expr_facts(hi, expr_facts(lo, a))
+        MatchExpr(scrut, arms) -> arms_facts(arms, expr_facts(scrut, a))
+        _ -> a
+
+fn exprs_facts(xs: [Expr], a: FAcc) -> FAcc:
+    n = len(xs)
+    mut acc = a
+    for i in 0..<n:
+        acc = expr_facts(expr_item(xs, i), acc)
+    acc
+
+fn expr_item(xs: [Expr], i: int) -> Expr:
+    at(xs, i)
+
+fn fields_facts(fs: [FieldExpr], a: FAcc) -> FAcc:
+    n = len(fs)
+    mut acc = a
+    for i in 0..<n:
+        fe = field_item(fs, i)
+        acc = expr_facts(fe.value, acc)
+    acc
+
+fn field_item(fs: [FieldExpr], i: int) -> FieldExpr:
+    at(fs, i)
+
+fn arms_facts(arms: [MatchArm], a: FAcc) -> FAcc:
+    n = len(arms)
+    mut acc = a
+    for i in 0..<n:
+        arm = arm_item(arms, i)
+        acc = expr_facts(arm.body, expr_facts(arm.pattern, acc))
+    acc
+
+fn arm_item(xs: [MatchArm], i: int) -> MatchArm:
+    at(xs, i)
+
+fn stmts_facts(ss: [Stmt], a: FAcc) -> FAcc:
+    n = len(ss)
+    mut acc = a
+    for i in 0..<n:
+        acc = stmt_facts(stmt_item(ss, i), acc)
+    acc
+
+fn stmt_item(ss: [Stmt], i: int) -> Stmt:
+    at(ss, i)
+
+fn f_emit(a: FAcc, name: Text) -> FAcc:
+    FAcc{reads: a.reads, writes: a.writes, emits: f_add(a.emits, name), spawns: a.spawns, calls: a.calls, bound: a.bound}
+
+fn f_spawn(a: FAcc, kind: Text) -> FAcc:
+    FAcc{reads: a.reads, writes: a.writes, emits: a.emits, spawns: f_add(a.spawns, kind), calls: a.calls, bound: a.bound}
+
+fn f_write(a: FAcc, name: Text) -> FAcc:
+    FAcc{reads: a.reads, writes: f_add(a.writes, name), emits: a.emits, spawns: a.spawns, calls: a.calls, bound: a.bound}
+
+fn let_facts(name: Text, v: Expr, a: FAcc) -> FAcc:
+    f_bind(expr_facts(v, a), name)
+
+fn letd_facts(names: [Text], v: Expr, a: FAcc) -> FAcc:
+    mut acc = expr_facts(v, a)
+    nn = len(names)
+    for i in 0..<nn:
+        acc = f_bind(acc, text_item(names, i))
+    acc
+
+fn setvar_facts(name: Text, v: Expr, a: FAcc) -> FAcc:
+    f_write(expr_facts(v, a), name)
+
+fn foreach_facts(var: Text, src: Expr, pred: Expr, body: [Stmt], a: FAcc) -> FAcc:
+    stmts_facts(body, expr_facts(pred, f_bind(expr_facts(src, a), var)))
+
+fn stmt_facts(s: Stmt, a: FAcc) -> FAcc:
+    match s:
+        EmitEffect(name, fs) -> fields_facts(fs, f_emit(a, name))
+        Require(e) -> expr_facts(e, a)
+        Let(name, v) -> let_facts(name, v, a)
+        LetDestructure(names, v) -> letd_facts(names, v, a)
+        SpawnEntity(kind, fs) -> fields_facts(fs, f_spawn(a, kind))
+        DestroyEntity(e) -> expr_facts(e, a)
+        SetField(base, _, v) -> expr_facts(v, expr_facts(base, a))
+        SetVar(name, v) -> setvar_facts(name, v, a)
+        ForEach(var, src, pred, body) -> foreach_facts(var, src, pred, body, a)
+        IfStmt(c, body) -> stmts_facts(body, expr_facts(c, a))
+        _ -> a
+
+# Unknown helper calls: valid = bundle fns + the three eval
+# builtins. Live eval stays graceful (NoneV — hot-reload mid-edit
+# must not crash the game); CHECK and TRY fail loud instead.
+pub fn astra_unknown_calls_c(cid: Text, source: Text) -> Text:
+    c = compile_c(cid, source)
+    facts = astra_facts_c(cid, source)
+    n = len(facts)
+    mut bad = []
+    for i in 0..<n:
+        f = facts_at(facts, i)
+        nc = len(f.calls)
+        for j in 0..<nc:
+            callee = text_item(f.calls, j)
+            if not call_is_known(c.functions, callee):
+                bad = f_add(bad, callee)
+    nb = len(bad)
+    mut out = ""
+    for i in 0..<nb:
+        out = if out == "" then "" + text_item(bad, i) else out + "," + text_item(bad, i)
+    out
+
+pub fn facts_at(xs: [RuleFacts], i: int) -> RuleFacts:
+    at(xs, i)
+
+fn call_is_known(funcs: [Function], name: Text) -> bool:
+    if name == "size" or name == "at" or name == "concat":
+        return true
+    n = len(funcs)
+    for i in 0..<n:
+        f = fn_item(funcs, i)
+        if f.name == name:
+            return true
+    false
+
+fn fn_item(fs: [Function], i: int) -> Function:
+    at(fs, i)
