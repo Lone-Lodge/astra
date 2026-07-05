@@ -54,6 +54,7 @@ pub enum Tok:
     Derive
     Law
     RelateKw
+    After
     Each
     To
     From
@@ -404,6 +405,7 @@ fn keyword_of(text: Text) -> Tok:
     else if text == "derive" then Derive
     else if text == "law" then Law
     else if text == "relate" then RelateKw
+    else if text == "after" then After
     else if text == "each" then Each
     else if text == "to" then To
     else if text == "use" then UseKw

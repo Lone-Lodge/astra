@@ -672,6 +672,8 @@ fn parse_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
         return parse_set_stmt(tokens, start + 1, n)
     if match_tok(tokens, start, n, "RelateKw"):
         return parse_relate_stmt(tokens, start + 1, n)
+    if match_tok(tokens, start, n, "After"):
+        return parse_after_stmt(tokens, start + 1, n)
     if match_tok(tokens, start, n, "Each"):
         return parse_foreach_stmt(tokens, start + 1, n)
     if match_tok(tokens, start, n, "When"):
@@ -957,6 +959,41 @@ fn parse_relate_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
     if not b.ok:
         return StmtStep{stmt: SetVar("", LitInt(0)), next: b.next, ok: false, error: b.error}
     StmtStep{stmt: RelateStmt(a.value, kind, b.value), next: b.next, ok: true, error: ""}
+
+# `after N: name = value` — a delayed set (A2, idea #7). N is a tick
+# count; the write lands N ticks from now. PURE PARSER SUGAR, no core
+# enum: it desugars to two resource writes inside an always-true block —
+#   __after:name     = tick + N     (the fire tick, `tick` from ctx)
+#   __after_val:name = value        (the value to set when it fires)
+# The host scans `__after:*` each tick and, when tick reaches the fire
+# tick, sets `name = __after_val:name` and disarms (`__after:name = 0`).
+# Resources are ints, so they save/rewind and self-manage lifetime — no
+# timer-list, no pool dance. Only ONE pending `after` per target name in
+# v1 (a second arm overwrites the first's fire tick). `becomes` accepted
+# as the law-readable synonym for `=`.
+fn parse_after_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
+    delay = parse_expr(tokens, start, n)
+    if not delay.ok:
+        return StmtStep{stmt: SetVar("", LitInt(0)), next: delay.next, ok: false, error: delay.error}
+    mut i = delay.next
+    if not match_tok(tokens, i, n, "Colon"):
+        return StmtStep{stmt: SetVar("", LitInt(0)), next: i, ok: false, error: "expected `:` after `after N`"}
+    i = i + 1
+    i = skip_newlines(tokens, i, n)
+    name = ident_of(at(tokens, i).tok)
+    if name == "":
+        return StmtStep{stmt: SetVar("", LitInt(0)), next: i, ok: false, error: "expected target name after `after N:`"}
+    i = i + 1
+    if not (match_tok(tokens, i, n, "Assign") or match_tok(tokens, i, n, "Becomes")):
+        return StmtStep{stmt: SetVar("", LitInt(0)), next: i, ok: false, error: "expected `=` or `becomes` in `after N: name = value`"}
+    i = i + 1
+    val = parse_expr(tokens, i, n)
+    if not val.ok:
+        return StmtStep{stmt: SetVar("", LitInt(0)), next: val.next, ok: false, error: val.error}
+    fire = Binop("+", VarRef("tick"), delay.value)
+    arm = SetVar("__after:" + name, fire)
+    stash = SetVar("__after_val:" + name, val.value)
+    StmtStep{stmt: IfStmt(LitBool(true), push(push([], arm), stash)), next: val.next, ok: true, error: ""}
 
 fn classify_set(lhs: Expr, rhs: Expr, next: int) -> StmtStep:
     match lhs:
@@ -1585,6 +1622,7 @@ fn tok_kind(t: Tok) -> Text:
         Derive -> "Derive"
         Law -> "Law"
         RelateKw -> "RelateKw"
+        After -> "After"
         Each -> "Each"
         To -> "To"
         From -> "From"
