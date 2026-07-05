@@ -51,6 +51,7 @@ pub enum Tok:
     Every
     Fn
     Const
+    Derive
     Each
     To
     From
@@ -398,6 +399,7 @@ fn keyword_of(text: Text) -> Tok:
     else if text == "every" then Every
     else if text == "fn" then Fn
     else if text == "const" then Const
+    else if text == "derive" then Derive
     else if text == "each" then Each
     else if text == "to" then To
     else if text == "use" then UseKw

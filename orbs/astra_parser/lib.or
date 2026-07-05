@@ -120,14 +120,29 @@ pub fn parse(tokens: [Token]) -> ParseResult:
                                     err_msg = floop.error
                                     err_line = t.line
                             else:
-                                step = parse_rule(tokens, i, n)
-                                if step.ok:
-                                    rules = push_mut(rules, step.rule)
-                                    i = step.next
+                                if match_tok(tokens, i, n, "Derive"):
+                                    # `derive NAME = EXPR` desugars to a
+                                    # rule that recomputes NAME every tick
+                                    # from EXPR — a value that is ALWAYS its
+                                    # expression, no manual recompute. (v1:
+                                    # every tick; deps-only is a follow-up.)
+                                    dstep = parse_derive_decl(tokens, i + 1, n)
+                                    if dstep.ok:
+                                        rules = push_mut(rules, dstep.rule)
+                                        i = dstep.next
+                                    else:
+                                        failed = true
+                                        err_msg = dstep.error
+                                        err_line = t.line
                                 else:
-                                    failed = true
-                                    err_msg = step.error
-                                    err_line = t.line
+                                    step = parse_rule(tokens, i, n)
+                                    if step.ok:
+                                        rules = push_mut(rules, step.rule)
+                                        i = step.next
+                                    else:
+                                        failed = true
+                                        err_msg = step.error
+                                        err_line = t.line
     if failed:
         ParseResult{rules: [], functions: [], entities: [], consts: [], components: [], uses: [], ok: false, error: ParseError{message: err_msg, line: err_line}}
     else:
@@ -484,6 +499,31 @@ fn parse_const_decl(tokens: [Token], start: int, n: int) -> ConstStep:
     if not val_step.ok:
         return ConstStep{cnst: ConstDecl{name: name, value: LitInt(0)}, next: val_step.next, ok: false, error: val_step.error}
     ConstStep{cnst: ConstDecl{name: name, value: val_step.value}, next: val_step.next, ok: true, error: ""}
+
+# `derive NAME = EXPR` — a resource that is ALWAYS its expression. It
+# desugars to a rule that recomputes NAME from EXPR every tick, so it
+# reuses the whole rule -> dispatch -> set pipeline with no new AST
+# node. The program describes what is TRUE (`derive alive = health > 0`)
+# instead of when to recompute it (idea #1: a dependency net, not an
+# instruction list). v1 recomputes every tick; a facts-driven
+# recompute-only-when-a-dep-changed pass is the follow-up.
+fn parse_derive_decl(tokens: [Token], start: int, n: int) -> RuleStep:
+    empty = Rule{name: "", params: [], body: [], trigger: "", condition: LitBool(true)}
+    if start >= n:
+        return RuleStep{rule: empty, next: start, ok: false, error: "expected name after `derive`"}
+    name = ident_of(at(tokens, start).tok)
+    if name == "":
+        return RuleStep{rule: empty, next: start, ok: false, error: "expected name after `derive`"}
+    mut i = start + 1
+    if not match_tok(tokens, i, n, "Assign"):
+        return RuleStep{rule: empty, next: i, ok: false, error: "expected `=` after derive name"}
+    i = i + 1
+    val_step = parse_expr(tokens, i, n)
+    if not val_step.ok:
+        return RuleStep{rule: empty, next: val_step.next, ok: false, error: val_step.error}
+    body = push([], SetVar(name, val_step.value))
+    r = Rule{name: "derive:" + name, params: [], body: body, trigger: "Tick", condition: LitBool(true)}
+    RuleStep{rule: r, next: val_step.next, ok: true, error: ""}
 
 # `for IDENT in INT..<INT: body` — top-level macro. Body must be a
 # single rule construct (typically `when EXPR: stmts`). At parse time
@@ -1484,6 +1524,7 @@ fn tok_kind(t: Tok) -> Text:
         Every -> "Every"
         Fn -> "Fn"
         Const -> "Const"
+        Derive -> "Derive"
         Each -> "Each"
         To -> "To"
         From -> "From"
