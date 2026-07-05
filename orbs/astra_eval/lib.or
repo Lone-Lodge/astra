@@ -326,6 +326,9 @@ fn eval_call(name: Text, args: [Expr], env: [Binding], funcs: [Function]) -> Val
             if name == "concat":
                 eval_builtin_concat(args, env, funcs)
             else:
+              if name == "related":
+                eval_builtin_related(args, env, funcs)
+              else:
                 f = lookup_func(funcs, name)
                 if f.name == "":
                     NoneV
@@ -372,6 +375,29 @@ fn eval_builtin_at(args: [Expr], env: [Binding], funcs: [Function]) -> Value:
         match list_v:
             ListV(items) -> if i >= 0 and i < len(items) then at(items, i) else NoneV
             _ -> NoneV
+
+# `related(source, kind)` -> [targets] — the relation query (A3). eval
+# stays host-agnostic: the host injects the relation index as a `__rel`
+# MapV ctx binding (keys "src:kind"), and this looks up the target list.
+# Missing -> empty list, so `count(x in related(npc, "hates"))` works
+# even when the entity has no such relation.
+fn eval_builtin_related(args: [Expr], env: [Binding], funcs: [Function]) -> Value:
+    if len(args) < 2:
+        ListV([])
+    else:
+        src = as_int(eval_expr(at(args, 0), env, funcs))
+        kind = text_of_value(eval_expr(at(args, 1), env, funcs))
+        related_lookup(lookup(env, "__rel"), "{src}:{kind}")
+
+fn related_lookup(rel_val: Value, key: Text) -> Value:
+    match rel_val:
+        MapV(entries) -> field_list_or_empty(entries, key)
+        _ -> ListV([])
+
+fn field_list_or_empty(entries: [ValueField], key: Text) -> Value:
+    match lookup_field(entries, key):
+        ListV(xs) -> ListV(xs)
+        _ -> ListV([])
 
 fn eval_builtin_concat(args: [Expr], env: [Binding], funcs: [Function]) -> Value:
     if len(args) < 2:

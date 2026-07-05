@@ -605,7 +605,7 @@ pub fn facts_at(xs: [RuleFacts], i: int) -> RuleFacts:
     at(xs, i)
 
 fn call_is_known(funcs: [Function], name: Text) -> bool:
-    if name == "size" or name == "at" or name == "concat":
+    if name == "size" or name == "at" or name == "concat" or name == "related":
         return true
     n = len(funcs)
     for i in 0..<n:
