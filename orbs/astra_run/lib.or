@@ -93,6 +93,7 @@ fn dispatch_with(c: Compiled, event: Text, args: [Value], ctx: [Binding]) -> Out
     mut effects = []
     for r in c.rules:
         if r.trigger == event:
+            orion_crumb_rule(r.name)
             outcome = run_rule_args_ctx(r, args, full_ctx, c.functions)
             for e in outcome.effects:
                 effects = push_mut(effects, e)
@@ -142,6 +143,7 @@ fn tick_with(c: Compiled, ctx: [Binding], prev_truths: [bool]) -> TickOutcome:
             was = prev_truth_at(prev_truths, idx)
             truths = push_mut(truths, now)
             if now and not was:
+                orion_crumb_rule(r.name)
                 outcome = run_rule_env(r, full_ctx, c.functions)
                 for e in outcome.effects:
                     effects = push_mut(effects, e)
@@ -164,6 +166,7 @@ pub fn compile_parse_result(source: Text) -> ParseResult:
 
 pub extern fn orion_ledger_tag(name: Text) -> int
 pub extern fn orion_ledger_off() -> int
+pub extern fn orion_crumb_rule(rule: Text)
 
 pub fn compile(source: Text) -> Compiled:
     # Memoise on source text — the same script bundle is dispatched
