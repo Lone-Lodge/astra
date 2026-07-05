@@ -20,6 +20,7 @@ pub enum AstraEffect:
     AstraDestroy(int)
     AstraSetVar(Text, Value)
     AstraEmit(Text, Value)
+    AstraRelate(int, Text, int)
 
 # One read trace — used by the typed Trace UI to show where a rule
 # looked when it computed its answer.
@@ -44,6 +45,7 @@ pub fn effect_copy(e: AstraEffect) -> AstraEffect:
         AstraDestroy(eid) -> AstraDestroy(eid)
         AstraSetVar(name, v) -> AstraSetVar("" + name, value_copy(v))
         AstraEmit(event, v) -> AstraEmit("" + event, value_copy(v))
+        AstraRelate(a, kind, b) -> AstraRelate(a, "" + kind, b)
 
 fn fields_copy(fields: [ValueField], i: int, acc: [ValueField]) -> [ValueField]:
     if i >= len(fields):

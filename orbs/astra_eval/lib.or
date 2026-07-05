@@ -172,6 +172,15 @@ fn step_stmt(s: Stmt, state: EvalState, funcs: [Function]) -> EvalState:
         SetField(base, field_name, value_expr) -> EvalState{env: state.env, effects: push(state.effects, set_field_to_effect(base, field_name, value_expr, state.env, funcs)), refused: false}
         ForEach(iter_name, list_expr, filter_expr, body) -> apply_foreach(iter_name, list_expr, filter_expr, body, state, funcs)
         IfStmt(cond, body) -> apply_if_stmt(cond, body, state, funcs)
+        RelateStmt(a, kind, b) -> apply_relate(a, kind, b, state, funcs)
+
+# `relate A kind B` -> an AstraRelate effect (source/target eval to
+# entity ids). The host maps it to atlas Relate; the relation is then
+# queryable via related_to/from (A3 create side).
+fn apply_relate(a: Expr, kind: Text, b: Expr, state: EvalState, funcs: [Function]) -> EvalState:
+    av = as_int(eval_expr(a, state.env, funcs))
+    bv = as_int(eval_expr(b, state.env, funcs))
+    EvalState{env: state.env, effects: push(state.effects, AstraRelate(av, kind, bv)), refused: false}
 
 fn apply_if_stmt(cond: Expr, body: [Stmt], state: EvalState, funcs: [Function]) -> EvalState:
     if is_truthy(eval_expr(cond, state.env, funcs)):
@@ -317,6 +326,9 @@ fn eval_call(name: Text, args: [Expr], env: [Binding], funcs: [Function]) -> Val
             if name == "concat":
                 eval_builtin_concat(args, env, funcs)
             else:
+              if name == "related":
+                eval_builtin_related(args, env, funcs)
+              else:
                 f = lookup_func(funcs, name)
                 if f.name == "":
                     NoneV
@@ -363,6 +375,29 @@ fn eval_builtin_at(args: [Expr], env: [Binding], funcs: [Function]) -> Value:
         match list_v:
             ListV(items) -> if i >= 0 and i < len(items) then at(items, i) else NoneV
             _ -> NoneV
+
+# `related(source, kind)` -> [targets] — the relation query (A3). eval
+# stays host-agnostic: the host injects the relation index as a `__rel`
+# MapV ctx binding (keys "src:kind"), and this looks up the target list.
+# Missing -> empty list, so `count(x in related(npc, "hates"))` works
+# even when the entity has no such relation.
+fn eval_builtin_related(args: [Expr], env: [Binding], funcs: [Function]) -> Value:
+    if len(args) < 2:
+        ListV([])
+    else:
+        src = as_int(eval_expr(at(args, 0), env, funcs))
+        kind = text_of_value(eval_expr(at(args, 1), env, funcs))
+        related_lookup(lookup(env, "__rel"), "{src}:{kind}")
+
+fn related_lookup(rel_val: Value, key: Text) -> Value:
+    match rel_val:
+        MapV(entries) -> field_list_or_empty(entries, key)
+        _ -> ListV([])
+
+fn field_list_or_empty(entries: [ValueField], key: Text) -> Value:
+    match lookup_field(entries, key):
+        ListV(xs) -> ListV(xs)
+        _ -> ListV([])
 
 fn eval_builtin_concat(args: [Expr], env: [Binding], funcs: [Function]) -> Value:
     if len(args) < 2:

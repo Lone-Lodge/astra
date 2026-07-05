@@ -120,14 +120,44 @@ pub fn parse(tokens: [Token]) -> ParseResult:
                                     err_msg = floop.error
                                     err_line = t.line
                             else:
-                                step = parse_rule(tokens, i, n)
-                                if step.ok:
-                                    rules = push_mut(rules, step.rule)
-                                    i = step.next
+                                if match_tok(tokens, i, n, "Derive"):
+                                    # `derive NAME = EXPR` desugars to a
+                                    # rule that recomputes NAME every tick
+                                    # from EXPR — a value that is ALWAYS its
+                                    # expression, no manual recompute. (v1:
+                                    # every tick; deps-only is a follow-up.)
+                                    dstep = parse_derive_decl(tokens, i + 1, n)
+                                    if dstep.ok:
+                                        rules = push_mut(rules, dstep.rule)
+                                        i = dstep.next
+                                    else:
+                                        failed = true
+                                        err_msg = dstep.error
+                                        err_line = t.line
                                 else:
-                                    failed = true
-                                    err_msg = step.error
-                                    err_line = t.line
+                                    if match_tok(tokens, i, n, "Law"):
+                                        # `law NAME:` names the following rule.
+                                        lstep = parse_law_decl(tokens, i + 1, n)
+                                        if lstep.ok:
+                                            rules = push_mut(rules, lstep.rule)
+                                            i = lstep.next
+                                        else:
+                                            failed = true
+                                            err_msg = lstep.error
+                                            err_line = t.line
+                                    else:
+                                        # belief/goal/constraint declarations,
+                                        # else a plain rule — flattened into
+                                        # one helper to keep this dispatch from
+                                        # pyramiding further.
+                                        step = parse_belief_goal_or_rule(tokens, i, n)
+                                        if step.ok:
+                                            rules = push_mut(rules, step.rule)
+                                            i = step.next
+                                        else:
+                                            failed = true
+                                            err_msg = step.error
+                                            err_line = t.line
     if failed:
         ParseResult{rules: [], functions: [], entities: [], consts: [], components: [], uses: [], ok: false, error: ParseError{message: err_msg, line: err_line}}
     else:
@@ -485,6 +515,142 @@ fn parse_const_decl(tokens: [Token], start: int, n: int) -> ConstStep:
         return ConstStep{cnst: ConstDecl{name: name, value: LitInt(0)}, next: val_step.next, ok: false, error: val_step.error}
     ConstStep{cnst: ConstDecl{name: name, value: val_step.value}, next: val_step.next, ok: true, error: ""}
 
+# `derive NAME = EXPR` — a resource that is ALWAYS its expression. It
+# desugars to a rule that recomputes NAME from EXPR every tick, so it
+# reuses the whole rule -> dispatch -> set pipeline with no new AST
+# node. The program describes what is TRUE (`derive alive = health > 0`)
+# instead of when to recompute it (idea #1: a dependency net, not an
+# instruction list). v1 recomputes every tick; a facts-driven
+# recompute-only-when-a-dep-changed pass is the follow-up.
+fn parse_derive_decl(tokens: [Token], start: int, n: int) -> RuleStep:
+    empty = Rule{name: "", params: [], body: [], trigger: "", condition: LitBool(true)}
+    if start >= n:
+        return RuleStep{rule: empty, next: start, ok: false, error: "expected name after `derive`"}
+    name = ident_of(at(tokens, start).tok)
+    if name == "":
+        return RuleStep{rule: empty, next: start, ok: false, error: "expected name after `derive`"}
+    mut i = start + 1
+    if not match_tok(tokens, i, n, "Assign"):
+        return RuleStep{rule: empty, next: i, ok: false, error: "expected `=` after derive name"}
+    i = i + 1
+    val_step = parse_expr(tokens, i, n)
+    if not val_step.ok:
+        return RuleStep{rule: empty, next: val_step.next, ok: false, error: val_step.error}
+    body = push([], SetVar(name, val_step.value))
+    r = Rule{name: "derive:" + name, params: [], body: body, trigger: "Tick", condition: LitBool(true)}
+    RuleStep{rule: r, next: val_step.next, ok: true, error: ""}
+
+# `law NAME:` then a rule — names the rule after the law. Pure sugar
+# over the following when/on rule (A2, idea #7): `law Gravity: when ...`
+# reads as a world law and gives an otherwise-anonymous rule a name, so
+# facts, the why-engine, and quarantine all identify it as `Gravity`.
+fn parse_law_decl(tokens: [Token], start: int, n: int) -> RuleStep:
+    empty = Rule{name: "", params: [], body: [], trigger: "", condition: LitBool(true)}
+    if start >= n:
+        return RuleStep{rule: empty, next: start, ok: false, error: "expected name after `law`"}
+    name = ident_of(at(tokens, start).tok)
+    if name == "":
+        return RuleStep{rule: empty, next: start, ok: false, error: "expected name after `law`"}
+    mut i = start + 1
+    if not match_tok(tokens, i, n, "Colon"):
+        return RuleStep{rule: empty, next: i, ok: false, error: "expected `:` after law name"}
+    i = i + 1
+    i = skip_newlines(tokens, i, n)
+    rstep = parse_rule(tokens, i, n)
+    if not rstep.ok:
+        return rstep
+    src = rstep.rule
+    named = Rule{name: name, params: src.params, body: src.body, trigger: src.trigger, condition: src.condition}
+    RuleStep{rule: named, next: rstep.next, ok: true, error: ""}
+
+# `belief NAME:` then a body of `fact = value` lines — declares an
+# agent's believed facts as a resource namespace `belief:NAME:fact`
+# that can diverge from reality (B1, idea belief-1). PURE PARSER SUGAR
+# (like derive/after): each fact line desugars to a Tick SetVar of the
+# prefixed resource, so the belief is re-asserted each tick and the
+# divergence from the real `fact` is a resource-prefix comparison
+# (atlas belief_wrong). A belief is not a separate world here — it is a
+# namespace of facts an agent holds; the fork-based simulatable belief
+# (foresee-on-belief) is a distinct future slice. `becomes` accepted.
+fn parse_belief_decl(tokens: [Token], start: int, n: int) -> RuleStep:
+    empty = Rule{name: "", params: [], body: [], trigger: "", condition: LitBool(true)}
+    if start >= n:
+        return RuleStep{rule: empty, next: start, ok: false, error: "expected name after `belief`"}
+    name = ident_of(at(tokens, start).tok)
+    if name == "":
+        return RuleStep{rule: empty, next: start, ok: false, error: "expected name after `belief`"}
+    mut i = start + 1
+    if not match_tok(tokens, i, n, "Colon"):
+        return RuleStep{rule: empty, next: i, ok: false, error: "expected `:` after belief name"}
+    i = i + 1
+    i = skip_newlines(tokens, i, n)
+    prefix = "belief:" + name + ":"
+    mut body = []
+    loop:
+        if i >= n:
+            break
+        t = at(tokens, i)
+        if is_newline(t.tok):
+            i = i + 1
+        else:
+            key = ident_of(t.tok)
+            if key == "":
+                break
+            i = i + 1
+            if not (match_tok(tokens, i, n, "Assign") or match_tok(tokens, i, n, "Becomes")):
+                return RuleStep{rule: empty, next: i, ok: false, error: "expected `=` after belief fact name"}
+            i = i + 1
+            vexpr = parse_expr(tokens, i, n)
+            if not vexpr.ok:
+                return RuleStep{rule: empty, next: vexpr.next, ok: false, error: vexpr.error}
+            body = push_mut(body, SetVar(prefix + key, vexpr.value))
+            i = vexpr.next
+    r = Rule{name: "belief:" + name, params: [], body: body, trigger: "Tick", condition: LitBool(true)}
+    RuleStep{rule: r, next: i, ok: true, error: ""}
+
+# Top-level dispatch tail: a belief/goal/constraint declaration, else a
+# plain rule. Kept in one helper so the parse() dispatch doesn't pyramid.
+fn parse_belief_goal_or_rule(tokens: [Token], start: int, n: int) -> RuleStep:
+    if match_tok(tokens, start, n, "Belief"):
+        return parse_belief_decl(tokens, start + 1, n)
+    if match_tok(tokens, start, n, "Goal"):
+        return parse_prefixed_derive(tokens, start + 1, n, "goal:")
+    if match_tok(tokens, start, n, "Constraint"):
+        return parse_prefixed_derive(tokens, start + 1, n, "constraint:")
+    parse_rule(tokens, start, n)
+
+# `goal NAME = COND` / `constraint NAME = COND` — the world describes its
+# intent, not the behavior (B3). Both desugar (like derive) to a Tick
+# rule that keeps `<ns>NAME` equal to the condition, so the engine
+# TRACKS whether each goal is met (goal:NAME == 1) and whether each
+# constraint holds (constraint:NAME == 1, violated when 0). This is the
+# declaration + evaluation layer — goals/constraints as first-class,
+# queryable, always-current facts (atlas goals_met / constraints_
+# violated). The SOLVER that plans HOW to achieve a goal under the
+# constraints is a distinct future slice; here the world states its
+# intent and the engine continuously scores it.
+fn parse_prefixed_derive(tokens: [Token], start: int, n: int, ns: Text) -> RuleStep:
+    empty = Rule{name: "", params: [], body: [], trigger: "", condition: LitBool(true)}
+    if start >= n:
+        return RuleStep{rule: empty, next: start, ok: false, error: "expected name after goal/constraint"}
+    name = ident_of(at(tokens, start).tok)
+    if name == "":
+        return RuleStep{rule: empty, next: start, ok: false, error: "expected name after goal/constraint"}
+    mut i = start + 1
+    if not match_tok(tokens, i, n, "Assign"):
+        return RuleStep{rule: empty, next: i, ok: false, error: "expected `=` after goal/constraint name"}
+    i = i + 1
+    val = parse_expr(tokens, i, n)
+    if not val.ok:
+        return RuleStep{rule: empty, next: val.next, ok: false, error: val.error}
+    # Coerce the predicate to 1/0 so it stores as an int resource (the
+    # set-drain drops raw bool payloads — see apply_set). goal:NAME==1
+    # means met; constraint:NAME==1 means satisfied.
+    scored = IfExpr(val.value, LitInt(1), LitInt(0))
+    body = push([], SetVar(ns + name, scored))
+    r = Rule{name: ns + name, params: [], body: body, trigger: "Tick", condition: LitBool(true)}
+    RuleStep{rule: r, next: val.next, ok: true, error: ""}
+
 # `for IDENT in INT..<INT: body` — top-level macro. Body must be a
 # single rule construct (typically `when EXPR: stmts`). At parse time
 # we clone the body once per iteration, substituting the iter var.
@@ -596,6 +762,10 @@ fn parse_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
         return parse_destroy_stmt(tokens, start + 1, n)
     if match_tok(tokens, start, n, "Set"):
         return parse_set_stmt(tokens, start + 1, n)
+    if match_tok(tokens, start, n, "RelateKw"):
+        return parse_relate_stmt(tokens, start + 1, n)
+    if match_tok(tokens, start, n, "After"):
+        return parse_after_stmt(tokens, start + 1, n)
     if match_tok(tokens, start, n, "Each"):
         return parse_foreach_stmt(tokens, start + 1, n)
     if match_tok(tokens, start, n, "When"):
@@ -795,14 +965,53 @@ fn parse_set_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
     if not lhs.ok:
         return StmtStep{stmt: SetVar("", LitInt(0)), next: lhs.next, ok: false, error: lhs.error}
     mut i = lhs.next
-    if not match_tok(tokens, i, n, "Assign"):
-        return StmtStep{stmt: SetVar("", LitInt(0)), next: i, ok: false, error: "expected `=` after set target"}
+    # Accept `=` OR `becomes` — the state-transition spelling desugars
+    # to the same SetVar/SetField (A2 laws-sugar).
+    if not (match_tok(tokens, i, n, "Assign") or match_tok(tokens, i, n, "Becomes")):
+        return StmtStep{stmt: SetVar("", LitInt(0)), next: i, ok: false, error: "expected `=` or `becomes` after target"}
     i = i + 1
     rhs = parse_expr(tokens, i, n)
     if not rhs.ok:
         return StmtStep{stmt: SetVar("", LitInt(0)), next: rhs.next, ok: false, error: rhs.error}
+    # Optional `confidence N` suffix (B2, uncertainty-as-type): tags the
+    # fact with a 0-100 certainty stored as a parallel `conf:<fact>`
+    # resource, read back by the `confidence(fact)` query. Pure sugar —
+    # `x = v confidence n` becomes SetVar(x, v) + SetVar(conf:x, n).
+    if match_tok(tokens, rhs.next, n, "Confidence"):
+        cname = varref_name_of(lhs.value)
+        if cname == "":
+            return StmtStep{stmt: SetVar("", LitInt(0)), next: rhs.next, ok: false, error: "confidence can only tag a plain `name = value` fact"}
+        cstep = parse_expr(tokens, rhs.next + 1, n)
+        if not cstep.ok:
+            return StmtStep{stmt: SetVar("", LitInt(0)), next: cstep.next, ok: false, error: cstep.error}
+        setv = SetVar(cname, rhs.value)
+        setc = SetVar("conf:" + cname, cstep.value)
+        return StmtStep{stmt: IfStmt(LitBool(true), push(push([], setv), setc)), next: cstep.next, ok: true, error: ""}
     # Classify the LHS — VarRef → SetVar; Field → SetField.
     classify_set(lhs.value, rhs.value, rhs.next)
+
+fn varref_name_of(e: Expr) -> Text:
+    match e:
+        VarRef(nm) -> nm
+        _ -> ""
+
+# `confidence(FACT)` -> VarRef("conf:FACT") — reads the parallel
+# certainty resource a `= v confidence n` fact wrote (B2). Pure sugar:
+# the conf: resource is auto-ctx bound, so a rule can `when
+# confidence(enemy_at) > 50: ...` reason over how sure it is. Unset
+# confidence reads 0 (unknown), so a plain fact is implicitly uncertain.
+fn parse_confidence_query(tokens: [Token], start: int, n: int) -> ExprStep:
+    if not match_tok(tokens, start, n, "LParen"):
+        return ExprStep{value: LitInt(0), next: start, ok: false, error: "expected `(` after `confidence`"}
+    i = start + 1
+    fact = ident_of(at(tokens, i).tok)
+    if fact == "":
+        return ExprStep{value: LitInt(0), next: i, ok: false, error: "expected fact name in confidence(...)"}
+    mut j = i + 1
+    if not match_tok(tokens, j, n, "RParen"):
+        return ExprStep{value: LitInt(0), next: j, ok: false, error: "expected `)` after confidence fact"}
+    j = j + 1
+    ExprStep{value: VarRef("conf:" + fact), next: j, ok: true, error: ""}
 
 # Parse `IDENT[.field]*` as a set target. Standalone helper (not going
 # through parse_postfix/primary) because the primary path hijacks
@@ -843,7 +1052,9 @@ fn looks_like_assignment(tokens: [Token], start: int, n: int) -> bool:
             i = i + 2
         else:
             break
-    match_tok(tokens, i, n, "Assign")
+    # `becomes` is a law-readable synonym for `=`: `player becomes dead`
+    # is the state-transition spelling of `player = dead` (A2, idea #7).
+    match_tok(tokens, i, n, "Assign") or match_tok(tokens, i, n, "Becomes")
 
 # `if COND: body-stmt` — single-branch conditional. No else. For
 # expression-form conditionals use `if-then-else` inside an expression.
@@ -860,6 +1071,58 @@ fn parse_if_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
     if not body_step.ok:
         return StmtStep{stmt: IfStmt(cond_step.value, []), next: body_step.next, ok: false, error: body_step.error}
     StmtStep{stmt: IfStmt(cond_step.value, push([], body_step.stmt)), next: body_step.next, ok: true, error: ""}
+
+# `relate SOURCE kind TARGET` — create a relation SOURCE -kind-> TARGET
+# (A3, idea #5). SOURCE/TARGET are exprs (entity refs), kind a bare
+# identifier: `relate player owns sword`, `relate wolf hunts player`.
+fn parse_relate_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
+    a = parse_expr(tokens, start, n)
+    if not a.ok:
+        return StmtStep{stmt: SetVar("", LitInt(0)), next: a.next, ok: false, error: a.error}
+    mut i = a.next
+    kind = ident_of(at(tokens, i).tok)
+    if kind == "":
+        return StmtStep{stmt: SetVar("", LitInt(0)), next: i, ok: false, error: "expected relation kind after `relate SOURCE`"}
+    i = i + 1
+    b = parse_expr(tokens, i, n)
+    if not b.ok:
+        return StmtStep{stmt: SetVar("", LitInt(0)), next: b.next, ok: false, error: b.error}
+    StmtStep{stmt: RelateStmt(a.value, kind, b.value), next: b.next, ok: true, error: ""}
+
+# `after N: name = value` — a delayed set (A2, idea #7). N is a tick
+# count; the write lands N ticks from now. PURE PARSER SUGAR, no core
+# enum: it desugars to two resource writes inside an always-true block —
+#   __after:name     = tick + N     (the fire tick, `tick` from ctx)
+#   __after_val:name = value        (the value to set when it fires)
+# The host scans `__after:*` each tick and, when tick reaches the fire
+# tick, sets `name = __after_val:name` and disarms (`__after:name = 0`).
+# Resources are ints, so they save/rewind and self-manage lifetime — no
+# timer-list, no pool dance. Only ONE pending `after` per target name in
+# v1 (a second arm overwrites the first's fire tick). `becomes` accepted
+# as the law-readable synonym for `=`.
+fn parse_after_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
+    delay = parse_expr(tokens, start, n)
+    if not delay.ok:
+        return StmtStep{stmt: SetVar("", LitInt(0)), next: delay.next, ok: false, error: delay.error}
+    mut i = delay.next
+    if not match_tok(tokens, i, n, "Colon"):
+        return StmtStep{stmt: SetVar("", LitInt(0)), next: i, ok: false, error: "expected `:` after `after N`"}
+    i = i + 1
+    i = skip_newlines(tokens, i, n)
+    name = ident_of(at(tokens, i).tok)
+    if name == "":
+        return StmtStep{stmt: SetVar("", LitInt(0)), next: i, ok: false, error: "expected target name after `after N:`"}
+    i = i + 1
+    if not (match_tok(tokens, i, n, "Assign") or match_tok(tokens, i, n, "Becomes")):
+        return StmtStep{stmt: SetVar("", LitInt(0)), next: i, ok: false, error: "expected `=` or `becomes` in `after N: name = value`"}
+    i = i + 1
+    val = parse_expr(tokens, i, n)
+    if not val.ok:
+        return StmtStep{stmt: SetVar("", LitInt(0)), next: val.next, ok: false, error: val.error}
+    fire = Binop("+", VarRef("tick"), delay.value)
+    arm = SetVar("__after:" + name, fire)
+    stash = SetVar("__after_val:" + name, val.value)
+    StmtStep{stmt: IfStmt(LitBool(true), push(push([], arm), stash)), next: val.next, ok: true, error: ""}
 
 fn classify_set(lhs: Expr, rhs: Expr, next: int) -> StmtStep:
     match lhs:
@@ -1048,6 +1311,8 @@ fn parse_primary(tokens: [Token], start: int, n: int) -> ExprStep:
         return parse_if_expr(tokens, start + 1, n)
     if match_tok(tokens, start, n, "Count"):
         return parse_count_query(tokens, start + 1, n)
+    if match_tok(tokens, start, n, "Confidence"):
+        return parse_confidence_query(tokens, start + 1, n)
     if match_tok(tokens, start, n, "Exists"):
         return parse_quantifier(tokens, start + 1, n, "exists")
     if match_tok(tokens, start, n, "None"):
@@ -1399,6 +1664,7 @@ fn subst_stmt(s: Stmt, name: Text, value: int) -> Stmt:
         SetField(base, fn_, ve) -> SetField(subst_expr(base, name, value), fn_, subst_expr(ve, name, value))
         ForEach(iter_n, le, filt, body) -> subst_foreach(iter_n, le, filt, body, name, value)
         IfStmt(c, body) -> IfStmt(subst_expr(c, name, value), subst_stmts(body, name, value, 0, []))
+        RelateStmt(a, kind, b) -> RelateStmt(subst_expr(a, name, value), kind, subst_expr(b, name, value))
 
 fn subst_foreach(iter_n: Text, le: Expr, filt: Expr, body: [Stmt], name: Text, value: int) -> Stmt:
     new_le = subst_expr(le, name, value)
@@ -1484,6 +1750,14 @@ fn tok_kind(t: Tok) -> Text:
         Every -> "Every"
         Fn -> "Fn"
         Const -> "Const"
+        Derive -> "Derive"
+        Law -> "Law"
+        RelateKw -> "RelateKw"
+        After -> "After"
+        Belief -> "Belief"
+        Confidence -> "Confidence"
+        Goal -> "Goal"
+        Constraint -> "Constraint"
         Each -> "Each"
         To -> "To"
         From -> "From"

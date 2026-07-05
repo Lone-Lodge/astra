@@ -51,6 +51,14 @@ pub enum Tok:
     Every
     Fn
     Const
+    Derive
+    Law
+    RelateKw
+    After
+    Belief
+    Confidence
+    Goal
+    Constraint
     Each
     To
     From
@@ -398,6 +406,14 @@ fn keyword_of(text: Text) -> Tok:
     else if text == "every" then Every
     else if text == "fn" then Fn
     else if text == "const" then Const
+    else if text == "derive" then Derive
+    else if text == "law" then Law
+    else if text == "relate" then RelateKw
+    else if text == "after" then After
+    else if text == "belief" then Belief
+    else if text == "confidence" then Confidence
+    else if text == "goal" then Goal
+    else if text == "constraint" then Constraint
     else if text == "each" then Each
     else if text == "to" then To
     else if text == "use" then UseKw
