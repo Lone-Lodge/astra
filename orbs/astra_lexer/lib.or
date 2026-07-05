@@ -55,6 +55,7 @@ pub enum Tok:
     Law
     RelateKw
     After
+    Belief
     Each
     To
     From
@@ -406,6 +407,7 @@ fn keyword_of(text: Text) -> Tok:
     else if text == "law" then Law
     else if text == "relate" then RelateKw
     else if text == "after" then After
+    else if text == "belief" then Belief
     else if text == "each" then Each
     else if text == "to" then To
     else if text == "use" then UseKw

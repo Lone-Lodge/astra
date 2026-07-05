@@ -146,14 +146,28 @@ pub fn parse(tokens: [Token]) -> ParseResult:
                                             err_msg = lstep.error
                                             err_line = t.line
                                     else:
-                                        step = parse_rule(tokens, i, n)
-                                        if step.ok:
-                                            rules = push_mut(rules, step.rule)
-                                            i = step.next
+                                        if match_tok(tokens, i, n, "Belief"):
+                                            # `belief NAME:` seeds an agent's
+                                            # believed facts as a resource
+                                            # namespace that can diverge from
+                                            # reality (B1).
+                                            bstep = parse_belief_decl(tokens, i + 1, n)
+                                            if bstep.ok:
+                                                rules = push_mut(rules, bstep.rule)
+                                                i = bstep.next
+                                            else:
+                                                failed = true
+                                                err_msg = bstep.error
+                                                err_line = t.line
                                         else:
-                                            failed = true
-                                            err_msg = step.error
-                                            err_line = t.line
+                                            step = parse_rule(tokens, i, n)
+                                            if step.ok:
+                                                rules = push_mut(rules, step.rule)
+                                                i = step.next
+                                            else:
+                                                failed = true
+                                                err_msg = step.error
+                                                err_line = t.line
     if failed:
         ParseResult{rules: [], functions: [], entities: [], consts: [], components: [], uses: [], ok: false, error: ParseError{message: err_msg, line: err_line}}
     else:
@@ -558,6 +572,51 @@ fn parse_law_decl(tokens: [Token], start: int, n: int) -> RuleStep:
     src = rstep.rule
     named = Rule{name: name, params: src.params, body: src.body, trigger: src.trigger, condition: src.condition}
     RuleStep{rule: named, next: rstep.next, ok: true, error: ""}
+
+# `belief NAME:` then a body of `fact = value` lines — declares an
+# agent's believed facts as a resource namespace `belief:NAME:fact`
+# that can diverge from reality (B1, idea belief-1). PURE PARSER SUGAR
+# (like derive/after): each fact line desugars to a Tick SetVar of the
+# prefixed resource, so the belief is re-asserted each tick and the
+# divergence from the real `fact` is a resource-prefix comparison
+# (atlas belief_wrong). A belief is not a separate world here — it is a
+# namespace of facts an agent holds; the fork-based simulatable belief
+# (foresee-on-belief) is a distinct future slice. `becomes` accepted.
+fn parse_belief_decl(tokens: [Token], start: int, n: int) -> RuleStep:
+    empty = Rule{name: "", params: [], body: [], trigger: "", condition: LitBool(true)}
+    if start >= n:
+        return RuleStep{rule: empty, next: start, ok: false, error: "expected name after `belief`"}
+    name = ident_of(at(tokens, start).tok)
+    if name == "":
+        return RuleStep{rule: empty, next: start, ok: false, error: "expected name after `belief`"}
+    mut i = start + 1
+    if not match_tok(tokens, i, n, "Colon"):
+        return RuleStep{rule: empty, next: i, ok: false, error: "expected `:` after belief name"}
+    i = i + 1
+    i = skip_newlines(tokens, i, n)
+    prefix = "belief:" + name + ":"
+    mut body = []
+    loop:
+        if i >= n:
+            break
+        t = at(tokens, i)
+        if is_newline(t.tok):
+            i = i + 1
+        else:
+            key = ident_of(t.tok)
+            if key == "":
+                break
+            i = i + 1
+            if not (match_tok(tokens, i, n, "Assign") or match_tok(tokens, i, n, "Becomes")):
+                return RuleStep{rule: empty, next: i, ok: false, error: "expected `=` after belief fact name"}
+            i = i + 1
+            vexpr = parse_expr(tokens, i, n)
+            if not vexpr.ok:
+                return RuleStep{rule: empty, next: vexpr.next, ok: false, error: vexpr.error}
+            body = push_mut(body, SetVar(prefix + key, vexpr.value))
+            i = vexpr.next
+    r = Rule{name: "belief:" + name, params: [], body: body, trigger: "Tick", condition: LitBool(true)}
+    RuleStep{rule: r, next: i, ok: true, error: ""}
 
 # `for IDENT in INT..<INT: body` — top-level macro. Body must be a
 # single rule construct (typically `when EXPR: stmts`). At parse time
@@ -1623,6 +1682,7 @@ fn tok_kind(t: Tok) -> Text:
         Law -> "Law"
         RelateKw -> "RelateKw"
         After -> "After"
+        Belief -> "Belief"
         Each -> "Each"
         To -> "To"
         From -> "From"
