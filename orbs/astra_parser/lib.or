@@ -835,8 +835,10 @@ fn parse_set_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
     if not lhs.ok:
         return StmtStep{stmt: SetVar("", LitInt(0)), next: lhs.next, ok: false, error: lhs.error}
     mut i = lhs.next
-    if not match_tok(tokens, i, n, "Assign"):
-        return StmtStep{stmt: SetVar("", LitInt(0)), next: i, ok: false, error: "expected `=` after set target"}
+    # Accept `=` OR `becomes` — the state-transition spelling desugars
+    # to the same SetVar/SetField (A2 laws-sugar).
+    if not (match_tok(tokens, i, n, "Assign") or match_tok(tokens, i, n, "Becomes")):
+        return StmtStep{stmt: SetVar("", LitInt(0)), next: i, ok: false, error: "expected `=` or `becomes` after target"}
     i = i + 1
     rhs = parse_expr(tokens, i, n)
     if not rhs.ok:
@@ -883,7 +885,9 @@ fn looks_like_assignment(tokens: [Token], start: int, n: int) -> bool:
             i = i + 2
         else:
             break
-    match_tok(tokens, i, n, "Assign")
+    # `becomes` is a law-readable synonym for `=`: `player becomes dead`
+    # is the state-transition spelling of `player = dead` (A2, idea #7).
+    match_tok(tokens, i, n, "Assign") or match_tok(tokens, i, n, "Becomes")
 
 # `if COND: body-stmt` — single-branch conditional. No else. For
 # expression-form conditionals use `if-then-else` inside an expression.
