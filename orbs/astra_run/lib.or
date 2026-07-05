@@ -335,14 +335,110 @@ data FAcc: reads: [Text], writes: [Text], emits: [Text], spawns: [Text], calls: 
 
 pub fn astra_facts_c(cid: Text, source: Text) -> [RuleFacts]:
     c = compile_c(cid, source)
+    # A rule's effect is not just its own body — it inherits everything
+    # the helper functions it calls read and write. Without this, a
+    # resource touched only inside a helper (cubsy's tray_x_end, read in
+    # pixel_to_tray_slot) looks unread, and the scheduler would call two
+    # rules independent when they clash through a shared helper. So:
+    # facts each function, close them over the call graph, then fold the
+    # called functions' closed facts into every rule.
+    fnames = fn_names(c.functions)
+    fbase = fn_facts_all(c.functions)
+    fclosed = close_facts(fnames, fbase)
     n = len(c.rules)
     mut out = []
     for i in 0..<n:
-        out = push_mut(out, rule_facts(frule_at(c.rules, i)))
+        rf = rule_facts(frule_at(c.rules, i))
+        out = push_mut(out, merge_callees(rf, fnames, fclosed))
     out
 
 fn frule_at(rs: [Rule], i: int) -> Rule:
     at(rs, i)
+
+fn ffn_at(fs: [Function], i: int) -> Function:
+    at(fs, i)
+
+fn fn_names(fs: [Function]) -> [Text]:
+    n = len(fs)
+    mut out = []
+    for i in 0..<n:
+        out = push_mut(out, ffn_at(fs, i).name)
+    out
+
+# Facts for one function body (params are bound, so not reads).
+fn fn_facts_of(f: Function) -> RuleFacts:
+    mut bound = []
+    np = len(f.params)
+    for i in 0..<np:
+        bound = push_mut(bound, fparam_at(f.params, i).name)
+    a = expr_facts(f.body, FAcc{reads: [], writes: [], emits: [], spawns: [], calls: [], bound: bound})
+    RuleFacts{rule_name: f.name, trigger: "fn", reads: a.reads, writes: a.writes, emits: a.emits, spawns: a.spawns, calls: a.calls}
+
+fn fn_facts_all(fs: [Function]) -> [RuleFacts]:
+    n = len(fs)
+    mut out = []
+    for i in 0..<n:
+        out = push_mut(out, fn_facts_of(ffn_at(fs, i)))
+    out
+
+fn facts_idx(names: [Text], name: Text) -> int:
+    n = len(names)
+    for i in 0..<n:
+        if text_item(names, i) == name:
+            return i
+    0 - 1
+
+fn union_into(dst: [Text], src: [Text]) -> [Text]:
+    mut out = dst
+    n = len(src)
+    for i in 0..<n:
+        out = f_add(out, text_item(src, i))
+    out
+
+# Fold b's sets into a (union), keeping a's identity.
+fn merge_facts(a: RuleFacts, b: RuleFacts) -> RuleFacts:
+    RuleFacts{rule_name: a.rule_name, trigger: a.trigger, reads: union_into(a.reads, b.reads), writes: union_into(a.writes, b.writes), emits: union_into(a.emits, b.emits), spawns: union_into(a.spawns, b.spawns), calls: union_into(a.calls, b.calls)}
+
+# One propagation step: each fn absorbs its direct callees' facts.
+fn close_once(names: [Text], facts: [RuleFacts]) -> [RuleFacts]:
+    n = len(facts)
+    mut out = []
+    for i in 0..<n:
+        mut f = ffacts_at(facts, i)
+        nc = len(f.calls)
+        for k in 0..<nc:
+            ci = facts_idx(names, text_item(f.calls, k))
+            if ci >= 0:
+                f = merge_facts(f, ffacts_at(facts, ci))
+        out = push_mut(out, f)
+    out
+
+fn ffacts_at(fs: [RuleFacts], i: int) -> RuleFacts:
+    at(fs, i)
+
+# Transitive closure by repeated propagation. Union is monotonic and
+# the name set finite, so len(names) passes reach the fixpoint (cycles
+# converge — union is idempotent).
+fn close_facts(names: [Text], facts: [RuleFacts]) -> [RuleFacts]:
+    mut cur = facts
+    mut pass = 0
+    limit = len(names)
+    loop:
+        if pass >= limit:
+            break
+        cur = close_once(names, cur)
+        pass = pass + 1
+    cur
+
+# Fold every called function's closed facts into a rule.
+fn merge_callees(rf: RuleFacts, names: [Text], fclosed: [RuleFacts]) -> RuleFacts:
+    mut f = rf
+    nc = len(rf.calls)
+    for k in 0..<nc:
+        ci = facts_idx(names, text_item(rf.calls, k))
+        if ci >= 0:
+            f = merge_facts(f, ffacts_at(fclosed, ci))
+    f
 
 fn rule_facts(r: Rule) -> RuleFacts:
     mut bound = []
