@@ -577,6 +577,7 @@ fn stmt_facts(s: Stmt, a: FAcc) -> FAcc:
         SetVar(name, v) -> setvar_facts(name, v, a)
         ForEach(var, src, pred, body) -> foreach_facts(var, src, pred, body, a)
         IfStmt(c, body) -> stmts_facts(body, expr_facts(c, a))
+        RelateStmt(src, k, tgt) -> expr_facts(tgt, expr_facts(src, a))
         _ -> a
 
 # Unknown helper calls: valid = bundle fns + the three eval

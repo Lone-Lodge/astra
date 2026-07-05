@@ -172,6 +172,15 @@ fn step_stmt(s: Stmt, state: EvalState, funcs: [Function]) -> EvalState:
         SetField(base, field_name, value_expr) -> EvalState{env: state.env, effects: push(state.effects, set_field_to_effect(base, field_name, value_expr, state.env, funcs)), refused: false}
         ForEach(iter_name, list_expr, filter_expr, body) -> apply_foreach(iter_name, list_expr, filter_expr, body, state, funcs)
         IfStmt(cond, body) -> apply_if_stmt(cond, body, state, funcs)
+        RelateStmt(a, kind, b) -> apply_relate(a, kind, b, state, funcs)
+
+# `relate A kind B` -> an AstraRelate effect (source/target eval to
+# entity ids). The host maps it to atlas Relate; the relation is then
+# queryable via related_to/from (A3 create side).
+fn apply_relate(a: Expr, kind: Text, b: Expr, state: EvalState, funcs: [Function]) -> EvalState:
+    av = as_int(eval_expr(a, state.env, funcs))
+    bv = as_int(eval_expr(b, state.env, funcs))
+    EvalState{env: state.env, effects: push(state.effects, AstraRelate(av, kind, bv)), refused: false}
 
 fn apply_if_stmt(cond: Expr, body: [Stmt], state: EvalState, funcs: [Function]) -> EvalState:
     if is_truthy(eval_expr(cond, state.env, funcs)):

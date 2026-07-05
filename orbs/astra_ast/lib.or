@@ -41,6 +41,7 @@ pub enum Stmt:
     SetVar(Text, Expr)             # set name = value — host applies resource/var write
     ForEach(Text, Expr, Expr, [Stmt])  # for x in list [where pred]: stmts — runtime list iteration with optional filter
     IfStmt(Expr, [Stmt])               # if cond: body-stmt (single-branch conditional)
+    RelateStmt(Expr, Text, Expr)       # `relate A kind B` — create relation A -kind-> B (A3)
 
 # A rule's parameter.
 pub data Param: name: Text, type_name: Text
@@ -142,6 +143,7 @@ pub fn ast_copy_stmt(s: Stmt) -> Stmt:
         SetVar(name, val) -> SetVar("" + name, ast_copy_expr(val))
         ForEach(name, src, pred, body) -> ForEach("" + name, ast_copy_expr(src), ast_copy_expr(pred), ast_copy_stmts(body))
         IfStmt(cond, body) -> IfStmt(ast_copy_expr(cond), ast_copy_stmts(body))
+        RelateStmt(a, kind, b) -> RelateStmt(ast_copy_expr(a), "" + kind, ast_copy_expr(b))
 
 pub fn ast_copy_stmts(xs: [Stmt]) -> [Stmt]:
     n = len(xs)

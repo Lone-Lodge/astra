@@ -670,6 +670,8 @@ fn parse_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
         return parse_destroy_stmt(tokens, start + 1, n)
     if match_tok(tokens, start, n, "Set"):
         return parse_set_stmt(tokens, start + 1, n)
+    if match_tok(tokens, start, n, "RelateKw"):
+        return parse_relate_stmt(tokens, start + 1, n)
     if match_tok(tokens, start, n, "Each"):
         return parse_foreach_stmt(tokens, start + 1, n)
     if match_tok(tokens, start, n, "When"):
@@ -938,6 +940,23 @@ fn parse_if_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
     if not body_step.ok:
         return StmtStep{stmt: IfStmt(cond_step.value, []), next: body_step.next, ok: false, error: body_step.error}
     StmtStep{stmt: IfStmt(cond_step.value, push([], body_step.stmt)), next: body_step.next, ok: true, error: ""}
+
+# `relate SOURCE kind TARGET` — create a relation SOURCE -kind-> TARGET
+# (A3, idea #5). SOURCE/TARGET are exprs (entity refs), kind a bare
+# identifier: `relate player owns sword`, `relate wolf hunts player`.
+fn parse_relate_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
+    a = parse_expr(tokens, start, n)
+    if not a.ok:
+        return StmtStep{stmt: SetVar("", LitInt(0)), next: a.next, ok: false, error: a.error}
+    mut i = a.next
+    kind = ident_of(at(tokens, i).tok)
+    if kind == "":
+        return StmtStep{stmt: SetVar("", LitInt(0)), next: i, ok: false, error: "expected relation kind after `relate SOURCE`"}
+    i = i + 1
+    b = parse_expr(tokens, i, n)
+    if not b.ok:
+        return StmtStep{stmt: SetVar("", LitInt(0)), next: b.next, ok: false, error: b.error}
+    StmtStep{stmt: RelateStmt(a.value, kind, b.value), next: b.next, ok: true, error: ""}
 
 fn classify_set(lhs: Expr, rhs: Expr, next: int) -> StmtStep:
     match lhs:
@@ -1477,6 +1496,7 @@ fn subst_stmt(s: Stmt, name: Text, value: int) -> Stmt:
         SetField(base, fn_, ve) -> SetField(subst_expr(base, name, value), fn_, subst_expr(ve, name, value))
         ForEach(iter_n, le, filt, body) -> subst_foreach(iter_n, le, filt, body, name, value)
         IfStmt(c, body) -> IfStmt(subst_expr(c, name, value), subst_stmts(body, name, value, 0, []))
+        RelateStmt(a, kind, b) -> RelateStmt(subst_expr(a, name, value), kind, subst_expr(b, name, value))
 
 fn subst_foreach(iter_n: Text, le: Expr, filt: Expr, body: [Stmt], name: Text, value: int) -> Stmt:
     new_le = subst_expr(le, name, value)
@@ -1564,6 +1584,7 @@ fn tok_kind(t: Tok) -> Text:
         Const -> "Const"
         Derive -> "Derive"
         Law -> "Law"
+        RelateKw -> "RelateKw"
         Each -> "Each"
         To -> "To"
         From -> "From"
