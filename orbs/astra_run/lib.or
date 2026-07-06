@@ -241,14 +241,14 @@ fn compile_fresh(source: Text) -> Compiled:
         le = lex_result.error
         lmsg = le.message
         lline = le.line
-        log_error("astra", "lex failed line {lline}: {lmsg}")
+        error("astra", "lex failed line {lline}: {lmsg}")
         return Compiled{rules: [], functions: [], consts: [], components: []}
     parse_result = parse(lex_result.tokens)
     if not parse_result.ok:
         pe = parse_result.error
         pmsg = pe.message
         pline = pe.line
-        log_error("astra", "parse failed line {pline}: {pmsg}")
+        error("astra", "parse failed line {pline}: {pmsg}")
         return Compiled{rules: [], functions: [], consts: [], components: []}
     consts = eval_consts(parse_result.consts, parse_result.functions, 0, [])
     Compiled{rules: parse_result.rules, functions: parse_result.functions, consts: consts, components: parse_result.components}
