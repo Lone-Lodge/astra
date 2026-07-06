@@ -4,8 +4,8 @@
 # Indent är kosmetisk — Newline separerar statements, brackets/keywords
 # delimar resten. Inga INDENT/DEDENT tokens behövs.
 #
-# Pure Orion — kör på lodge-orion interpretern, kompilerbar via orion-self
-# när bundle-rebuild #143 är klar.
+# Pure Orion — kompileras nativt av `orion` (LLVM-backend). Kördes tidigare
+# på lodge-orion-interpretern; den är arkiverad.
 
 use bytes
 
