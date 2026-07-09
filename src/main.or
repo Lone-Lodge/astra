@@ -2,7 +2,7 @@ use astra_run
 use astra_value
 use astra_outcome
 use astra_eval
-use io
+use os
 
 fn main() -> int:
     # M1 regression
@@ -134,6 +134,15 @@ fn main() -> int:
     v2 = eval_fn(src_lit, "pick_a", [IntV(99)])
     print_line("count records with a==99 (expect 0):")
     print_line(show_int(int_of_value(v2)))
+
+    # from/through ranges (verification)
+    src_rng = read_file("fixtures/range.astra")
+    print_line("from 1 to 5 count (expect 4):")
+    print_line(show_int(int_of_value(eval_fn(src_rng, "rng_to", []))))
+    print_line("1 through 4 count (expect 4):")
+    print_line(show_int(int_of_value(eval_fn(src_rng, "rng_through", []))))
+    print_line("from 2 through 6 count (expect 5):")
+    print_line(show_int(int_of_value(eval_fn(src_rng, "rng_from_through", []))))
     0
 
 # 2x2 square piece, encoded as MapV records {dc, dr}.
