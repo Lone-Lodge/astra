@@ -2,7 +2,7 @@ use astra_run
 use astra_value
 use astra_outcome
 use astra_eval
-use io
+use os
 
 fn main() -> int:
     # M1 regression
@@ -134,6 +134,37 @@ fn main() -> int:
     v2 = eval_fn(src_lit, "pick_a", [IntV(99)])
     print_line("count records with a==99 (expect 0):")
     print_line(show_int(int_of_value(v2)))
+
+    # from/through ranges (verification)
+    src_rng = read_file("fixtures/range.astra")
+    print_line("from 1 to 5 count (expect 4):")
+    print_line(show_int(int_of_value(eval_fn(src_rng, "rng_to", []))))
+    print_line("1 through 4 count (expect 4):")
+    print_line(show_int(int_of_value(eval_fn(src_rng, "rng_through", []))))
+    print_line("from 2 through 6 count (expect 5):")
+    print_line(show_int(int_of_value(eval_fn(src_rng, "rng_from_through", []))))
+
+    # astra_check pass: well-formed bundle has 0 errors; a bundle with a
+    # duplicate fn + an arity mismatch + an unknown call has 3.
+    src_ok = "fn dbl(n): n * 2\nrule go(x): require dbl(x) > 0\nrule go2(x): require size([1, 2]) > 0"
+    print_line("check clean errors (expect 0):")
+    print_line(show_int(len(astra_check_source(src_ok))))
+    src_bad = "fn dbl(n): n * 2\nfn dbl(n): n * 3\nrule go(x): require dbl(x, x) > 0\nrule bad(x): require missing(x) > 0"
+    print_line("check bad errors (expect 3):")
+    print_line(show_int(len(astra_check_source(src_bad))))
+
+    # `all` universal quantifier: true only when every element satisfies COND.
+    src_all = "fn allpos(): if all x in [2, 4, 6] where x > 0 then 1 else 0\nfn allneg(): if all x in [2, 0, 6] where x > 0 then 1 else 0"
+    print_line("all x>0 over [2,4,6] (expect 1):")
+    print_line(show_int(int_of_value(eval_fn(src_all, "allpos", []))))
+    print_line("all x>0 over [2,0,6] (expect 0):")
+    print_line(show_int(int_of_value(eval_fn(src_all, "allneg", []))))
+
+    # `for` as an alias for `each` — same loop macro, both spellings.
+    src_for = read_file("fixtures/for_alias.astra")
+    ffa = tick(src_for, [], [])
+    print_line("for-alias fires at cold tick (expect 1, only r=2):")
+    print_line(show_int(eff_count(ffa.outcome)))
     0
 
 # 2x2 square piece, encoded as MapV records {dc, dr}.

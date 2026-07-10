@@ -109,7 +109,7 @@ pub fn parse(tokens: [Token]) -> ParseResult:
                                 err_msg = estep.error
                                 err_line = t.line
                         else:
-                            if match_tok(tokens, i, n, "Each"):
+                            if match_tok(tokens, i, n, "Each") or match_tok(tokens, i, n, "For"):
                                 floop = parse_for_loop(tokens, i + 1, n)
                                 if floop.ok:
                                     for r in floop.rules:
@@ -146,18 +146,33 @@ pub fn parse(tokens: [Token]) -> ParseResult:
                                             err_msg = lstep.error
                                             err_line = t.line
                                     else:
-                                        # belief/goal/constraint declarations,
-                                        # else a plain rule — flattened into
-                                        # one helper to keep this dispatch from
-                                        # pyramiding further.
-                                        step = parse_belief_goal_or_rule(tokens, i, n)
-                                        if step.ok:
-                                            rules = push_mut(rules, step.rule)
-                                            i = step.next
+                                        if looks_like_implicit_fn(tokens, i, n):
+                                            # `NAME(params): body` with no `fn`
+                                            # keyword — top-level pure helper.
+                                            # parse_function takes the name as
+                                            # its start token, so pass `i` (not
+                                            # i+1 like the explicit `fn` path).
+                                            ifstep = parse_function(tokens, i, n)
+                                            if ifstep.ok:
+                                                functions = push_mut(functions, ifstep.func)
+                                                i = ifstep.next
+                                            else:
+                                                failed = true
+                                                err_msg = ifstep.error
+                                                err_line = t.line
                                         else:
-                                            failed = true
-                                            err_msg = step.error
-                                            err_line = t.line
+                                            # belief/goal/constraint declarations,
+                                            # else a plain rule — flattened into
+                                            # one helper to keep this dispatch from
+                                            # pyramiding further.
+                                            step = parse_belief_goal_or_rule(tokens, i, n)
+                                            if step.ok:
+                                                rules = push_mut(rules, step.rule)
+                                                i = step.next
+                                            else:
+                                                failed = true
+                                                err_msg = step.error
+                                                err_line = t.line
     if failed:
         ParseResult{rules: [], functions: [], entities: [], consts: [], components: [], uses: [], ok: false, error: ParseError{message: err_msg, line: err_line}}
     else:
@@ -766,7 +781,7 @@ fn parse_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
         return parse_relate_stmt(tokens, start + 1, n)
     if match_tok(tokens, start, n, "After"):
         return parse_after_stmt(tokens, start + 1, n)
-    if match_tok(tokens, start, n, "Each"):
+    if match_tok(tokens, start, n, "Each") or match_tok(tokens, start, n, "For"):
         return parse_foreach_stmt(tokens, start + 1, n)
     if match_tok(tokens, start, n, "When"):
         return parse_if_stmt(tokens, start + 1, n)
@@ -1311,12 +1326,20 @@ fn parse_primary(tokens: [Token], start: int, n: int) -> ExprStep:
         return parse_if_expr(tokens, start + 1, n)
     if match_tok(tokens, start, n, "Count"):
         return parse_count_query(tokens, start + 1, n)
+    if match_tok(tokens, start, n, "From"):
+        # `from A to B` / `from A through B` — the leading `from` is pure
+        # readability sugar; the range itself is built by the postfix
+        # `to`/`through` handler on the expression that follows. Skip the
+        # keyword and parse the range normally.
+        return parse_postfix(tokens, start + 1, n)
     if match_tok(tokens, start, n, "Confidence"):
         return parse_confidence_query(tokens, start + 1, n)
     if match_tok(tokens, start, n, "Exists"):
         return parse_quantifier(tokens, start + 1, n, "exists")
     if match_tok(tokens, start, n, "None"):
         return parse_quantifier(tokens, start + 1, n, "none")
+    if match_tok(tokens, start, n, "All"):
+        return parse_quantifier(tokens, start + 1, n, "all")
     if match_tok(tokens, start, n, "Let"):
         return parse_let_in_expr(tokens, start + 1, n)
     if match_tok(tokens, start, n, "Match"):
@@ -1397,8 +1420,11 @@ fn parse_count_query(tokens: [Token], start: int, n: int) -> ExprStep:
 fn parse_count_list_expr(tokens: [Token], start: int, n: int) -> ExprStep:
     parse_postfix(tokens, start, n)
 
-# `exists ITER in LIST where COND` → desugars to `count(...) > 0`.
-# `none   ITER in LIST where COND` → desugars to `count(...) == 0`.
+# `exists ITER in LIST where COND` → desugars to `count(where COND) > 0`.
+# `none   ITER in LIST where COND` → desugars to `count(where COND) == 0`.
+# `all    ITER in LIST where COND` → desugars to `count(where not COND) == 0`
+#   ("no element violates COND" — the universal quantifier completing the
+#   exists/none/all trio, all over the same CountQuery machinery).
 # Reads as natural English; clamps down the most common count idioms.
 fn parse_quantifier(tokens: [Token], start: int, n: int, kind: Text) -> ExprStep:
     if start >= n:
@@ -1420,29 +1446,12 @@ fn parse_quantifier(tokens: [Token], start: int, n: int, kind: Text) -> ExprStep
     cond = parse_expr(tokens, i, n)
     if not cond.ok:
         return cond
-    counted = CountQuery(iter_name, list_step.value, cond.value)
+    # `all` counts VIOLATIONS (not COND) and asserts there are none; exists
+    # and none count matches of COND directly.
+    predicate = if kind == "all" then Unop("not", cond.value) else cond.value
+    counted = CountQuery(iter_name, list_step.value, predicate)
     desugared = if kind == "exists" then Binop(">", counted, LitInt(0)) else Binop("==", counted, LitInt(0))
     ExprStep{value: desugared, next: cond.next, ok: true, error: ""}
-
-# `from A to B` — same as `A to B`, the `from` keyword just reads more
-# naturally at the start of a range expression. Both produce a RangeExpr.
-fn parse_from_to_range(tokens: [Token], start: int, n: int) -> ExprStep:
-    lo = parse_unary(tokens, start, n)
-    if not lo.ok:
-        return lo
-    mut i = lo.next
-    mut inclusive = false
-    if match_tok(tokens, i, n, "Through"):
-        inclusive = true
-    else:
-        if not match_tok(tokens, i, n, "To"):
-            return ExprStep{value: lo.value, next: i, ok: false, error: "expected `to` or `through` after `from`"}
-    i = i + 1
-    hi = parse_unary(tokens, i, n)
-    if not hi.ok:
-        return hi
-    upper = if inclusive then Binop("+", hi.value, LitInt(1)) else hi.value
-    ExprStep{value: RangeExpr(lo.value, upper), next: hi.next, ok: true, error: ""}
 
 # `match SCRUTINEE: PAT -> RESULT, PAT -> RESULT, _ -> DEFAULT`
 # Pattern is currently an int literal or `_` for wildcard. Arms are
@@ -1764,7 +1773,6 @@ fn tok_kind(t: Tok) -> Text:
         Through -> "Through"
         Exists -> "Exists"
         None -> "None"
-        Whenever -> "Whenever"
         Becomes -> "Becomes"
         Spawned -> "Spawned"
         Destroyed -> "Destroyed"

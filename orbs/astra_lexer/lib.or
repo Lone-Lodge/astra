@@ -4,8 +4,8 @@
 # Indent är kosmetisk — Newline separerar statements, brackets/keywords
 # delimar resten. Inga INDENT/DEDENT tokens behövs.
 #
-# Pure Orion — kör på lodge-orion interpretern, kompilerbar via orion-self
-# när bundle-rebuild #143 är klar.
+# Pure Orion — kompileras nativt av `orion` (LLVM-backend). Kördes tidigare
+# på lodge-orion-interpretern; den är arkiverad.
 
 use bytes
 
@@ -65,7 +65,6 @@ pub enum Tok:
     Through
     Exists
     None
-    Whenever
     UseKw
     Becomes
     Spawned
@@ -416,6 +415,8 @@ fn keyword_of(text: Text) -> Tok:
     else if text == "constraint" then Constraint
     else if text == "each" then Each
     else if text == "to" then To
+    else if text == "from" then From
+    else if text == "through" then Through
     else if text == "use" then UseKw
     else if text == "exists" then Exists
     else if text == "none" then None

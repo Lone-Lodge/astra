@@ -5,6 +5,6 @@ description = "Astra — a small typed host-agnostic language for authored game 
 
 [orbs]
 astra = "path:orbs/astra"
-log = "path:../orion-self/orbs/log"
-io = "*"
+log = "path:../orion/orbs/log"
+os = "*"
 bytes = "*"
