@@ -22,7 +22,7 @@ pub data ParseError: message: Text, line: int
 # `rule`/`on`/`when`/`every` bodies; `entities` are typed authoring
 # declarations the host uses to register constructors for `spawn Kind`;
 # `components` are ECS component type declarations (`component Kind: f:t`).
-pub data ParseResult: rules: [Rule], functions: [Function], entities: [EntityDecl], consts: [ConstDecl], components: [ComponentDecl], uses: [Text], ok: bool, error: ParseError
+pub data ParseResult: rules: [Rule], functions: [Function], entities: [EntityDecl], consts: [ConstDecl], components: [ComponentDecl], uses: [Text], tests: [TestCase], ok: bool, error: ParseError
 
 pub fn parse(tokens: [Token]) -> ParseResult:
     n = len(tokens)
@@ -33,6 +33,7 @@ pub fn parse(tokens: [Token]) -> ParseResult:
     mut consts = []
     mut components = []
     mut uses = []
+    mut tests = []
     mut failed = false
     mut err_msg = ""
     mut err_line = 0
@@ -146,37 +147,49 @@ pub fn parse(tokens: [Token]) -> ParseResult:
                                             err_msg = lstep.error
                                             err_line = t.line
                                     else:
-                                        if looks_like_implicit_fn(tokens, i, n):
-                                            # `NAME(params): body` with no `fn`
-                                            # keyword — top-level pure helper.
-                                            # parse_function takes the name as
-                                            # its start token, so pass `i` (not
-                                            # i+1 like the explicit `fn` path).
-                                            ifstep = parse_function(tokens, i, n)
-                                            if ifstep.ok:
-                                                functions = push_mut(functions, ifstep.func)
-                                                i = ifstep.next
+                                        if match_tok(tokens, i, n, "Test"):
+                                            # `test NAME:` — inline test block (dev
+                                            # surface; kept out of the runtime tree).
+                                            tstep = parse_test_decl(tokens, i + 1, n)
+                                            if tstep.ok:
+                                                tests = push_mut(tests, tstep.test)
+                                                i = tstep.next
                                             else:
                                                 failed = true
-                                                err_msg = ifstep.error
+                                                err_msg = tstep.error
                                                 err_line = t.line
                                         else:
-                                            # belief/goal/constraint declarations,
-                                            # else a plain rule — flattened into
-                                            # one helper to keep this dispatch from
-                                            # pyramiding further.
-                                            step = parse_belief_goal_or_rule(tokens, i, n)
-                                            if step.ok:
-                                                rules = push_mut(rules, step.rule)
-                                                i = step.next
+                                            if looks_like_implicit_fn(tokens, i, n):
+                                                # `NAME(params): body` with no `fn`
+                                                # keyword — top-level pure helper.
+                                                # parse_function takes the name as
+                                                # its start token, so pass `i` (not
+                                                # i+1 like the explicit `fn` path).
+                                                ifstep = parse_function(tokens, i, n)
+                                                if ifstep.ok:
+                                                    functions = push_mut(functions, ifstep.func)
+                                                    i = ifstep.next
+                                                else:
+                                                    failed = true
+                                                    err_msg = ifstep.error
+                                                    err_line = t.line
                                             else:
-                                                failed = true
-                                                err_msg = step.error
-                                                err_line = t.line
+                                                # belief/goal/constraint declarations,
+                                                # else a plain rule — flattened into
+                                                # one helper to keep this dispatch from
+                                                # pyramiding further.
+                                                step = parse_belief_goal_or_rule(tokens, i, n)
+                                                if step.ok:
+                                                    rules = push_mut(rules, step.rule)
+                                                    i = step.next
+                                                else:
+                                                    failed = true
+                                                    err_msg = step.error
+                                                    err_line = t.line
     if failed:
-        ParseResult{rules: [], functions: [], entities: [], consts: [], components: [], uses: [], ok: false, error: ParseError{message: err_msg, line: err_line}}
+        ParseResult{rules: [], functions: [], entities: [], consts: [], components: [], uses: [], tests: [], ok: false, error: ParseError{message: err_msg, line: err_line}}
     else:
-        ParseResult{rules: rules, functions: functions, entities: entities, consts: consts, components: components, uses: uses, ok: true, error: ParseError{message: "", line: 0}}
+        ParseResult{rules: rules, functions: functions, entities: entities, consts: consts, components: components, uses: uses, tests: tests, ok: true, error: ParseError{message: "", line: 0}}
 
 data UseStep: name: Text, next: int, ok: bool, error: Text
 
@@ -352,7 +365,7 @@ fn parse_when_rule(tokens: [Token], start: int, n: int) -> RuleStep:
     RuleStep{rule: Rule{name: "", params: [], body: body, trigger: "$when", condition: cond.value}, next: i, ok: true, error: ""}
 
 fn at_rule_starter(tokens: [Token], i: int, n: int) -> bool:
-    match_tok(tokens, i, n, "Rule") or match_tok(tokens, i, n, "On") or match_tok(tokens, i, n, "Every") or match_tok(tokens, i, n, "Fn") or match_tok(tokens, i, n, "When") or match_tok(tokens, i, n, "Component") or match_tok(tokens, i, n, "Entity") or match_tok(tokens, i, n, "Const")
+    match_tok(tokens, i, n, "Rule") or match_tok(tokens, i, n, "On") or match_tok(tokens, i, n, "Every") or match_tok(tokens, i, n, "Fn") or match_tok(tokens, i, n, "When") or match_tok(tokens, i, n, "Component") or match_tok(tokens, i, n, "Entity") or match_tok(tokens, i, n, "Const") or match_tok(tokens, i, n, "Test")
 
 # `fn NAME(params) -> TYPE: body-expr` — pure helper. Params may include
 # optional `: type` annotations; we accept and discard them for now.
@@ -529,6 +542,97 @@ fn parse_const_decl(tokens: [Token], start: int, n: int) -> ConstStep:
     if not val_step.ok:
         return ConstStep{cnst: ConstDecl{name: name, value: LitInt(0)}, next: val_step.next, ok: false, error: val_step.error}
     ConstStep{cnst: ConstDecl{name: name, value: val_step.value}, next: val_step.next, ok: true, error: ""}
+
+# `test NAME:` NEWLINE step* — an inline test (pillar 5). Steps are
+# `apply CALL`, `tick N`, `expect COND`, one per line, more indented than the
+# `test` keyword. The body ends on a dedent (a token at or left of the `test`
+# column) or a top-level starter. The runner (astra_run::run_tests) executes
+# each step against a fresh effect accumulator.
+data TestDeclStep: test: TestCase, next: int, ok: bool, error: Text
+
+fn parse_test_decl(tokens: [Token], start: int, n: int) -> TestDeclStep:
+    empty = TestCase{name: "", steps: []}
+    if start >= n:
+        return TestDeclStep{test: empty, next: start, ok: false, error: "expected name after `test`"}
+    name = ident_of(at(tokens, start).tok)
+    if name == "":
+        return TestDeclStep{test: empty, next: start, ok: false, error: "expected name after `test`"}
+    mut i = start + 1
+    if not match_tok(tokens, i, n, "Colon"):
+        return TestDeclStep{test: empty, next: i, ok: false, error: "expected `:` after test name"}
+    i = i + 1
+    # Column of the `test` keyword — a step at or left of it is a dedent.
+    test_col = if start >= 1 then at(tokens, start - 1).col else 0
+    i = skip_newlines(tokens, i, n)
+    mut steps = []
+    loop:
+        if i >= n:
+            break
+        t = at(tokens, i)
+        if is_newline(t.tok):
+            i = i + 1
+        else:
+            if at_rule_starter(tokens, i, n):
+                break
+            if t.col <= test_col:
+                break
+            step = parse_test_step(tokens, i, n)
+            if not step.ok:
+                return TestDeclStep{test: empty, next: step.next, ok: false, error: step.error}
+            steps = push_mut(steps, step.step)
+            i = step.next
+    TestDeclStep{test: TestCase{name: name, steps: steps}, next: i, ok: true, error: ""}
+
+data TestStepStep: step: TestStep, next: int, ok: bool, error: Text
+
+fn empty_test_step() -> TestStep:
+    TestStep{kind: "", name: "", args: [], cond: LitBool(false)}
+
+fn parse_test_step(tokens: [Token], start: int, n: int) -> TestStepStep:
+    if match_tok(tokens, start, n, "Apply"):
+        return parse_apply_step(tokens, start + 1, n)
+    if match_tok(tokens, start, n, "Expect"):
+        estep = parse_expr(tokens, start + 1, n)
+        if not estep.ok:
+            return TestStepStep{step: empty_test_step(), next: estep.next, ok: false, error: estep.error}
+        return TestStepStep{step: TestStep{kind: "expect", name: "", args: [], cond: estep.value}, next: estep.next, ok: true, error: ""}
+    # `tick N` — `tick` is an unreserved identifier by design (hosts inject it
+    # as a ctx binding), so match it textually here in the test sub-grammar.
+    if ident_of(at(tokens, start).tok) == "tick":
+        vstep = parse_expr(tokens, start + 1, n)
+        if not vstep.ok:
+            return TestStepStep{step: empty_test_step(), next: vstep.next, ok: false, error: vstep.error}
+        return TestStepStep{step: TestStep{kind: "tick", name: "", args: [], cond: vstep.value}, next: vstep.next, ok: true, error: ""}
+    TestStepStep{step: empty_test_step(), next: start, ok: false, error: "expected `apply`, `tick`, or `expect` in test body"}
+
+# `apply NAME(args)` — start points at the rule NAME. Args are optional.
+fn parse_apply_step(tokens: [Token], start: int, n: int) -> TestStepStep:
+    if start >= n:
+        return TestStepStep{step: empty_test_step(), next: start, ok: false, error: "expected rule name after `apply`"}
+    name = ident_of(at(tokens, start).tok)
+    if name == "":
+        return TestStepStep{step: empty_test_step(), next: start, ok: false, error: "expected rule name after `apply`"}
+    mut i = start + 1
+    mut args = []
+    if match_tok(tokens, i, n, "LParen"):
+        i = i + 1
+        if match_tok(tokens, i, n, "RParen"):
+            i = i + 1
+        else:
+            loop:
+                astep = parse_expr(tokens, i, n)
+                if not astep.ok:
+                    return TestStepStep{step: empty_test_step(), next: astep.next, ok: false, error: astep.error}
+                args = push_mut(args, astep.value)
+                i = astep.next
+                if match_tok(tokens, i, n, "Comma"):
+                    i = i + 1
+                else:
+                    break
+            if not match_tok(tokens, i, n, "RParen"):
+                return TestStepStep{step: empty_test_step(), next: i, ok: false, error: "expected `)` after apply args"}
+            i = i + 1
+    TestStepStep{step: TestStep{kind: "apply", name: name, args: args, cond: LitBool(false)}, next: i, ok: true, error: ""}
 
 # `derive NAME = EXPR` — a resource that is ALWAYS its expression. It
 # desugars to a rule that recomputes NAME from EXPR every tick, so it

@@ -62,6 +62,24 @@ pub data Function: name: Text, params: [Param], return_type: Text, body: Expr
 
 pub data ConstDecl: name: Text, value: Expr
 
+# ---- Tests (pillar 5: tests as syntax) ----
+# A `test NAME:` block is a sequence of steps the test runner executes
+# against a fresh effect accumulator. `apply CALL` runs a named rule and
+# folds its effects in; `tick N` advances the tick counter (readable as
+# `tick` in expects); `expect COND` asserts (with `effects` bound to the
+# running effect count). Tests are a dev/tooling surface — they never enter
+# the arena-evacuated Compiled tree, only ParseResult.
+# A test step is a flat data struct with a `kind` tag rather than an enum:
+# an enum whose variants carry different payload shapes (a call vs an Expr)
+# tripped an Orion codegen bug where the payload extraction read garbage. A
+# plain struct sidesteps it entirely.
+#   kind="apply"  -> name + args   (run the named rule)
+#   kind="tick"   -> cond          (advance the counter by cond's value)
+#   kind="expect" -> cond          (assert)
+pub data TestStep: kind: Text, name: Text, args: [Expr], cond: Expr
+
+pub data TestCase: name: Text, steps: [TestStep]
+
 # An entity declaration — `entity Kind { f: type, ... }`. The host
 # registers a constructor for `Kind` so `spawn Kind { ... }` can produce
 # a real typed entity. Fields are parsed for documentation and future
@@ -194,6 +212,30 @@ pub fn ast_copy_functions(xs: [Function]) -> [Function]:
 
 fn fn_at(xs: [Function], i: int) -> Function:
     at(xs, i)
+
+pub fn ast_copy_tests(xs: [TestCase]) -> [TestCase]:
+    n = len(xs)
+    mut out = []
+    for i in 0..<n:
+        t = test_at(xs, i)
+        out = push_mut(out, TestCase{name: "" + t.name, steps: ast_copy_test_steps(t.steps)})
+    out
+
+fn test_at(xs: [TestCase], i: int) -> TestCase:
+    at(xs, i)
+
+fn ast_copy_test_steps(xs: [TestStep]) -> [TestStep]:
+    n = len(xs)
+    mut out = []
+    for i in 0..<n:
+        out = push_mut(out, ast_copy_test_step(test_step_at(xs, i)))
+    out
+
+fn test_step_at(xs: [TestStep], i: int) -> TestStep:
+    at(xs, i)
+
+fn ast_copy_test_step(s: TestStep) -> TestStep:
+    TestStep{kind: "" + s.kind, name: "" + s.name, args: ast_copy_exprs(s.args), cond: ast_copy_expr(s.cond)}
 
 pub fn ast_copy_components(xs: [ComponentDecl]) -> [ComponentDecl]:
     n = len(xs)
