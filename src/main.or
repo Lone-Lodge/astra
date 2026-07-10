@@ -194,6 +194,15 @@ fn main() -> int:
     cell_rec = MapV(push([], ValueField{name: "empty", value: IntV(1)}))
     print_line("cell.empty field access fires (expect 1):")
     print_line(show_int(eff_count(run(src_empty, "check", [cell_rec]))))
+
+    # In-body `if cond: body` statement — a single-branch conditional inside
+    # a rule body. Dispatched on the `if` keyword (not `when`, which delimits
+    # top-level rules); the guarded emit fires only when the condition holds.
+    src_ifstmt = "rule big(x): if x > 5: emit Big()"
+    print_line("if-stmt guard true x=9 (expect 1):")
+    print_line(show_int(eff_count(run(src_ifstmt, "big", [IntV(9)]))))
+    print_line("if-stmt guard false x=3 (expect 0):")
+    print_line(show_int(eff_count(run(src_ifstmt, "big", [IntV(3)]))))
     0
 
 fn setvar_of(o: Outcome, name: Text) -> int:
