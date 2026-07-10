@@ -187,6 +187,13 @@ fn main() -> int:
     out_lo = dispatch_ctx(src_intent, "Tick", [], [Binding{name: "hunger", value: IntV(40)}])
     print_line("intent score hunger=40 (expect 0):")
     print_line(show_int(setvar_of(out_lo, "intent:FeedSelf:score")))
+
+    # `.empty` field access — `empty` must lex as an identifier, not a keyword
+    # (VISION: `require cell.empty`). A reserved `empty` breaks the `.` access.
+    src_empty = "rule check(cell): require cell.empty emit Ok()"
+    cell_rec = MapV(push([], ValueField{name: "empty", value: IntV(1)}))
+    print_line("cell.empty field access fires (expect 1):")
+    print_line(show_int(eff_count(run(src_empty, "check", [cell_rec]))))
     0
 
 fn setvar_of(o: Outcome, name: Text) -> int:

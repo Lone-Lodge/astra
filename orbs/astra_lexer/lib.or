@@ -41,7 +41,6 @@ pub enum Tok:
     All
     In
     Where
-    Empty
     True
     False
     Not
@@ -396,7 +395,6 @@ fn keyword_of(text: Text) -> Tok:
     else if text == "all" then All
     else if text == "in" then In
     else if text == "where" then Where
-    else if text == "empty" then Empty
     else if text == "true" then True
     else if text == "false" then False
     else if text == "not" then Not
