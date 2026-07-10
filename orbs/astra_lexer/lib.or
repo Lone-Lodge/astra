@@ -65,7 +65,6 @@ pub enum Tok:
     Through
     Exists
     None
-    Whenever
     UseKw
     Becomes
     Spawned
@@ -416,6 +415,8 @@ fn keyword_of(text: Text) -> Tok:
     else if text == "constraint" then Constraint
     else if text == "each" then Each
     else if text == "to" then To
+    else if text == "from" then From
+    else if text == "through" then Through
     else if text == "use" then UseKw
     else if text == "exists" then Exists
     else if text == "none" then None
