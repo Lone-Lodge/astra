@@ -37,6 +37,7 @@ pub fn parse(tokens: [Token]) -> ParseResult:
     mut failed = false
     mut err_msg = ""
     mut err_line = 0
+    mut handled = false
     # Leading newlines + `use NAME` directives (engine bundling metadata,
     # conventionally first in the file).
     loop:
@@ -68,9 +69,14 @@ pub fn parse(tokens: [Token]) -> ParseResult:
         if is_newline(t.tok):
             i = i + 1
         else:
-            if is_eof_or_done(t):
-                break
+            # Flat keyword dispatch: one self-contained block per top-level
+            # construct, each guarded by `handled`, so adding a construct is
+            # one block — not another pyramid level. Order is irrelevant (the
+            # leading keyword is unambiguous) except the implicit-fn and
+            # belief/goal/rule fallthroughs, which must stay last.
+            handled = false
             if match_tok(tokens, i, n, "Component"):
+                handled = true
                 cstep = parse_component_decl(tokens, i + 1, n)
                 if cstep.ok:
                     components = push_mut(components, cstep.component)
@@ -79,113 +85,104 @@ pub fn parse(tokens: [Token]) -> ParseResult:
                     failed = true
                     err_msg = cstep.error
                     err_line = t.line
-            else:
-                if match_tok(tokens, i, n, "Const"):
-                    kstep = parse_const_decl(tokens, i + 1, n)
-                    if kstep.ok:
-                        consts = push_mut(consts, kstep.cnst)
-                        i = kstep.next
-                    else:
-                        failed = true
-                        err_msg = kstep.error
-                        err_line = t.line
+            if not handled and match_tok(tokens, i, n, "Const"):
+                handled = true
+                kstep = parse_const_decl(tokens, i + 1, n)
+                if kstep.ok:
+                    consts = push_mut(consts, kstep.cnst)
+                    i = kstep.next
                 else:
-                    if match_tok(tokens, i, n, "Fn"):
-                        fstep = parse_function(tokens, i + 1, n)
-                        if fstep.ok:
-                            functions = push_mut(functions, fstep.func)
-                            i = fstep.next
-                        else:
-                            failed = true
-                            err_msg = fstep.error
-                            err_line = t.line
-                    else:
-                        if match_tok(tokens, i, n, "Entity"):
-                            estep = parse_entity_decl(tokens, i + 1, n)
-                            if estep.ok:
-                                entities = push_mut(entities, estep.entity)
-                                i = estep.next
-                            else:
-                                failed = true
-                                err_msg = estep.error
-                                err_line = t.line
-                        else:
-                            if match_tok(tokens, i, n, "Each") or match_tok(tokens, i, n, "For"):
-                                floop = parse_for_loop(tokens, i + 1, n)
-                                if floop.ok:
-                                    for r in floop.rules:
-                                        rules = push_mut(rules, r)
-                                    i = floop.next
-                                else:
-                                    failed = true
-                                    err_msg = floop.error
-                                    err_line = t.line
-                            else:
-                                if match_tok(tokens, i, n, "Derive"):
-                                    # `derive NAME = EXPR` desugars to a
-                                    # rule that recomputes NAME every tick
-                                    # from EXPR — a value that is ALWAYS its
-                                    # expression, no manual recompute. (v1:
-                                    # every tick; deps-only is a follow-up.)
-                                    dstep = parse_derive_decl(tokens, i + 1, n)
-                                    if dstep.ok:
-                                        rules = push_mut(rules, dstep.rule)
-                                        i = dstep.next
-                                    else:
-                                        failed = true
-                                        err_msg = dstep.error
-                                        err_line = t.line
-                                else:
-                                    if match_tok(tokens, i, n, "Law"):
-                                        # `law NAME:` names the following rule.
-                                        lstep = parse_law_decl(tokens, i + 1, n)
-                                        if lstep.ok:
-                                            rules = push_mut(rules, lstep.rule)
-                                            i = lstep.next
-                                        else:
-                                            failed = true
-                                            err_msg = lstep.error
-                                            err_line = t.line
-                                    else:
-                                        if match_tok(tokens, i, n, "Test"):
-                                            # `test NAME:` — inline test block (dev
-                                            # surface; kept out of the runtime tree).
-                                            tstep = parse_test_decl(tokens, i + 1, n)
-                                            if tstep.ok:
-                                                tests = push_mut(tests, tstep.test)
-                                                i = tstep.next
-                                            else:
-                                                failed = true
-                                                err_msg = tstep.error
-                                                err_line = t.line
-                                        else:
-                                            if looks_like_implicit_fn(tokens, i, n):
-                                                # `NAME(params): body` with no `fn`
-                                                # keyword — top-level pure helper.
-                                                # parse_function takes the name as
-                                                # its start token, so pass `i` (not
-                                                # i+1 like the explicit `fn` path).
-                                                ifstep = parse_function(tokens, i, n)
-                                                if ifstep.ok:
-                                                    functions = push_mut(functions, ifstep.func)
-                                                    i = ifstep.next
-                                                else:
-                                                    failed = true
-                                                    err_msg = ifstep.error
-                                                    err_line = t.line
-                                            else:
-                                                # belief/goal/constraint declarations,
-                                                # else a plain rule — flattened into
-                                                # one helper to keep this dispatch from
-                                                # pyramiding further.
-                                                step = parse_belief_goal_or_rule(tokens, i, n)
-                                                if step.ok:
-                                                    rules = push_mut(rules, step.rule)
-                                                    i = step.next
-                                                else:
-                                                    failed = true
-                                                    err_msg = step.error
-                                                    err_line = t.line
+                    failed = true
+                    err_msg = kstep.error
+                    err_line = t.line
+            if not handled and match_tok(tokens, i, n, "Fn"):
+                handled = true
+                fstep = parse_function(tokens, i + 1, n)
+                if fstep.ok:
+                    functions = push_mut(functions, fstep.func)
+                    i = fstep.next
+                else:
+                    failed = true
+                    err_msg = fstep.error
+                    err_line = t.line
+            if not handled and match_tok(tokens, i, n, "Entity"):
+                handled = true
+                estep = parse_entity_decl(tokens, i + 1, n)
+                if estep.ok:
+                    entities = push_mut(entities, estep.entity)
+                    i = estep.next
+                else:
+                    failed = true
+                    err_msg = estep.error
+                    err_line = t.line
+            if not handled and (match_tok(tokens, i, n, "Each") or match_tok(tokens, i, n, "For")):
+                handled = true
+                floop = parse_for_loop(tokens, i + 1, n)
+                if floop.ok:
+                    for r in floop.rules:
+                        rules = push_mut(rules, r)
+                    i = floop.next
+                else:
+                    failed = true
+                    err_msg = floop.error
+                    err_line = t.line
+            if not handled and match_tok(tokens, i, n, "Derive"):
+                # `derive NAME = EXPR` -> a rule recomputing NAME from EXPR
+                # every tick: a value that is ALWAYS its expression.
+                handled = true
+                dstep = parse_derive_decl(tokens, i + 1, n)
+                if dstep.ok:
+                    rules = push_mut(rules, dstep.rule)
+                    i = dstep.next
+                else:
+                    failed = true
+                    err_msg = dstep.error
+                    err_line = t.line
+            if not handled and match_tok(tokens, i, n, "Law"):
+                # `law NAME:` names the following rule.
+                handled = true
+                lstep = parse_law_decl(tokens, i + 1, n)
+                if lstep.ok:
+                    rules = push_mut(rules, lstep.rule)
+                    i = lstep.next
+                else:
+                    failed = true
+                    err_msg = lstep.error
+                    err_line = t.line
+            if not handled and match_tok(tokens, i, n, "Test"):
+                # `test NAME:` — inline test block (dev surface).
+                handled = true
+                tstep = parse_test_decl(tokens, i + 1, n)
+                if tstep.ok:
+                    tests = push_mut(tests, tstep.test)
+                    i = tstep.next
+                else:
+                    failed = true
+                    err_msg = tstep.error
+                    err_line = t.line
+            if not handled and looks_like_implicit_fn(tokens, i, n):
+                # `NAME(params): body` with no `fn` keyword — a top-level pure
+                # helper. parse_function takes the name as its start token, so
+                # pass `i` (not i+1 like the explicit `fn` path).
+                handled = true
+                ifstep = parse_function(tokens, i, n)
+                if ifstep.ok:
+                    functions = push_mut(functions, ifstep.func)
+                    i = ifstep.next
+                else:
+                    failed = true
+                    err_msg = ifstep.error
+                    err_line = t.line
+            if not handled:
+                # belief/goal/constraint/intent declarations, else a plain rule.
+                step = parse_belief_goal_or_rule(tokens, i, n)
+                if step.ok:
+                    rules = push_mut(rules, step.rule)
+                    i = step.next
+                else:
+                    failed = true
+                    err_msg = step.error
+                    err_line = t.line
     if failed:
         ParseResult{rules: [], functions: [], entities: [], consts: [], components: [], uses: [], tests: [], ok: false, error: ParseError{message: err_msg, line: err_line}}
     else:
@@ -1872,9 +1869,6 @@ fn is_newline(t: Tok) -> bool:
     match t:
         Newline -> true
         _ -> false
-
-fn is_eof_or_done(_t: Token) -> bool:
-    false
 
 # Compare current token against a kind name. We dispatch by short string
 # because Orion match on tagged enums with no payload is verbose to write
