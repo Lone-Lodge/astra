@@ -28,7 +28,7 @@ pub extern fn orion_persist_off() -> int
 
 # What `compile` produces — rules, helper functions, evaluated consts
 # and component declarations (the ECS auto-pack schema).
-data Compiled: rules: [Rule], functions: [Function], consts: [Binding], components: [ComponentDecl]
+data Compiled: rules: [Rule], functions: [Function], consts: [Binding], components: [ComponentDecl], tests: [TestCase]
 
 # Lex + parse + (MVP: skip check) + evaluate the first rule by NAME.
 # Errors at any stage collapse to an empty Outcome — atlas pipes silent
@@ -178,7 +178,7 @@ fn prev_truth_at(prev: [bool], i: int) -> bool:
 pub fn compile_parse_result(source: Text) -> ParseResult:
     lex_result = lex(source)
     if not lex_result.ok:
-        return ParseResult{rules: [], functions: [], entities: [], consts: [], components: [], uses: [], ok: false, error: ParseError{message: lex_result.error.message, line: lex_result.error.line}}
+        return ParseResult{rules: [], functions: [], entities: [], consts: [], components: [], uses: [], tests: [], ok: false, error: ParseError{message: lex_result.error.message, line: lex_result.error.line}}
     parse(lex_result.tokens)
 
 pub extern fn orion_ledger_tag(name: Text) -> int
@@ -220,7 +220,7 @@ pub fn compile(source: Text) -> Compiled:
     safe
 
 fn compiled_copy(c: Compiled) -> Compiled:
-    Compiled{rules: ast_copy_rules(c.rules), functions: ast_copy_functions(c.functions), consts: copy_bindings(c.consts), components: ast_copy_components(c.components)}
+    Compiled{rules: ast_copy_rules(c.rules), functions: ast_copy_functions(c.functions), consts: copy_bindings(c.consts), components: ast_copy_components(c.components), tests: ast_copy_tests(c.tests)}
 
 fn copy_bindings(bs: [Binding]) -> [Binding]:
     n = len(bs)
@@ -243,16 +243,16 @@ fn compile_fresh(source: Text) -> Compiled:
         lmsg = le.message
         lline = le.line
         error("astra", "lex failed line {lline}: {lmsg}")
-        return Compiled{rules: [], functions: [], consts: [], components: []}
+        return Compiled{rules: [], functions: [], consts: [], components: [], tests: []}
     parse_result = parse(lex_result.tokens)
     if not parse_result.ok:
         pe = parse_result.error
         pmsg = pe.message
         pline = pe.line
         error("astra", "parse failed line {pline}: {pmsg}")
-        return Compiled{rules: [], functions: [], consts: [], components: []}
+        return Compiled{rules: [], functions: [], consts: [], components: [], tests: []}
     consts = eval_consts(parse_result.consts, parse_result.functions, 0, [])
-    Compiled{rules: parse_result.rules, functions: parse_result.functions, consts: consts, components: parse_result.components}
+    Compiled{rules: parse_result.rules, functions: parse_result.functions, consts: consts, components: parse_result.components, tests: parse_result.tests}
 
 # Component declarations from the memoized compile — the ECS auto-pack
 # path must not re-parse the bundle per dispatch.
@@ -646,3 +646,133 @@ pub fn astra_check_text_c(cid: Text, source: Text) -> Text:
 
 fn check_err_at(errs: [CheckError], i: int) -> CheckError:
     at(errs, i)
+
+# ---- Test runner (pillar 5: tests as syntax) ----
+# Executes each `test NAME:` block from the parse (tests live in ParseResult,
+# never in the arena-evacuated Compiled tree). A test runs its steps against a
+# fresh effect accumulator + tick counter:
+#   apply CALL   — run the named rule, fold its effects into the accumulator
+#   tick N       — advance the tick counter (readable as `tick`)
+#   expect COND  — assert (with `effects` bound to the running effect count)
+# The first failing step stops the test. Returns one TestResult per test.
+pub data TestResult: name: Text, passed: bool, message: Text
+
+data TState: effects: [AstraEffect], tickc: int, passed: bool, msg: Text
+
+pub fn run_tests(source: Text) -> [TestResult]:
+    # Use the evacuated Compiled (not raw compile_parse_result) so every rule,
+    # helper, and test step is deep-copied into the persist heap — raw parse
+    # output carries arena-lived Text that dangles once any epoch resets.
+    c = compile(source)
+    n = len(c.tests)
+    mut out = []
+    for i in 0..<n:
+        out = push_mut(out, rt_run_one(rt_test_at(c.tests, i), c.rules, c.functions, c.consts))
+    out
+
+# One-line pass/fail summary — "" when every test passes, else the failing
+# tests joined "name: message; ...".
+pub fn run_tests_text(source: Text) -> Text:
+    results = run_tests(source)
+    n = len(results)
+    mut out = ""
+    for i in 0..<n:
+        r = rt_result_at(results, i)
+        if not r.passed:
+            line = "{r.name}: {r.message}"
+            out = if out == "" then line else out + "; " + line
+    out
+
+fn rt_test_at(ts: [TestCase], i: int) -> TestCase:
+    at(ts, i)
+
+fn rt_result_at(rs: [TestResult], i: int) -> TestResult:
+    at(rs, i)
+
+fn rt_step_at(ss: [TestStep], i: int) -> TestStep:
+    at(ss, i)
+
+fn rt_run_one(tc: TestCase, rules: [Rule], funcs: [Function], consts: [Binding]) -> TestResult:
+    st0 = TState{effects: [], tickc: 0, passed: true, msg: ""}
+    stf = rt_fold(tc.steps, 0, st0, rules, funcs, consts)
+    TestResult{name: tc.name, passed: stf.passed, message: stf.msg}
+
+# Fold steps left-to-right, stopping at the first failure.
+fn rt_fold(steps: [TestStep], i: int, st: TState, rules: [Rule], funcs: [Function], consts: [Binding]) -> TState:
+    if i >= len(steps) or not st.passed:
+        st
+    else:
+        rt_fold(steps, i + 1, rt_step(rt_step_at(steps, i), st, rules, funcs, consts), rules, funcs, consts)
+
+fn rt_step(s: TestStep, st: TState, rules: [Rule], funcs: [Function], consts: [Binding]) -> TState:
+    if s.kind == "apply":
+        rt_apply(s.name, s.args, st, rules, funcs, consts)
+    else:
+        if s.kind == "tick":
+            rt_tick(s.cond, st, funcs, consts)
+        else:
+            rt_expect(s.cond, st, funcs, consts)
+
+fn rt_apply(name: Text, args: [Expr], st: TState, rules: [Rule], funcs: [Function], consts: [Binding]) -> TState:
+    r = find_named_rule(rules, name)
+    if len(r.name) == 0:
+        TState{effects: st.effects, tickc: st.tickc, passed: false, msg: "apply: unknown rule `{name}`"}
+    else:
+        ctx = rt_base_ctx(consts, st.tickc)
+        argvals = rt_eval_args(args, ctx, funcs, 0, [])
+        oc = run_rule_args_ctx(r, argvals, ctx, funcs)
+        TState{effects: rt_append(st.effects, oc.effects), tickc: st.tickc, passed: st.passed, msg: st.msg}
+
+fn rt_tick(nexpr: Expr, st: TState, funcs: [Function], consts: [Binding]) -> TState:
+    ctx = rt_base_ctx(consts, st.tickc)
+    delta = rt_int_of(eval_in_env(nexpr, ctx, funcs))
+    TState{effects: st.effects, tickc: st.tickc + delta, passed: st.passed, msg: st.msg}
+
+fn rt_expect(cond: Expr, st: TState, funcs: [Function], consts: [Binding]) -> TState:
+    env = rt_expect_env(consts, st.tickc, len(st.effects))
+    if value_is_truthy(eval_in_env(cond, env, funcs)):
+        st
+    else:
+        # Interpolation takes bare identifiers only (Orion codegen), so
+        # precompute the effect count and tick into locals.
+        ec = len(st.effects)
+        tc = st.tickc
+        TState{effects: st.effects, tickc: st.tickc, passed: false, msg: "expect failed (effects={ec}, tick={tc})"}
+
+# ctx a rule body / tick expr sees: consts + the current `tick`.
+fn rt_base_ctx(consts: [Binding], tickc: int) -> [Binding]:
+    mut out = []
+    for b in consts:
+        out = push_mut(out, b)
+    out = push_mut(out, Binding{name: "tick", value: IntV(tickc)})
+    out
+
+# ctx an `expect` sees: base + `effects` (the running effect count).
+fn rt_expect_env(consts: [Binding], tickc: int, effcount: int) -> [Binding]:
+    mut out = rt_base_ctx(consts, tickc)
+    out = push_mut(out, Binding{name: "effects", value: IntV(effcount)})
+    out
+
+fn rt_eval_args(args: [Expr], env: [Binding], funcs: [Function], i: int, acc: [Value]) -> [Value]:
+    if i >= len(args):
+        acc
+    else:
+        rt_eval_args(args, env, funcs, i + 1, push(acc, eval_in_env(rt_arg_at(args, i), env, funcs)))
+
+fn rt_arg_at(args: [Expr], i: int) -> Expr:
+    at(args, i)
+
+fn rt_append(a: [AstraEffect], b: [AstraEffect]) -> [AstraEffect]:
+    mut out = []
+    for e in a:
+        out = push_mut(out, e)
+    for e in b:
+        out = push_mut(out, e)
+    out
+
+fn rt_int_of(v: Value) -> int:
+    match v:
+        IntV(k) -> k
+        BoolV(b) -> if b then 1 else 0
+        RefV(k) -> k
+        _ -> 0

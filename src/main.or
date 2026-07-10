@@ -165,7 +165,25 @@ fn main() -> int:
     ffa = tick(src_for, [], [])
     print_line("for-alias fires at cold tick (expect 1, only r=2):")
     print_line(show_int(eff_count(ffa.outcome)))
+
+    # tests-as-syntax: `apply` a rule, read `effects`/`tick` in `expect`.
+    src_tests = "rule scale(x): require x > 0 emit Scaled()\ntest a:\n    apply scale(5)\n    expect effects == 1\ntest b:\n    apply scale(0)\n    expect effects == 0\ntest c:\n    tick 3\n    expect tick == 3"
+    tr = run_tests(src_tests)
+    print_line("inline tests total (expect 3):")
+    print_line(show_int(len(tr)))
+    print_line("inline tests passed (expect 3):")
+    print_line(show_int(count_passed(tr)))
+    src_tfail = "rule scale(x): require x > 0 emit Scaled()\ntest bad:\n    apply scale(5)\n    expect effects == 2"
+    print_line("failing test detected (expect 0 passed):")
+    print_line(show_int(count_passed(run_tests(src_tfail))))
     0
+
+fn count_passed(results: [TestResult]) -> int:
+    mut c = 0
+    for r in results:
+        if r.passed:
+            c = c + 1
+    c
 
 # 2x2 square piece, encoded as MapV records {dc, dr}.
 fn build_square_cells() -> [Value]:
