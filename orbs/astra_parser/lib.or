@@ -947,7 +947,7 @@ fn parse_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
         return parse_after_stmt(tokens, start + 1, n)
     if match_tok(tokens, start, n, "Each") or match_tok(tokens, start, n, "For"):
         return parse_foreach_stmt(tokens, start + 1, n)
-    if match_tok(tokens, start, n, "When"):
+    if match_tok(tokens, start, n, "If"):
         return parse_if_stmt(tokens, start + 1, n)
     if looks_like_assignment(tokens, start, n):
         return parse_set_stmt(tokens, start, n)
