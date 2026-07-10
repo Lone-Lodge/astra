@@ -1,11 +1,203 @@
-# astra_check — typechecker.
+# astra_check — the loud pass.
 #
-# Rust kept this at 430 LOC. With four Value variants the checker
-# is a small table-lookup, not Hindley-Milner.
+# Live eval is deliberately graceful: an unknown helper call returns NoneV
+# so a hot-reload mid-edit never crashes the running game (see astra_eval::
+# eval_call). astra_check is the OPPOSITE stance — a separate pass a tool or
+# host runs to surface authoring mistakes BEFORE they silently no-op. It never
+# runs on the 60Hz dispatch path; it answers "is this bundle well-formed?".
+#
+# With four scalar Value variants there is no Hindley-Milner here — the checks
+# are structural table-lookups over the parsed tree:
+#   - a Call to a name that is neither a builtin nor a defined `fn`
+#   - a Call to a known `fn` with the wrong argument count
+#   - two `fn`s (or two plain callable rules) sharing a name
+# Every check is zero-false-positive on a valid bundle: each flags a program
+# that provably does something other than what it reads like.
 
 use astra_ast
 
 pub data CheckError: rule: Text, message: Text
 
-pub fn check_rule(_rule: Rule) -> [CheckError]:
-    []
+# eval_call's built-in helpers — calls to these are always valid regardless of
+# the bundle's own `fn` table, and they self-tolerate arg count, so no arity
+# check applies (mirror astra_eval::eval_call + astra_run::call_is_known).
+fn is_builtin(name: Text) -> bool:
+    name == "size" or name == "at" or name == "concat" or name == "related"
+
+# The whole bundle: rules (condition + body) and function bodies. Returns an
+# empty list when the bundle is well-formed.
+pub fn check_program(rules: [Rule], functions: [Function]) -> [CheckError]:
+    mut errs = []
+    errs = check_dup_functions(functions, 0, errs)
+    errs = check_dup_rules(rules, 0, errs)
+    nf = len(functions)
+    for i in 0..<nf:
+        f = ck_fn_at(functions, i)
+        errs = check_expr(f.body, f.name, functions, errs)
+    nr = len(rules)
+    for i in 0..<nr:
+        r = ck_rule_at(rules, i)
+        owner = rule_label(r)
+        errs = check_expr(r.condition, owner, functions, errs)
+        errs = check_stmts(r.body, owner, functions, errs)
+    errs
+
+# Single-rule entry — kept for callers that hold one rule + the fn table.
+pub fn check_rule(rule: Rule, functions: [Function]) -> [CheckError]:
+    owner = rule_label(rule)
+    check_stmts(rule.body, owner, functions, check_expr(rule.condition, owner, functions, []))
+
+# A rule's identity for error attribution: its name, else its trigger (event /
+# $when / Tick), else anonymous.
+fn rule_label(r: Rule) -> Text:
+    if r.name != "":
+        r.name
+    else:
+        if r.trigger != "":
+            r.trigger
+        else:
+            "<anonymous>"
+
+fn ck_fn_at(fs: [Function], i: int) -> Function:
+    at(fs, i)
+
+fn ck_rule_at(rs: [Rule], i: int) -> Rule:
+    at(rs, i)
+
+fn ck_empty_fn() -> Function:
+    Function{name: "", params: [], return_type: "", body: LitInt(0)}
+
+# First index of a function with `name` (or -1). Used to flag every definition
+# after the first as a duplicate.
+fn first_fn_index(fs: [Function], name: Text) -> int:
+    n = len(fs)
+    for i in 0..<n:
+        if ck_fn_at(fs, i).name == name:
+            return i
+    0 - 1
+
+fn find_function(fs: [Function], name: Text) -> Function:
+    mut found = ck_empty_fn()
+    n = len(fs)
+    for i in 0..<n:
+        f = ck_fn_at(fs, i)
+        if f.name == name:
+            found = f
+    found
+
+fn check_dup_functions(fs: [Function], i: int, acc: [CheckError]) -> [CheckError]:
+    n = len(fs)
+    if i >= n:
+        acc
+    else:
+        name = ck_fn_at(fs, i).name
+        mut out = acc
+        if name != "" and first_fn_index(fs, name) < i:
+            out = push(out, CheckError{rule: name, message: "duplicate function `{name}`"})
+        check_dup_functions(fs, i + 1, out)
+
+# Only PLAIN callable rules collide harmfully: run() picks the LAST rule of a
+# given name, so two `rule foo(...)` silently shadow. `on Event` handlers share
+# their event name on purpose (many handlers per event is valid), and desugared
+# rules (derive:/goal:/belief:) carry a trigger — all excluded by trigger == "".
+fn check_dup_rules(rs: [Rule], i: int, acc: [CheckError]) -> [CheckError]:
+    n = len(rs)
+    if i >= n:
+        acc
+    else:
+        r = ck_rule_at(rs, i)
+        mut out = acc
+        if r.name != "" and r.trigger == "" and first_plain_rule_index(rs, r.name) < i:
+            out = push(out, CheckError{rule: r.name, message: "duplicate rule `{r.name}`"})
+        check_dup_rules(rs, i + 1, out)
+
+fn first_plain_rule_index(rs: [Rule], name: Text) -> int:
+    n = len(rs)
+    for i in 0..<n:
+        r = ck_rule_at(rs, i)
+        if r.name == name and r.trigger == "":
+            return i
+    0 - 1
+
+# A Call: verify the callee resolves, then its arity, then recurse into args.
+fn check_call(name: Text, args: [Expr], owner: Text, fs: [Function], acc: [CheckError]) -> [CheckError]:
+    mut out = acc
+    if not is_builtin(name):
+        f = find_function(fs, name)
+        if f.name == "":
+            out = push(out, CheckError{rule: owner, message: "unknown function `{name}`"})
+        else:
+            na = len(args)
+            np = len(f.params)
+            if na != np:
+                out = push(out, CheckError{rule: owner, message: "`{name}` expects {np} args, got {na}"})
+    check_exprs(args, owner, fs, out)
+
+fn check_expr(e: Expr, owner: Text, fs: [Function], acc: [CheckError]) -> [CheckError]:
+    match e:
+        Call(name, args) -> check_call(name, args, owner, fs, acc)
+        Binop(_, l, r) -> check_expr(r, owner, fs, check_expr(l, owner, fs, acc))
+        Unop(_, x) -> check_expr(x, owner, fs, acc)
+        IfExpr(c, t, f) -> check_expr(f, owner, fs, check_expr(t, owner, fs, check_expr(c, owner, fs, acc)))
+        Field(base, _) -> check_expr(base, owner, fs, acc)
+        CountQuery(_, src, pred) -> check_expr(pred, owner, fs, check_expr(src, owner, fs, acc))
+        LetIn(_, v, body) -> check_expr(body, owner, fs, check_expr(v, owner, fs, acc))
+        LitList(xs) -> check_exprs(xs, owner, fs, acc)
+        MapLit(flds) -> check_field_exprs(flds, owner, fs, acc)
+        RangeExpr(a, b) -> check_expr(b, owner, fs, check_expr(a, owner, fs, acc))
+        MatchExpr(s, arms) -> check_arms(arms, owner, fs, check_expr(s, owner, fs, acc))
+        _ -> acc
+
+fn check_exprs(xs: [Expr], owner: Text, fs: [Function], acc: [CheckError]) -> [CheckError]:
+    n = len(xs)
+    mut out = acc
+    for i in 0..<n:
+        out = check_expr(at(xs, i), owner, fs, out)
+    out
+
+fn check_field_exprs(flds: [FieldExpr], owner: Text, fs: [Function], acc: [CheckError]) -> [CheckError]:
+    n = len(flds)
+    mut out = acc
+    for i in 0..<n:
+        fe = ck_fe_at(flds, i)
+        out = check_expr(fe.value, owner, fs, out)
+    out
+
+fn ck_fe_at(flds: [FieldExpr], i: int) -> FieldExpr:
+    at(flds, i)
+
+fn check_arms(arms: [MatchArm], owner: Text, fs: [Function], acc: [CheckError]) -> [CheckError]:
+    n = len(arms)
+    mut out = acc
+    for i in 0..<n:
+        arm = ck_arm_at(arms, i)
+        out = check_expr(arm.body, owner, fs, check_expr(arm.pattern, owner, fs, out))
+    out
+
+fn ck_arm_at(arms: [MatchArm], i: int) -> MatchArm:
+    at(arms, i)
+
+fn check_stmts(ss: [Stmt], owner: Text, fs: [Function], acc: [CheckError]) -> [CheckError]:
+    n = len(ss)
+    mut out = acc
+    for i in 0..<n:
+        out = check_stmt(ck_stmt_at(ss, i), owner, fs, out)
+    out
+
+fn ck_stmt_at(ss: [Stmt], i: int) -> Stmt:
+    at(ss, i)
+
+fn check_stmt(s: Stmt, owner: Text, fs: [Function], acc: [CheckError]) -> [CheckError]:
+    match s:
+        EmitEffect(_, flds) -> check_field_exprs(flds, owner, fs, acc)
+        Require(e) -> check_expr(e, owner, fs, acc)
+        Let(_, v) -> check_expr(v, owner, fs, acc)
+        LetDestructure(_, v) -> check_expr(v, owner, fs, acc)
+        SpawnEntity(_, flds) -> check_field_exprs(flds, owner, fs, acc)
+        DestroyEntity(e) -> check_expr(e, owner, fs, acc)
+        SetField(base, _, v) -> check_expr(v, owner, fs, check_expr(base, owner, fs, acc))
+        SetVar(_, v) -> check_expr(v, owner, fs, acc)
+        ForEach(_, src, pred, body) -> check_stmts(body, owner, fs, check_expr(pred, owner, fs, check_expr(src, owner, fs, acc)))
+        IfStmt(c, body) -> check_stmts(body, owner, fs, check_expr(c, owner, fs, acc))
+        RelateStmt(a, _, b) -> check_expr(b, owner, fs, check_expr(a, owner, fs, acc))
+        _ -> acc

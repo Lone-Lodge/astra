@@ -143,6 +143,15 @@ fn main() -> int:
     print_line(show_int(int_of_value(eval_fn(src_rng, "rng_through", []))))
     print_line("from 2 through 6 count (expect 5):")
     print_line(show_int(int_of_value(eval_fn(src_rng, "rng_from_through", []))))
+
+    # astra_check pass: well-formed bundle has 0 errors; a bundle with a
+    # duplicate fn + an arity mismatch + an unknown call has 3.
+    src_ok = "fn dbl(n): n * 2\nrule go(x): require dbl(x) > 0\nrule go2(x): require size([1, 2]) > 0"
+    print_line("check clean errors (expect 0):")
+    print_line(show_int(len(astra_check_source(src_ok))))
+    src_bad = "fn dbl(n): n * 2\nfn dbl(n): n * 3\nrule go(x): require dbl(x, x) > 0\nrule bad(x): require missing(x) > 0"
+    print_line("check bad errors (expect 3):")
+    print_line(show_int(len(astra_check_source(src_bad))))
     0
 
 # 2x2 square piece, encoded as MapV records {dc, dr}.

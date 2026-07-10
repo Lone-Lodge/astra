@@ -16,6 +16,7 @@ use astra_ast
 use astra_lexer
 use astra_parser
 use astra_eval
+use astra_check
 use log
 
 pub extern fn orion_arena_active() -> int
@@ -616,3 +617,32 @@ fn call_is_known(funcs: [Function], name: Text) -> bool:
 
 fn fn_item(fs: [Function], i: int) -> Function:
     at(fs, i)
+
+# ---- Check pass (astra_check surface) ----
+# The loud well-formedness pass, off the hot path. Live dispatch stays
+# graceful (unknown calls -> NoneV); this is what a tool/host runs to catch
+# authoring mistakes before they silently no-op. Compiles by content, so an
+# edit re-checks the new tree.
+pub fn astra_check_source(source: Text) -> [CheckError]:
+    c = compile(source)
+    check_program(c.rules, c.functions)
+
+pub fn astra_check_c(cid: Text, source: Text) -> [CheckError]:
+    c = compile_c(cid, source)
+    check_program(c.rules, c.functions)
+
+# One-line summary of the check pass — "" when the bundle is clean, else the
+# errors joined "owner: message; owner: message". Mirrors the Text shape of
+# astra_unknown_calls_c for CLI/log surfaces.
+pub fn astra_check_text_c(cid: Text, source: Text) -> Text:
+    errs = astra_check_c(cid, source)
+    n = len(errs)
+    mut out = ""
+    for i in 0..<n:
+        e = check_err_at(errs, i)
+        line = "{e.rule}: {e.message}"
+        out = if out == "" then line else out + "; " + line
+    out
+
+fn check_err_at(errs: [CheckError], i: int) -> CheckError:
+    at(errs, i)
