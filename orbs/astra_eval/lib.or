@@ -420,14 +420,6 @@ fn concat_items(a: [Value], b: [Value], i: int, acc: [Value]) -> [Value]:
     else:
         concat_items(a, b, i + 1, push(acc, at(b, i)))
 
-fn eval_builtin_range(args: [Expr], env: [Binding], funcs: [Function]) -> Value:
-    if len(args) < 2:
-        ListV([])
-    else:
-        start = as_int(eval_expr(at(args, 0), env, funcs))
-        finish = as_int(eval_expr(at(args, 1), env, funcs))
-        ListV(build_range(start, finish, []))
-
 fn build_range(i: int, finish: int, acc: [Value]) -> [Value]:
     if i >= finish:
         acc
