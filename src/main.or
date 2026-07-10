@@ -176,7 +176,29 @@ fn main() -> int:
     src_tfail = "rule scale(x): require x > 0 emit Scaled()\ntest bad:\n    apply scale(5)\n    expect effects == 2"
     print_line("failing test detected (expect 0 passed):")
     print_line(show_int(count_passed(run_tests(src_tfail))))
+
+    # intent (AI-native, pillar 1): utility scored into a resource per tick.
+    src_intent = "intent FeedSelf for Worker:\n    require hunger > 50\n    utility hunger"
+    out_hi = dispatch_ctx(src_intent, "Tick", [], [Binding{name: "hunger", value: IntV(60)}])
+    print_line("intent applicable hunger=60 (expect 1):")
+    print_line(show_int(setvar_of(out_hi, "intent:FeedSelf:applicable")))
+    print_line("intent score hunger=60 (expect 60):")
+    print_line(show_int(setvar_of(out_hi, "intent:FeedSelf:score")))
+    out_lo = dispatch_ctx(src_intent, "Tick", [], [Binding{name: "hunger", value: IntV(40)}])
+    print_line("intent score hunger=40 (expect 0):")
+    print_line(show_int(setvar_of(out_lo, "intent:FeedSelf:score")))
     0
+
+fn setvar_of(o: Outcome, name: Text) -> int:
+    mut found = 0 - 1
+    for e in o.effects:
+        found = setvar_match(e, name, found)
+    found
+
+fn setvar_match(e: AstraEffect, name: Text, cur: int) -> int:
+    match e:
+        AstraSetVar(nm, v) -> if nm == name then int_of_value(v) else cur
+        _ -> cur
 
 fn count_passed(results: [TestResult]) -> int:
     mut c = 0
