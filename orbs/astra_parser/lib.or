@@ -1910,7 +1910,6 @@ fn tok_kind(t: Tok) -> Text:
         All -> "All"
         In -> "In"
         Where -> "Where"
-        Empty -> "Empty"
         True -> "True"
         False -> "False"
         Not -> "Not"
