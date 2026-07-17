@@ -41,7 +41,6 @@ pub enum Tok:
     All
     In
     Where
-    Empty
     True
     False
     Not
@@ -59,6 +58,7 @@ pub enum Tok:
     Confidence
     Goal
     Constraint
+    Intent
     Each
     To
     From
@@ -70,6 +70,19 @@ pub enum Tok:
     Spawned
     Destroyed
     Component
+    State
+    Command
+    Needs
+    Signal
+    Type
+    Create
+    Source
+    Animate
+    Asset
+    Trait
+    Patch
+    Template
+    Tokens
     Arrow
     LParen
     RParen
@@ -395,7 +408,6 @@ fn keyword_of(text: Text) -> Tok:
     else if text == "all" then All
     else if text == "in" then In
     else if text == "where" then Where
-    else if text == "empty" then Empty
     else if text == "true" then True
     else if text == "false" then False
     else if text == "not" then Not
@@ -413,6 +425,7 @@ fn keyword_of(text: Text) -> Tok:
     else if text == "confidence" then Confidence
     else if text == "goal" then Goal
     else if text == "constraint" then Constraint
+    else if text == "intent" then Intent
     else if text == "each" then Each
     else if text == "to" then To
     else if text == "from" then From
@@ -424,4 +437,17 @@ fn keyword_of(text: Text) -> Tok:
     else if text == "spawned" then Spawned
     else if text == "destroyed" then Destroyed
     else if text == "component" then Component
+    else if text == "state" then State
+    else if text == "command" then Command
+    else if text == "needs" then Needs
+    else if text == "signal" then Signal
+    else if text == "type" then Type
+    else if text == "create" then Create
+    else if text == "source" then Source
+    else if text == "animate" then Animate
+    else if text == "asset" then Asset
+    else if text == "trait" then Trait
+    else if text == "patch" then Patch
+    else if text == "template" then Template
+    else if text == "tokens" then Tokens
     else Ident(text)

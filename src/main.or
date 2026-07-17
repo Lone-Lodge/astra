@@ -3,42 +3,36 @@ use astra_value
 use astra_outcome
 use astra_eval
 use os
+use bytes
 
 fn main() -> int:
+    t_begin()
+
+    section("dispatch & effects")
     # M1 regression
     src_rule = "rule scale(x): require x > 0 let d = x*2 emit Scaled()"
-    outcome1 = run(src_rule, "scale", [IntV(5)])
-    print_line("rule scale(5) effects:")
-    print_line(show_int(eff_count(outcome1)))
+    check("rule scale(5) fires one effect", 1, eff_count(run(src_rule, "scale", [IntV(5)])))
 
     # M2: on-event dispatch
     src_handler = "on Click(x, y): require x > 0 emit Confirmed()"
-    outcome2 = dispatch(src_handler, "Click", [IntV(10), IntV(20)])
-    print_line("dispatch Click(10,20) effects:")
-    print_line(show_int(eff_count(outcome2)))
-    outcome3 = dispatch(src_handler, "Click", [IntV(0 - 1), IntV(20)])
-    print_line("dispatch Click(-1,20) effects (refused):")
-    print_line(show_int(eff_count(outcome3)))
+    check("dispatch Click(10,20)", 1, eff_count(dispatch(src_handler, "Click", [IntV(10), IntV(20)])))
+    check("dispatch Click(-1,20) refused", 0, eff_count(dispatch(src_handler, "Click", [IntV(0 - 1), IntV(20)])))
 
     # Multiple handlers for same event — both fire
     src_multi = "on Tick(): emit A()\non Tick(): emit B()"
-    outcome4 = dispatch(src_multi, "Tick", [])
-    print_line("dispatch Tick (two handlers) effects:")
-    print_line(show_int(eff_count(outcome4)))
+    check("two Tick handlers both fire", 2, eff_count(dispatch(src_multi, "Tick", [])))
 
+    section("reactive when / every")
     # M2.2: reactive `when` — edge-triggered milestones
     src_when = "when score >= 100: emit Milestone()"
     ctx_low = [Binding{name: "score", value: IntV(50)}]
     ctx_hit = [Binding{name: "score", value: IntV(100)}]
     t1 = tick(src_when, ctx_low, [])
-    print_line("tick score=50 effects (expect 0):")
-    print_line(show_int(eff_count(t1.outcome)))
+    check("when score=50 silent", 0, eff_count(t1.outcome))
     t2 = tick(src_when, ctx_hit, t1.truths)
-    print_line("tick score=100 effects (expect 1, edge):")
-    print_line(show_int(eff_count(t2.outcome)))
+    check("when score=100 fires on edge", 1, eff_count(t2.outcome))
     t3 = tick(src_when, ctx_hit, t2.truths)
-    print_line("tick score=100 again effects (expect 0, level):")
-    print_line(show_int(eff_count(t3.outcome)))
+    check("when score=100 again is level, silent", 0, eff_count(t3.outcome))
 
     # M2.3: `every N` periodic — sugar for when(tick % N == 0)
     src_every = "every 3: emit Pulse()"
@@ -50,122 +44,202 @@ fn main() -> int:
         r = tick(src_every, ctx_t, prev)
         total = total + eff_count(r.outcome)
         prev = r.truths
-    print_line("every 3 over ticks 0..6 fires (expect 3):")
-    print_line(show_int(total))
+    check("every 3 over ticks 0..6 fires 3x", 3, total)
 
+    section("fields, fn helpers, queries")
     # M2 multi-field: emit Place {col, row, color} carries all 3 fields.
     # Loaded from disk because Orion interpolates `{...}` inside string
     # literals, which would clobber the astra field-block syntax.
     src_mf = read_file("fixtures/multi_field.astra")
     out_mf = run(src_mf, "place", [])
-    print_line("multi-field effects (expect 1):")
-    print_line(show_int(eff_count(out_mf)))
-    print_line("multi-field emit fields (expect 3):")
-    print_line(show_int(first_effect_field_count(out_mf)))
+    check("multi-field emit fires", 1, eff_count(out_mf))
+    check("multi-field carries 3 fields", 3, first_effect_field_count(out_mf))
 
     # M2 fn helpers: rule body calls pure functions defined in same file
     src_fn = read_file("fixtures/fn_call.astra")
-    out_dbl = run(src_fn, "scaled", [IntV(7)])
-    print_line("double(7) via fn helper (expect 14):")
-    print_line(show_int(first_field_int(out_dbl)))
-    out_px = run(src_fn, "click", [IntV(220)])
-    print_line("pixel_to_col(220) via fn helper (expect 2):")
-    print_line(show_int(first_field_int(out_px)))
+    check("double(7) via fn helper", 14, first_field_int(run(src_fn, "scaled", [IntV(7)])))
+    check("pixel_to_col(220) via fn helper", 2, first_field_int(run(src_fn, "click", [IntV(220)])))
 
     # M3 queries: bind a ListV of entity-record MapVs into ctx, run
     # `count(x in items where x.field == value)` over it.
     src_q = read_file("fixtures/count_query.astra")
-    item_records = build_items()
-    items = ListV(item_records)
-    ctx_q = [Binding{name: "items", value: items}]
-    out_reds = run_rule_in_ctx(src_q, "reds", ctx_q)
-    print_line("count reds (expect 2):")
-    print_line(show_int(first_field_int(out_reds)))
-    out_row3 = run_rule_in_ctx(src_q, "row3", ctx_q)
-    print_line("count row==3 (expect 2):")
-    print_line(show_int(first_field_int(out_row3)))
+    ctx_q = [Binding{name: "items", value: ListV(build_items())}]
+    check("count reds", 2, first_field_int(run_rule_in_ctx(src_q, "reds", ctx_q)))
+    check("count row==3", 2, first_field_int(run_rule_in_ctx(src_q, "row3", ctx_q)))
 
+    section("loops & spawn")
     # M3 bounded `for` — expands at parse time to N copies of the body
     # with iter var substituted. Verify only r=2 fires (the matching
     # `when r == 2:` rule).
     src_for = read_file("fixtures/for_loop.astra")
-    # tick all three rules in one shot; cold start so all true conditions
-    # fire on first transition.
     fr1 = tick(src_for, [], [])
-    print_line("for-loop fires at cold tick (expect 1, only r=2):")
-    print_line(show_int(eff_count(fr1.outcome)))
+    check("for-loop cold tick fires only r=2", 1, eff_count(fr1.outcome))
     fr2 = tick(src_for, [], fr1.truths)
-    print_line("for-loop second tick (expect 0, no edges):")
-    print_line(show_int(eff_count(fr2.outcome)))
+    check("for-loop second tick, no edges", 0, eff_count(fr2.outcome))
 
     # Typed Spawn: `entity Kind { ... }` + `spawn Kind { ... }` produces
     # AstraSpawnKind(kind, fields) which atlas routes to a per-kind
     # channel for the host to construct the real component.
     src_sp = read_file("fixtures/entity_spawn.astra")
     out_sp = run(src_sp, "make_block", [IntV(3), IntV(5)])
-    print_line("spawn Block effect count (expect 1):")
-    print_line(show_int(eff_count(out_sp)))
-    print_line("spawn fields (expect 3):")
-    print_line(show_int(spawn_field_count(out_sp)))
+    check("spawn Block emits one effect", 1, eff_count(out_sp))
+    check("spawn Block carries 3 fields", 3, spawn_field_count(out_sp))
 
     # Runtime foreach: on PlacePiece(col, row, color, cells) fans
     # `spawn Block` per cell. Pass a 4-cell square piece.
     src_fe = read_file("fixtures/foreach_spawn.astra")
-    sq_cells = build_square_cells()
-    out_fe = dispatch(src_fe, "PlacePiece", [IntV(2), IntV(7), TextV("magenta"), ListV(sq_cells)])
-    print_line("PlacePiece spawns (expect 4):")
-    print_line(show_int(eff_count(out_fe)))
+    out_fe = dispatch(src_fe, "PlacePiece", [IntV(2), IntV(7), TextV("magenta"), ListV(build_square_cells())])
+    check("PlacePiece foreach spawns 4", 4, eff_count(out_fe))
 
+    section("let, params, literals, ranges")
     # Iter 16: implicit let-in (no `let` keyword)
     src_imp = read_file("fixtures/implicit_let.astra")
-    print_line("implicit let (double_plus(5) expect 11):")
-    print_line(show_int(int_of_value(eval_fn(src_imp, "double_plus", [IntV(5)]))))
+    check("implicit let double_plus(5)", 11, int_of_value(eval_fn(src_imp, "double_plus", [IntV(5)])))
 
     # Iter 18: type-free params + no fn keyword
     src_nt = read_file("fixtures/notypes.astra")
-    print_line("stack(3, 4) expect 8:")
-    print_line(show_int(int_of_value(eval_fn(src_nt, "stack", [IntV(3), IntV(4)]))))
+    check("type-free stack(3, 4)", 8, int_of_value(eval_fn(src_nt, "stack", [IntV(3), IntV(4)])))
 
     # Iter 5: list/map literals + eval_fn
     src_lit = read_file("fixtures/literals.astra")
-    v1 = eval_fn(src_lit, "pick_a", [IntV(2)])
-    print_line("count records with a==2 (expect 1):")
-    print_line(show_int(int_of_value(v1)))
-    v2 = eval_fn(src_lit, "pick_a", [IntV(99)])
-    print_line("count records with a==99 (expect 0):")
-    print_line(show_int(int_of_value(v2)))
+    check("literals: records with a==2", 1, int_of_value(eval_fn(src_lit, "pick_a", [IntV(2)])))
+    check("literals: records with a==99", 0, int_of_value(eval_fn(src_lit, "pick_a", [IntV(99)])))
 
     # from/through ranges (verification)
     src_rng = read_file("fixtures/range.astra")
-    print_line("from 1 to 5 count (expect 4):")
-    print_line(show_int(int_of_value(eval_fn(src_rng, "rng_to", []))))
-    print_line("1 through 4 count (expect 4):")
-    print_line(show_int(int_of_value(eval_fn(src_rng, "rng_through", []))))
-    print_line("from 2 through 6 count (expect 5):")
-    print_line(show_int(int_of_value(eval_fn(src_rng, "rng_from_through", []))))
+    check("range from 1 to 5", 4, int_of_value(eval_fn(src_rng, "rng_to", [])))
+    check("range 1 through 4", 4, int_of_value(eval_fn(src_rng, "rng_through", [])))
+    check("range from 2 through 6", 5, int_of_value(eval_fn(src_rng, "rng_from_through", [])))
 
+    section("typecheck, quantifiers, tests-as-syntax")
     # astra_check pass: well-formed bundle has 0 errors; a bundle with a
     # duplicate fn + an arity mismatch + an unknown call has 3.
     src_ok = "fn dbl(n): n * 2\nrule go(x): require dbl(x) > 0\nrule go2(x): require size([1, 2]) > 0"
-    print_line("check clean errors (expect 0):")
-    print_line(show_int(len(astra_check_source(src_ok))))
+    check("checker: clean bundle has 0 errors", 0, len(astra_check_source(src_ok)))
     src_bad = "fn dbl(n): n * 2\nfn dbl(n): n * 3\nrule go(x): require dbl(x, x) > 0\nrule bad(x): require missing(x) > 0"
-    print_line("check bad errors (expect 3):")
-    print_line(show_int(len(astra_check_source(src_bad))))
+    check("checker: bad bundle has 3 errors", 3, len(astra_check_source(src_bad)))
 
     # `all` universal quantifier: true only when every element satisfies COND.
     src_all = "fn allpos(): if all x in [2, 4, 6] where x > 0 then 1 else 0\nfn allneg(): if all x in [2, 0, 6] where x > 0 then 1 else 0"
-    print_line("all x>0 over [2,4,6] (expect 1):")
-    print_line(show_int(int_of_value(eval_fn(src_all, "allpos", []))))
-    print_line("all x>0 over [2,0,6] (expect 0):")
-    print_line(show_int(int_of_value(eval_fn(src_all, "allneg", []))))
+    check("all x>0 over [2,4,6]", 1, int_of_value(eval_fn(src_all, "allpos", [])))
+    check("all x>0 over [2,0,6]", 0, int_of_value(eval_fn(src_all, "allneg", [])))
 
     # `for` as an alias for `each` — same loop macro, both spellings.
-    src_for = read_file("fixtures/for_alias.astra")
-    ffa = tick(src_for, [], [])
-    print_line("for-alias fires at cold tick (expect 1, only r=2):")
-    print_line(show_int(eff_count(ffa.outcome)))
-    0
+    src_fora = read_file("fixtures/for_alias.astra")
+    check("for-alias cold tick fires only r=2", 1, eff_count(tick(src_fora, [], []).outcome))
+
+    # tests-as-syntax: `apply` a rule, read `effects`/`tick` in `expect`.
+    src_tests = "rule scale(x): require x > 0 emit Scaled()\ntest a:\n    apply scale(5)\n    expect effects == 1\ntest b:\n    apply scale(0)\n    expect effects == 0\ntest c:\n    tick 3\n    expect tick == 3"
+    tr = run_tests(src_tests)
+    check("inline tests parsed", 3, len(tr))
+    check("inline tests passed", 3, count_passed(tr))
+    src_tfail = "rule scale(x): require x > 0 emit Scaled()\ntest bad:\n    apply scale(5)\n    expect effects == 2"
+    check("failing inline test caught", 0, count_passed(run_tests(src_tfail)))
+
+    section("intent, field access, if-stmt")
+    # intent (AI-native, pillar 1): utility scored into a resource per tick.
+    src_intent = "intent FeedSelf for Worker:\n    require hunger > 50\n    utility hunger"
+    out_hi = dispatch_ctx(src_intent, "Tick", [], [Binding{name: "hunger", value: IntV(60)}])
+    check("intent applicable at hunger=60", 1, setvar_of(out_hi, "intent:FeedSelf:applicable"))
+    check("intent score at hunger=60", 60, setvar_of(out_hi, "intent:FeedSelf:score"))
+    out_lo = dispatch_ctx(src_intent, "Tick", [], [Binding{name: "hunger", value: IntV(40)}])
+    check("intent score at hunger=40", 0, setvar_of(out_lo, "intent:FeedSelf:score"))
+
+    # `.empty` field access — `empty` must lex as an identifier, not a keyword
+    # (VISION: `require cell.empty`). A reserved `empty` breaks the `.` access.
+    src_empty = "rule check(cell): require cell.empty emit Ok()"
+    cell_rec = MapV(push([], ValueField{name: "empty", value: IntV(1)}))
+    check("cell.empty field access", 1, eff_count(run(src_empty, "check", [cell_rec])))
+
+    # In-body `if cond: body` statement — a single-branch conditional inside
+    # a rule body. Dispatched on the `if` keyword (not `when`, which delimits
+    # top-level rules); the guarded emit fires only when the condition holds.
+    src_ifstmt = "rule big(x): if x > 5: emit Big()"
+    check("if-stmt guard true x=9", 1, eff_count(run(src_ifstmt, "big", [IntV(9)])))
+    check("if-stmt guard false x=3", 0, eff_count(run(src_ifstmt, "big", [IntV(3)])))
+
+    section("text: concat, interpolation, empty")
+    # Text `+` concatenates when either side is text (was integer add,
+    # which silently produced IntV(0) — every dynamic string in a
+    # text-first game came out blank).
+    check("text \"a\" + \"b\" == ab", 1, text_is("fn f() -> text:\n    \"a\" + \"b\"\n", [], "ab"))
+    check("text \"n=\" + 7 == n=7", 1, text_is("fn f(n: int) -> text:\n    \"n=\" + n\n", [IntV(7)], "n=7"))
+    check("text \"hi \" + x == hi world", 1, text_is("fn f(x: text) -> text:\n    \"hi \" + x\n", [TextV("world")], "hi world"))
+
+    # String interpolation: "{expr}" holes expand at parse time.
+    check("interp count-hole == count 3", 1, text_is("fn f(n: int) -> text:\n    \"count \{n\}\"\n", [IntV(3)], "count 3"))
+    check("interp two holes == a=1 b=2", 1, text_is("fn f(a: int, b: int) -> text:\n    \"a=\{a\} b=\{b\}\"\n", [IntV(1), IntV(2)], "a=1 b=2"))
+    check("interp expr-hole == sum=10", 1, text_is("fn f(n: int) -> text:\n    \"sum=\{n + 1\}\"\n", [IntV(9)], "sum=10"))
+
+    # Empty string literal "" is a real Text, not a parse fall-through.
+    check("empty string literal", 1, text_is("fn f() -> text:\n    \"\"\n", [], ""))
+
+    t_summary()
+
+# ── tiny test runner ─────────────────────────────────────────────────
+# Colored PASS/FAIL rows + a pass/total summary, in the shape of Orion's
+# own LLVM-backend runner. Counters live in slots so each check() is a
+# one-liner (no mut state threaded through main). Exit code = fail count.
+
+fn ansi(code: Text) -> Text:
+    "{bytes_to_text([27])}[{code}m"
+
+fn t_begin():
+    slot_set("t:n", 0)
+    slot_set("t:pass", 0)
+    print_line("")
+    print_line("  {ansi("1")}{ansi("36")}◆ astra{ansi("0")} {ansi("2")}test runner · eval + parse, native{ansi("0")}")
+    print_line("  {ansi("2")}────────────────────────────────────────────────{ansi("0")}")
+
+fn section(title: Text):
+    print_line("")
+    print_line("  {ansi("2")}{title}{ansi("0")}")
+
+fn check(label: Text, expected: int, actual: int):
+    n = slot_get_int("t:n") + 1
+    slot_set("t:n", n)
+    if actual == expected:
+        slot_set("t:pass", slot_get_int("t:pass") + 1)
+        print_line("    {ansi("32")}✓{ansi("0")} {label}")
+    else:
+        print_line("    {ansi("31")}✗ {label}{ansi("0")}  {ansi("2")}→ expected {expected}, got {actual}{ansi("0")}")
+
+fn t_summary() -> int:
+    n = slot_get_int("t:n")
+    p = slot_get_int("t:pass")
+    f = n - p
+    print_line("")
+    print_line("  {ansi("2")}────────────────────────────────────────────────{ansi("0")}")
+    if f == 0:
+        print_line("  {ansi("1")}{ansi("32")}✓ all {p}/{n} passed{ansi("0")}")
+    else:
+        print_line("  {ansi("1")}{ansi("31")}✗ {f} failed{ansi("0")} {ansi("2")}({p}/{n} passed){ansi("0")}")
+    print_line("")
+    f
+
+# 1 when eval_fn(src, "f", args) yields exactly TextV(expected).
+fn text_is(src: Text, args: [Value], expected: Text) -> int:
+    match eval_fn(src, "f", args):
+        TextV(s) -> if s == expected then 1 else 0
+        _ -> 0
+
+fn setvar_of(o: Outcome, name: Text) -> int:
+    mut found = 0 - 1
+    for e in o.effects:
+        found = setvar_match(e, name, found)
+    found
+
+fn setvar_match(e: AstraEffect, name: Text, cur: int) -> int:
+    match e:
+        AstraSetVar(nm, v) -> if nm == name then int_of_value(v) else cur
+        _ -> cur
+
+fn count_passed(results: [TestResult]) -> int:
+    mut c = 0
+    for r in results:
+        if r.passed:
+            c = c + 1
+    c
 
 # 2x2 square piece, encoded as MapV records {dc, dr}.
 fn build_square_cells() -> [Value]:

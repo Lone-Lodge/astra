@@ -14,6 +14,7 @@
 
 use astra_ast
 use astra_lexer
+use bytes
 
 pub data ParseError: message: Text, line: int
 
@@ -22,7 +23,61 @@ pub data ParseError: message: Text, line: int
 # `rule`/`on`/`when`/`every` bodies; `entities` are typed authoring
 # declarations the host uses to register constructors for `spawn Kind`;
 # `components` are ECS component type declarations (`component Kind: f:t`).
-pub data ParseResult: rules: [Rule], functions: [Function], entities: [EntityDecl], consts: [ConstDecl], components: [ComponentDecl], uses: [Text], ok: bool, error: ParseError
+# External reactive data sources — declared as `source NAME from file
+# "path" [refresh Ns]`. Atlas reads the file at boot and (later) on a
+# refresh cadence, writing contents to the prefixed resource `NAME`.
+# Only file kind in v1; http/websocket/mmo come in follow-up slices.
+pub data SourceDecl: name: Text, kind: Text, path: Text, refresh_ms: int
+
+# Declarative tween — `animate NAME from A to B over N unit
+# [when TRIGGER becomes VALUE]`. Without a trigger, the tween runs
+# once at boot. With a trigger, it waits for the trigger resource to
+# transition to VALUE (edge-fire), then runs. Every subsequent edge
+# re-runs the tween.
+# trigger_name == "" means no trigger (boot-once).
+pub data AnimationDecl: name: Text, from_val: int, to_val: int, duration_ms: int, trigger_name: Text, trigger_value: int, easing: Text
+
+# Typed asset reference — `asset X: sprite/audio/text "path"`. Atlas
+# verifies the file exists at boot and registers name→path so widgets
+# can reference the asset by name (`sprite: my_wolf`) instead of raw
+# string paths. Fails hard at boot when a file is missing — the shift
+# from silent-at-runtime to loud-at-load-time.
+pub data AssetDecl: name: Text, kind: Text, path: Text
+
+# Trait declaration — `trait X { field: type }`. A reusable field
+# bundle. When a `type Y uses A, B { extra }` composes it, the parser
+# inlines A's and B's fields into Y's ComponentDecl. Pure parse-time
+# sugar; the ECS sees one merged component per Y, no multi-component
+# machinery required. Bundle-local: traits declared in one .astra
+# file are only visible within that file's compositions.
+pub data TraitDecl: name: Text, fields: [Param]
+
+# Which traits does a type use? Recorded at parse time when
+# `type X uses A, B` is seen. Atlas uses this to answer trait-queries
+# (`each e in Movable` iterates entities of every type that uses
+# Movable) without any storage-level multi-component ECS rewrite.
+pub data TypeTraits: type_name: Text, traits: [Text]
+
+# `template NAME(params) = EXPR` — parameterised fragment. Replaces
+# per-shape widget types (List/Grid/Card/Pill…). At runtime a template
+# is invoked with concrete arguments and expands its body expression
+# with the params bound. Body is a normal Astra expression in v1;
+# extension to widget-tree literals lands with Veil's Panel primitive.
+pub data TemplateDecl: name: Text, params: [Param], body: Expr
+# A reusable widget prop bundle: `style NAME:` then indented `key: value`.
+pub data StyleDecl: name: Text, fields: [FieldExpr]
+
+# One entry in a `tokens NS:` block — `key: value`. Value is any
+# expression (int/text/ident) resolved at consume-time.
+pub data TokenEntry: key: Text, value: Expr
+
+# `tokens NAMESPACE:` — design-system token block. Atlas registers
+# each namespace so widgets can consume `style: card` via a runtime
+# resolver. Namespace + key together form the resolved token id
+# (e.g. `color.bg`, `layout.card`).
+pub data TokensDecl: namespace: Text, entries: [TokenEntry]
+
+pub data ParseResult: rules: [Rule], functions: [Function], entities: [EntityDecl], consts: [ConstDecl], components: [ComponentDecl], uses: [Text], tests: [TestCase], sources: [SourceDecl], animations: [AnimationDecl], assets: [AssetDecl], type_traits: [TypeTraits], templates: [TemplateDecl], token_blocks: [TokensDecl], styles: [StyleDecl], ok: bool, error: ParseError
 
 pub fn parse(tokens: [Token]) -> ParseResult:
     n = len(tokens)
@@ -33,9 +88,30 @@ pub fn parse(tokens: [Token]) -> ParseResult:
     mut consts = []
     mut components = []
     mut uses = []
+    mut tests = []
+    # State decls (`state NAME: TYPE = INIT`) accumulate here; at
+    # end-of-parse we synthesise one on Init() rule from the inits and
+    # clamp every SetVar in every rule whose name has bounds. Pure
+    # parser sugar — no downstream consumer changes.
+    mut state_inits = []
+    mut state_bounds = []
+    mut sources = []
+    mut animations = []
+    mut assets = []
+    mut traits = []
+    mut type_traits = []
+    mut templates = []
+    mut token_blocks = []
+    mut styles = []
+    # Top-level widget tree: `Panel ...` / `for x in [..]:` written at the
+    # bundle's top level (no `on Init()` wrapper) collect here and fold into
+    # the synthesised Init. The tree IS the declaration — declare the scene
+    # like state/tokens, not inside a lifecycle callback.
+    mut tree_stmts = []
     mut failed = false
     mut err_msg = ""
     mut err_line = 0
+    mut handled = false
     # Leading newlines + `use NAME` directives (engine bundling metadata,
     # conventionally first in the file).
     loop:
@@ -67,116 +143,481 @@ pub fn parse(tokens: [Token]) -> ParseResult:
         if is_newline(t.tok):
             i = i + 1
         else:
-            if is_eof_or_done(t):
-                break
-            if match_tok(tokens, i, n, "Component"):
-                cstep = parse_component_decl(tokens, i + 1, n)
+            # Flat keyword dispatch: one self-contained block per top-level
+            # construct, each guarded by `handled`, so adding a construct is
+            # one block — not another pyramid level. Order is irrelevant (the
+            # leading keyword is unambiguous) except the implicit-fn and
+            # belief/goal/rule fallthroughs, which must stay last.
+            handled = false
+            # `type X ...` — the only shape. `component` was cubsy-era
+            # jargon; databases (SurrealDB/EdgeDB) use `type`. First-
+            # version cleanup: one-way syntax, no aliases.
+            if match_tok(tokens, i, n, "Type"):
+                handled = true
+                cstep = parse_component_decl(tokens, i + 1, n, traits)
                 if cstep.ok:
                     components = push_mut(components, cstep.component)
+                    if len(cstep.uses_traits) > 0:
+                        type_traits = push_mut(type_traits, TypeTraits{type_name: cstep.component.name, traits: cstep.uses_traits})
                     i = cstep.next
                 else:
                     failed = true
                     err_msg = cstep.error
                     err_line = t.line
-            else:
-                if match_tok(tokens, i, n, "Const"):
-                    kstep = parse_const_decl(tokens, i + 1, n)
-                    if kstep.ok:
-                        consts = push_mut(consts, kstep.cnst)
-                        i = kstep.next
+            if not handled and match_tok(tokens, i, n, "Trait"):
+                # `trait X { fields }` — reusable field bundle. Types
+                # declare `uses X` to inline the fields.
+                handled = true
+                tstep = parse_trait_decl(tokens, i + 1, n)
+                if tstep.ok:
+                    traits = push_mut(traits, tstep.trait_decl)
+                    i = tstep.next
+                else:
+                    failed = true
+                    err_msg = tstep.error
+                    err_line = t.line
+            if not handled and match_tok(tokens, i, n, "Const"):
+                handled = true
+                kstep = parse_const_decl(tokens, i + 1, n)
+                if kstep.ok:
+                    consts = push_mut(consts, kstep.cnst)
+                    i = kstep.next
+                else:
+                    failed = true
+                    err_msg = kstep.error
+                    err_line = t.line
+            if not handled and match_tok(tokens, i, n, "Fn"):
+                handled = true
+                fstep = parse_function(tokens, i + 1, n)
+                if fstep.ok:
+                    functions = push_mut(functions, fstep.func)
+                    i = fstep.next
+                else:
+                    failed = true
+                    err_msg = fstep.error
+                    err_line = t.line
+            if not handled and match_tok(tokens, i, n, "Entity"):
+                handled = true
+                estep = parse_entity_decl(tokens, i + 1, n)
+                if estep.ok:
+                    entities = push_mut(entities, estep.entity)
+                    i = estep.next
+                else:
+                    failed = true
+                    err_msg = estep.error
+                    err_line = t.line
+            if not handled and (match_tok(tokens, i, n, "Each") or match_tok(tokens, i, n, "For")):
+                handled = true
+                # Two top-level `for`s: `for x in INT..INT:` is the compile-
+                # time range macro (unrolls to rules); `for x in [list]:` (or
+                # any non-int source) is a runtime foreach that spawns into
+                # the tree — it folds into the synthesised Init.
+                if is_range_for(tokens, i, n):
+                    floop = parse_for_loop(tokens, i + 1, n)
+                    if floop.ok:
+                        for r in floop.rules:
+                            rules = push_mut(rules, r)
+                        i = floop.next
                     else:
                         failed = true
-                        err_msg = kstep.error
+                        err_msg = floop.error
                         err_line = t.line
                 else:
-                    if match_tok(tokens, i, n, "Fn"):
-                        fstep = parse_function(tokens, i + 1, n)
-                        if fstep.ok:
-                            functions = push_mut(functions, fstep.func)
-                            i = fstep.next
-                        else:
-                            failed = true
-                            err_msg = fstep.error
-                            err_line = t.line
+                    festep = parse_foreach_stmt(tokens, i + 1, n)
+                    if festep.ok:
+                        tree_stmts = push_mut(tree_stmts, festep.stmt)
+                        i = festep.next
                     else:
-                        if match_tok(tokens, i, n, "Entity"):
-                            estep = parse_entity_decl(tokens, i + 1, n)
-                            if estep.ok:
-                                entities = push_mut(entities, estep.entity)
-                                i = estep.next
-                            else:
-                                failed = true
-                                err_msg = estep.error
-                                err_line = t.line
-                        else:
-                            if match_tok(tokens, i, n, "Each") or match_tok(tokens, i, n, "For"):
-                                floop = parse_for_loop(tokens, i + 1, n)
-                                if floop.ok:
-                                    for r in floop.rules:
-                                        rules = push_mut(rules, r)
-                                    i = floop.next
-                                else:
-                                    failed = true
-                                    err_msg = floop.error
-                                    err_line = t.line
-                            else:
-                                if match_tok(tokens, i, n, "Derive"):
-                                    # `derive NAME = EXPR` desugars to a
-                                    # rule that recomputes NAME every tick
-                                    # from EXPR — a value that is ALWAYS its
-                                    # expression, no manual recompute. (v1:
-                                    # every tick; deps-only is a follow-up.)
-                                    dstep = parse_derive_decl(tokens, i + 1, n)
-                                    if dstep.ok:
-                                        rules = push_mut(rules, dstep.rule)
-                                        i = dstep.next
-                                    else:
-                                        failed = true
-                                        err_msg = dstep.error
-                                        err_line = t.line
-                                else:
-                                    if match_tok(tokens, i, n, "Law"):
-                                        # `law NAME:` names the following rule.
-                                        lstep = parse_law_decl(tokens, i + 1, n)
-                                        if lstep.ok:
-                                            rules = push_mut(rules, lstep.rule)
-                                            i = lstep.next
-                                        else:
-                                            failed = true
-                                            err_msg = lstep.error
-                                            err_line = t.line
-                                    else:
-                                        if looks_like_implicit_fn(tokens, i, n):
-                                            # `NAME(params): body` with no `fn`
-                                            # keyword — top-level pure helper.
-                                            # parse_function takes the name as
-                                            # its start token, so pass `i` (not
-                                            # i+1 like the explicit `fn` path).
-                                            ifstep = parse_function(tokens, i, n)
-                                            if ifstep.ok:
-                                                functions = push_mut(functions, ifstep.func)
-                                                i = ifstep.next
-                                            else:
-                                                failed = true
-                                                err_msg = ifstep.error
-                                                err_line = t.line
-                                        else:
-                                            # belief/goal/constraint declarations,
-                                            # else a plain rule — flattened into
-                                            # one helper to keep this dispatch from
-                                            # pyramiding further.
-                                            step = parse_belief_goal_or_rule(tokens, i, n)
-                                            if step.ok:
-                                                rules = push_mut(rules, step.rule)
-                                                i = step.next
-                                            else:
-                                                failed = true
-                                                err_msg = step.error
-                                                err_line = t.line
+                        failed = true
+                        err_msg = festep.error
+                        err_line = t.line
+            # `view X = EXPR` — a value that is ALWAYS its expression.
+            # Matches SQL materialized-view. `derive` (early Astra) is
+            # gone in v1.
+            if not handled and match_tok(tokens, i, n, "View"):
+                # `derive NAME = EXPR` -> a rule recomputing NAME from EXPR
+                # every tick: a value that is ALWAYS its expression.
+                handled = true
+                dstep = parse_derive_decl(tokens, i + 1, n)
+                if dstep.ok:
+                    rules = push_mut(rules, dstep.rule)
+                    i = dstep.next
+                else:
+                    failed = true
+                    err_msg = dstep.error
+                    err_line = t.line
+            if not handled and match_tok(tokens, i, n, "Law"):
+                # `law NAME:` names the following rule.
+                handled = true
+                lstep = parse_law_decl(tokens, i + 1, n)
+                if lstep.ok:
+                    rules = push_mut(rules, lstep.rule)
+                    i = lstep.next
+                else:
+                    failed = true
+                    err_msg = lstep.error
+                    err_line = t.line
+            if not handled and match_tok(tokens, i, n, "State"):
+                # `state NAME: TYPE [in ...] = INIT` -> synthesised Init
+                # + bounds table; applied at end-of-parse. `enum` types
+                # emit consts (one per value, ints 0-indexed) SO `dead`
+                # in `game_over = dead` resolves to IntV(1) within THIS
+                # bundle. They also emit SetVars into Init so the values
+                # become world resources — auto-ctx then makes them
+                # readable in every other bundle (`if game_over == dead`
+                # in narrative.astra resolves via world state, not
+                # bundle-local consts).
+                handled = true
+                sstep = parse_state_decl(tokens, i + 1, n)
+                if sstep.ok:
+                    state_inits = push_mut(state_inits, sstep.init)
+                    state_bounds = push_mut(state_bounds, sstep.bound)
+                    for ec in sstep.enum_consts:
+                        consts = push_mut(consts, ec)
+                        state_inits = push_mut(state_inits, SetVar(ec.name, ec.value))
+                    i = sstep.next
+                else:
+                    failed = true
+                    err_msg = sstep.error
+                    err_line = t.line
+            if not handled and match_tok(tokens, i, n, "Animate"):
+                # `animate NAME from A to B over N unit` -> AnimationDecl.
+                handled = true
+                astep = parse_animate_decl(tokens, i + 1, n)
+                if astep.ok:
+                    animations = push_mut(animations, astep.anim)
+                    i = astep.next
+                else:
+                    failed = true
+                    err_msg = astep.error
+                    err_line = t.line
+            if not handled and match_tok(tokens, i, n, "Asset"):
+                # `asset NAME: kind "path"` -> AssetDecl. Atlas verifies
+                # + registers name→path at boot.
+                handled = true
+                aset_step = parse_asset_decl(tokens, i + 1, n)
+                if aset_step.ok:
+                    assets = push_mut(assets, aset_step.asset)
+                    i = aset_step.next
+                else:
+                    failed = true
+                    err_msg = aset_step.error
+                    err_line = t.line
+            if not handled and match_tok(tokens, i, n, "Source"):
+                # `source NAME from file "path" [refresh N s]` -> atlas
+                # loads the file at boot into the world resource `NAME`.
+                handled = true
+                srcstep = parse_source_decl(tokens, i + 1, n)
+                if srcstep.ok:
+                    sources = push_mut(sources, srcstep.source)
+                    i = srcstep.next
+                else:
+                    failed = true
+                    err_msg = srcstep.error
+                    err_line = t.line
+            if not handled and match_tok(tokens, i, n, "Patch"):
+                # `patch command NAME CODE [needs...]: body` — bundle-
+                # local override: post-parse step removes the earlier
+                # `cmd:NAME` rule so only the patch runs. Cross-bundle
+                # patches (mods/) need atlas-level layering — future.
+                handled = true
+                if match_tok(tokens, i + 1, n, "Command"):
+                    cmdstep = parse_command_decl(tokens, i + 2, n)
+                    if cmdstep.ok:
+                        # Mark as patch by prefixing name so post-parse
+                        # can find + evict its base counterpart.
+                        base_rule = cmdstep.rule
+                        patch_rule = Rule{name: "patch:" + rule_name_strip_prefix(base_rule.name, "cmd:"), params: base_rule.params, body: base_rule.body, trigger: base_rule.trigger, condition: base_rule.condition}
+                        rules = push_mut(rules, patch_rule)
+                        i = cmdstep.next
+                    else:
+                        failed = true
+                        err_msg = cmdstep.error
+                        err_line = t.line
+                else:
+                    failed = true
+                    err_msg = "only `patch command` supported in v1"
+                    err_line = t.line
+            if not handled and match_tok(tokens, i, n, "Template"):
+                # `template NAME(params) = EXPR` -> parameterised fragment.
+                # Body is a single expression (widget-tree extension lands
+                # with Veil's Panel primitive). Runtime invokes templates
+                # by name from `items:`/`template:` on collection widgets.
+                handled = true
+                tmplstep = parse_template_decl(tokens, i + 1, n)
+                if tmplstep.ok:
+                    templates = push_mut(templates, tmplstep.template)
+                    i = tmplstep.next
+                else:
+                    failed = true
+                    err_msg = tmplstep.error
+                    err_line = t.line
+            if not handled and match_tok(tokens, i, n, "Tokens"):
+                # `tokens NAMESPACE:` NEWLINE (indent) key: value ... ->
+                # design-system token block. Atlas resolver joins namespace
+                # + key (e.g. `color.bg`) at consume-time when a widget
+                # reads `style:`/`layout:` attributes.
+                handled = true
+                tokstep = parse_tokens_decl(tokens, i + 1, n)
+                if tokstep.ok:
+                    token_blocks = push_mut(token_blocks, tokstep.block)
+                    i = tokstep.next
+                else:
+                    failed = true
+                    err_msg = tokstep.error
+                    err_line = t.line
+            if not handled and match_tok(tokens, i, n, "Command"):
+                # `command NAME [needs EXPR]: body` -> when-rule watching
+                # ui_action == "NAME"; body consumes + optionally gates.
+                handled = true
+                cmdstep = parse_command_decl(tokens, i + 1, n)
+                if cmdstep.ok:
+                    rules = push_mut(rules, cmdstep.rule)
+                    i = cmdstep.next
+                else:
+                    failed = true
+                    err_msg = cmdstep.error
+                    err_line = t.line
+            if not handled and match_tok(tokens, i, n, "Test"):
+                # `test NAME:` — inline test block (dev surface).
+                handled = true
+                tstep = parse_test_decl(tokens, i + 1, n)
+                if tstep.ok:
+                    tests = push_mut(tests, tstep.test)
+                    i = tstep.next
+                else:
+                    failed = true
+                    err_msg = tstep.error
+                    err_line = t.line
+            if not handled and looks_like_style_decl(tokens, i, n):
+                # `style NAME:` then indented `key: value` — a reusable prop
+                # bundle. "style" is a bare ident (no keyword/enum surgery).
+                handled = true
+                stystep = parse_style_decl(tokens, i + 1, n)
+                if stystep.ok:
+                    styles = push_mut(styles, stystep.style)
+                    i = stystep.next
+                else:
+                    failed = true
+                    err_msg = stystep.error
+                    err_line = t.line
+            if not handled and looks_like_implicit_fn(tokens, i, n):
+                # `NAME(params): body` with no `fn` keyword — a top-level pure
+                # helper. parse_function takes the name as its start token, so
+                # pass `i` (not i+1 like the explicit `fn` path).
+                handled = true
+                ifstep = parse_function(tokens, i, n)
+                if ifstep.ok:
+                    functions = push_mut(functions, ifstep.func)
+                    i = ifstep.next
+                else:
+                    failed = true
+                    err_msg = ifstep.error
+                    err_line = t.line
+            # `data NAME(cols):` + indented rows — a schema'd data table → const list.
+            if not handled and looks_like_data_decl(tokens, i, n):
+                handled = true
+                dbstep = parse_data_decl(tokens, i, n)
+                if dbstep.ok:
+                    consts = push_mut(consts, dbstep.cnst)
+                    i = dbstep.next
+                else:
+                    failed = true
+                    err_msg = dbstep.error
+                    err_line = t.line
+            # `Panel ...` / `Text ...` at top level — a widget-tree node with
+            # no `on Init()` wrapper. Parse it (+ its indented props) as a
+            # spawn and collect into the tree; parent-inference nests the
+            # whole run by column at end-of-parse.
+            if not handled and is_type_stmt(tokens, i, n):
+                handled = true
+                sstep = parse_spawn_stmt(tokens, i, n, t.col)
+                if sstep.ok:
+                    tree_stmts = push_mut(tree_stmts, sstep.stmt)
+                    i = sstep.next
+                else:
+                    failed = true
+                    err_msg = sstep.error
+                    err_line = t.line
+            if not handled:
+                # belief/goal/constraint/intent declarations, else a plain rule.
+                step = parse_belief_goal_or_rule(tokens, i, n)
+                if step.ok:
+                    rules = push_mut(rules, step.rule)
+                    i = step.next
+                else:
+                    failed = true
+                    err_msg = step.error
+                    err_line = t.line
     if failed:
-        ParseResult{rules: [], functions: [], entities: [], consts: [], components: [], uses: [], ok: false, error: ParseError{message: err_msg, line: err_line}}
+        ParseResult{rules: [], functions: [], entities: [], consts: [], components: [], uses: [], tests: [], sources: [], animations: [], assets: [], type_traits: [], templates: [], token_blocks: [], styles: [], ok: false, error: ParseError{message: err_msg, line: err_line}}
     else:
-        ParseResult{rules: rules, functions: functions, entities: entities, consts: consts, components: components, uses: uses, ok: true, error: ParseError{message: "", line: 0}}
+        # State post-processing: synthesise Init from collected inits;
+        # clamp SetVars whose name has bounds. Order matters — synthetic
+        # Init is prepended so user rules run after (letting user Init
+        # writes override defaults if both exist for the same name).
+        # Patch resolution: `patch:X` rules override `cmd:X` rules
+        # (bundle-local). Filter out patched base rules, then rename
+        # `patch:X` → `cmd:X` so dispatch treats them uniformly.
+        # Hoist show-expressions: a `show:` whose value is an EXPRESSION
+        # (not a lone resource name / bareword) is lifted into a synthesised
+        # `view __show_N = <expr>` rule (recomputed each tick) and the field
+        # is repointed at that derived resource. So `show: overlay == palette`
+        # is reactive, reusing the same res-lookup as `show: resource_name`.
+        hoisted = hoist_show_body(tree_stmts, 0)
+        mut rules_hoisted = rules
+        for hoisted_view in hoisted.views:
+            rules_hoisted = push_mut(rules_hoisted, hoisted_view)
+        patched = apply_patches(rules_hoisted)
+        # Init body = state seeds first (resources exist before the tree
+        # spawns / any `show:` reads them), then the top-level widget tree.
+        mut init_body = []
+        for si in state_inits:
+            init_body = push_mut(init_body, si)
+        for ts in hoisted.stmts:
+            init_body = push_mut(init_body, ts)
+        final_rules = if len(init_body) > 0 then push_front(patched, Rule{name: "$state_init", params: [], body: init_body, trigger: "Init", condition: LitBool(true)}) else patched
+        final_rules_clamped = if len(state_bounds) > 0 then rewrite_setvars_rules(final_rules, state_bounds) else final_rules
+        # Infer parent from indentation + strip __col. Styles are NOT
+        # applied here — they ride on the create's `style:` field and atlas
+        # merges them at spawn from a global registry (cross-bundle).
+        final_rules_parented = infer_parents_rules(final_rules_clamped)
+        ParseResult{rules: final_rules_parented, functions: functions, entities: entities, consts: consts, components: components, uses: uses, tests: tests, sources: sources, animations: animations, assets: assets, type_traits: type_traits, templates: templates, token_blocks: token_blocks, styles: styles, ok: true, error: ParseError{message: "", line: 0}}
+
+# ── show-expression hoisting ── A `show:` value that isn't a lone resource
+# name (`show: overlay == palette`, `show: not busy`) is lifted into a
+# synthesised tick-recomputed `view __show_N = <expr>` and the field points
+# at `__show_N`. Reuses the derived-resource path, so render is unchanged.
+data BodyHoist: stmts: [Stmt], views: [Rule], counter: int
+data FieldsHoist: fields: [FieldExpr], views: [Rule], counter: int
+
+fn is_lit_text_expr(e: Expr) -> bool:
+    match e:
+        LitText(_) -> true
+        _ -> false
+
+fn hoist_show_fields(fields: [FieldExpr], counter: int) -> FieldsHoist:
+    mut out_fields = []
+    mut out_views = []
+    mut c = counter
+    for i in 0..<len(fields):
+        f = at(fields, i)
+        if fe_name_eq(f.name, "show") and not is_lit_text_expr(f.value):
+            nm = "__show{c}"
+            view_rule = Rule{name: "derive:" + nm, params: [], body: push([], SetVar(nm, f.value)), trigger: "Tick", condition: LitBool(true)}
+            out_views = push_mut(out_views, view_rule)
+            out_fields = push_mut(out_fields, FieldExpr{name: "show", value: LitText(nm)})
+            c = c + 1
+        else:
+            out_fields = push_mut(out_fields, f)
+    FieldsHoist{fields: out_fields, views: out_views, counter: c}
+
+fn hoist_show_stmt(s: Stmt, counter: int) -> BodyHoist:
+    match s:
+        SpawnEntity(kind, fields) ->
+            fh = hoist_show_fields(fields, counter)
+            BodyHoist{stmts: push([], SpawnEntity(kind, fh.fields)), views: fh.views, counter: fh.counter}
+        ForEach(iter, src, filter, body) ->
+            bh = hoist_show_body(body, counter)
+            BodyHoist{stmts: push([], ForEach(iter, src, filter, bh.stmts)), views: bh.views, counter: bh.counter}
+        _ -> BodyHoist{stmts: push([], s), views: [], counter: counter}
+
+fn hoist_show_body(body: [Stmt], counter: int) -> BodyHoist:
+    mut out_stmts = []
+    mut out_views = []
+    mut c = counter
+    for i in 0..<len(body):
+        sh = hoist_show_stmt(at(body, i), c)
+        for st in sh.stmts:
+            out_stmts = push_mut(out_stmts, st)
+        for vw in sh.views:
+            out_views = push_mut(out_views, vw)
+        c = sh.counter
+    BodyHoist{stmts: out_stmts, views: out_views, counter: c}
+
+# Apply bundle-local patches: for every `patch:NAME` rule, remove the
+# corresponding `cmd:NAME` base rule from THIS bundle. Patch keeps its
+# `patch:X` name so cross-bundle dispatch can identify it (atlas at
+# boot indexes patched names; dispatch skips `cmd:X` when the base is
+# patched anywhere).
+fn apply_patches(all_rules: [Rule]) -> [Rule]:
+    n = len(all_rules)
+    mut patched_bases = []
+    for i in 0..<n:
+        r = state_rule_at(all_rules, i)
+        if rule_name_starts_with(r.name, "patch:"):
+            patched_bases = push_mut(patched_bases, "cmd:" + rule_name_strip_prefix(r.name, "patch:"))
+    mut out = []
+    for i in 0..<n:
+        r = state_rule_at(all_rules, i)
+        if patch_contains_text(patched_bases, r.name):
+            0
+        else:
+            out = push_mut(out, r)
+    out
+
+fn patch_contains_text(xs: [Text], target: Text) -> bool:
+    n = len(xs)
+    mut i = 0
+    mut found = false
+    loop:
+        if i >= n:
+            break
+        if patch_text_at(xs, i) == target:
+            found = true
+            break
+        i = i + 1
+    found
+
+fn patch_text_at(xs: [Text], i: int) -> Text:
+    at(xs, i)
+
+# Local byte-comparison helpers — parser can't reach the text orb from
+# its Orbit.toml dep set and the byte primitives are already in scope.
+# Kept name-scoped so a later `use text` won't shadow.
+fn rule_name_starts_with(name: Text, prefix: Text) -> bool:
+    name_bytes = bytes_from_text(name)
+    prefix_bytes = bytes_from_text(prefix)
+    name_len = len(name_bytes)
+    prefix_len = len(prefix_bytes)
+    if prefix_len > name_len:
+        false
+    else:
+        mut equal_so_far = true
+        for ci in 0..<prefix_len:
+            if at(name_bytes, ci) != at(prefix_bytes, ci):
+                equal_so_far = false
+        equal_so_far
+
+fn rule_name_strip_prefix(name: Text, prefix: Text) -> Text:
+    name_bytes = bytes_from_text(name)
+    prefix_bytes = bytes_from_text(prefix)
+    name_len = len(name_bytes)
+    prefix_len = len(prefix_bytes)
+    if prefix_len > name_len:
+        name
+    else:
+        mut equal_so_far = true
+        for ci in 0..<prefix_len:
+            if at(name_bytes, ci) != at(prefix_bytes, ci):
+                equal_so_far = false
+        if not equal_so_far:
+            name
+        else:
+            mut suffix = []
+            for ci in prefix_len..<name_len:
+                suffix = push_mut(suffix, at(name_bytes, ci))
+            bytes_to_text(suffix)
+
+# Prepend one Rule to the head of a list. push_mut appends; we need
+# insert-at-front so the synthetic Init runs BEFORE any user-declared
+# rule with the same trigger.
+fn push_front(rules: [Rule], head: Rule) -> [Rule]:
+    mut out = push([], head)
+    n = len(rules)
+    for i in 0..<n:
+        out = push_mut(out, state_rule_at(rules, i))
+    out
 
 data UseStep: name: Text, next: int, ok: bool, error: Text
 
@@ -208,6 +649,44 @@ fn parse_rule(tokens: [Token], start: int, n: int) -> RuleStep:
     if match_tok(tokens, i, n, "On"):
         is_handler = true
         i = i + 1
+        # Transition sugar: `on NAME becomes EXPR: body` desugars to a
+        # `when NAME == EXPR: body` rule. Astra's edge semantics fire
+        # exactly when NAME transitions to EXPR — cleaner than manual
+        # `when X == Y and prev_X != Y` guards.
+        if i + 1 < n:
+            after_name = ident_of(at(tokens, i).tok)
+            if after_name != "" and match_tok(tokens, i + 1, n, "Becomes"):
+                target_step = parse_expr(tokens, i + 2, n)
+                if not target_step.ok:
+                    return RuleStep{rule: empty_rule(), next: target_step.next, ok: false, error: target_step.error}
+                if not match_tok(tokens, target_step.next, n, "Colon"):
+                    return RuleStep{rule: empty_rule(), next: target_step.next, ok: false, error: "expected `:` after `becomes` target"}
+                mut bi = target_step.next + 1
+                loop:
+                    if bi >= n:
+                        break
+                    if is_newline(at(tokens, bi).tok):
+                        bi = bi + 1
+                    else:
+                        break
+                mut becomes_body = []
+                loop:
+                    if bi >= n:
+                        break
+                    t = at(tokens, bi)
+                    if at_rule_starter(tokens, bi, n):
+                        break
+                    if is_newline(t.tok):
+                        bi = bi + 1
+                    else:
+                        step = parse_stmt(tokens, bi, n)
+                        if step.ok:
+                            becomes_body = push_mut(becomes_body, step.stmt)
+                            bi = step.next
+                        else:
+                            return RuleStep{rule: empty_rule(), next: bi, ok: false, error: step.error}
+                transition_cond = Binop("==", VarRef(after_name), target_step.value)
+                return RuleStep{rule: Rule{name: "becomes:" + after_name, params: [], body: becomes_body, trigger: "$when", condition: transition_cond}, next: bi, ok: true, error: ""}
     else:
         if not match_tok(tokens, i, n, "Rule"):
             return RuleStep{rule: empty_rule(), next: i, ok: false, error: "expected `rule`, `on`, or `when`"}
@@ -218,7 +697,7 @@ fn parse_rule(tokens: [Token], start: int, n: int) -> RuleStep:
     name = ident_of(at(tokens, i).tok)
     if name == "":
         return RuleStep{rule: empty_rule(), next: i, ok: false, error: "expected name"}
-    trigger = if is_handler then name else ""
+    mut trigger = if is_handler then name else ""
     i = i + 1
     # Expect "("
     if not match_tok(tokens, i, n, "LParen"):
@@ -241,6 +720,38 @@ fn parse_rule(tokens: [Token], start: int, n: int) -> RuleStep:
     if not match_tok(tokens, i, n, "RParen"):
         return RuleStep{rule: empty_rule(), next: i, ok: false, error: "expected `)`"}
     i = i + 1
+    # Optional guard: `on Click(x,y,b) when EXPR:` gates the handler at
+    # dispatch — no body eval when EXPR is false. Cleaner than a leading
+    # `require EXPR` inside the body: no crumb, no rule-id sink, and
+    # facts/why-engine can read the guard directly off the rule.
+    mut gate = LitBool(true)
+    if match_tok(tokens, i, n, "When"):
+        gate_step = parse_expr(tokens, i + 1, n)
+        if not gate_step.ok:
+            return RuleStep{rule: empty_rule(), next: gate_step.next, ok: false, error: gate_step.error}
+        gate = gate_step.value
+        i = gate_step.next
+    # Optional cadence suffix: `on income() every 2s:` schedules this
+    # handler on a wall-clock interval — same real-time scheduler as the
+    # anonymous `every <dur>:` form. The trigger becomes "$every:<ms>" so
+    # the engine's timer sweep dispatches it (the name is kept for facts).
+    if match_tok(tokens, i, n, "Every"):
+        i = i + 1
+        cperiod = int_of(at(tokens, i).tok)
+        i = i + 1
+        cunit = if i < n then ident_of(at(tokens, i).tok) else ""
+        mut cms = cperiod
+        if cunit == "s":
+            cms = cperiod * 1000
+            i = i + 1
+        else:
+            if cunit == "m":
+                cms = cperiod * 60000
+                i = i + 1
+            else:
+                if cunit == "ms":
+                    i = i + 1
+        trigger = "$every:{cms}"
     # Expect ":"
     if not match_tok(tokens, i, n, "Colon"):
         return RuleStep{rule: empty_rule(), next: i, ok: false, error: "expected `:`"}
@@ -270,7 +781,7 @@ fn parse_rule(tokens: [Token], start: int, n: int) -> RuleStep:
                 i = step.next
             else:
                 return RuleStep{rule: empty_rule(), next: i, ok: false, error: step.error}
-    RuleStep{rule: Rule{name: name, params: params, body: body, trigger: trigger, condition: LitBool(true)}, next: i, ok: true, error: ""}
+    RuleStep{rule: Rule{name: name, params: params, body: body, trigger: trigger, condition: gate}, next: i, ok: true, error: ""}
 
 # `when EXPR : NEWLINE body` — produces a Rule with trigger="$when"
 # and `condition` set to the watch expression. Body re-uses the same
@@ -291,6 +802,15 @@ fn parse_when_rule(tokens: [Token], start: int, n: int) -> RuleStep:
         if not match_tok(tokens, i, n, "RParen"):
             return RuleStep{rule: empty_rule(), next: i, ok: false, error: "expected `)` after component type in spawned(T)"}
         i = i + 1
+        # Optional binding — `when spawned(Chair) c: body-uses-c`.
+        # `c` binds to a MapV of the spawned entity's fields; body can
+        # reference `c.at`, `c.tint` etc. Unifies the prefab pattern
+        # (spawn an X, spawn its children using X's fields).
+        mut bind_name = ""
+        if not match_tok(tokens, i, n, "Colon"):
+            bind_name = ident_of(at(tokens, i).tok)
+            if bind_name != "":
+                i = i + 1
         if not match_tok(tokens, i, n, "Colon"):
             return RuleStep{rule: empty_rule(), next: i, ok: false, error: "expected `:` after when spawned(T)"}
         i = i + 1
@@ -317,7 +837,12 @@ fn parse_when_rule(tokens: [Token], start: int, n: int) -> RuleStep:
                     i = step.next
                 else:
                     return RuleStep{rule: empty_rule(), next: i, ok: false, error: step.error}
-        return RuleStep{rule: Rule{name: "", params: [], body: body, trigger: trigger_prefix + kind_name, condition: LitBool(true)}, next: i, ok: true, error: ""}
+        # If a binding name was given, expose it as the rule's first
+        # param — dispatch passes the spawned entity's fields as args[0]
+        # and eval binds them under the name. Empty name = no param =
+        # legacy spawn trigger without body access.
+        lifecycle_params = if len(bind_name) > 0 then push([], Param{name: bind_name, type_name: kind_name}) else []
+        return RuleStep{rule: Rule{name: "", params: lifecycle_params, body: body, trigger: trigger_prefix + kind_name, condition: LitBool(true)}, next: i, ok: true, error: ""}
     # Regular `when COND:` — edge-triggered conditional.
     cond = parse_expr(tokens, start, n)
     if not cond.ok:
@@ -352,7 +877,7 @@ fn parse_when_rule(tokens: [Token], start: int, n: int) -> RuleStep:
     RuleStep{rule: Rule{name: "", params: [], body: body, trigger: "$when", condition: cond.value}, next: i, ok: true, error: ""}
 
 fn at_rule_starter(tokens: [Token], i: int, n: int) -> bool:
-    match_tok(tokens, i, n, "Rule") or match_tok(tokens, i, n, "On") or match_tok(tokens, i, n, "Every") or match_tok(tokens, i, n, "Fn") or match_tok(tokens, i, n, "When") or match_tok(tokens, i, n, "Component") or match_tok(tokens, i, n, "Entity") or match_tok(tokens, i, n, "Const")
+    match_tok(tokens, i, n, "Rule") or match_tok(tokens, i, n, "On") or match_tok(tokens, i, n, "Every") or match_tok(tokens, i, n, "Fn") or match_tok(tokens, i, n, "When") or match_tok(tokens, i, n, "Component") or match_tok(tokens, i, n, "Type") or match_tok(tokens, i, n, "Entity") or match_tok(tokens, i, n, "Const") or match_tok(tokens, i, n, "Test") or match_tok(tokens, i, n, "Intent") or match_tok(tokens, i, n, "State") or match_tok(tokens, i, n, "Command") or match_tok(tokens, i, n, "View") or match_tok(tokens, i, n, "Source") or match_tok(tokens, i, n, "Animate") or match_tok(tokens, i, n, "Asset") or match_tok(tokens, i, n, "Trait") or match_tok(tokens, i, n, "Template") or match_tok(tokens, i, n, "Tokens")
 
 # `fn NAME(params) -> TYPE: body-expr` — pure helper. Params may include
 # optional `: type` annotations; we accept and discard them for now.
@@ -471,28 +996,50 @@ fn empty_entity_decl() -> EntityDecl:
 # `component Kind { f: type, f: type, ... }` — ECS component declaration.
 # Identical structure to entity but signals that atlas_astra should
 # register the type directly in world storage (no manual pack_* glue).
-data ComponentStep: component: ComponentDecl, next: int, ok: bool, error: Text
+data ComponentStep: component: ComponentDecl, uses_traits: [Text], next: int, ok: bool, error: Text
 
-fn parse_component_decl(tokens: [Token], start: int, n: int) -> ComponentStep:
+fn parse_component_decl(tokens: [Token], start: int, n: int, traits: [TraitDecl]) -> ComponentStep:
     if start >= n:
-        return ComponentStep{component: empty_component_decl(), next: start, ok: false, error: "expected component name"}
+        return ComponentStep{component: empty_component_decl(), uses_traits: [], next: start, ok: false, error: "expected component name"}
     name = ident_of(at(tokens, start).tok)
     if name == "":
-        return ComponentStep{component: empty_component_decl(), next: start, ok: false, error: "expected component name"}
+        return ComponentStep{component: empty_component_decl(), uses_traits: [], next: start, ok: false, error: "expected component name"}
     mut i = start + 1
-    if not match_tok(tokens, i, n, "LBrace"):
-        return ComponentStep{component: empty_component_decl(), next: i, ok: false, error: "expected LBrace after component name"}
-    i = i + 1
-    i = skip_newlines(tokens, i, n)
+    # Optional `uses A, B, C` — inline each named trait's fields into
+    # this type. Bundle-local; traits declared later in the same file
+    # aren't visible here (parse-order-dependent). Trait names also
+    # recorded for cross-type queries (`each e in Movable`).
     mut fields = []
+    mut used_traits = []
+    used_here = ident_of(at(tokens, i).tok)
+    if used_here == "uses":
+        i = i + 1
+        loop:
+            if i >= n:
+                break
+            tname = ident_of(at(tokens, i).tok)
+            if tname == "":
+                break
+            i = i + 1
+            used_traits = push_mut(used_traits, tname)
+            tf = trait_fields(traits, tname)
+            for tp in tf:
+                fields = push_mut(fields, tp)
+            if match_tok(tokens, i, n, "Comma"):
+                i = i + 1
+            else:
+                break
+    # v1: brace-less only. Fields comma-separated, terminated by newline.
+    if match_tok(tokens, i, n, "LBrace"):
+        return ComponentStep{component: empty_component_decl(), uses_traits: [], next: i, ok: false, error: "braces not allowed for type — use `type X f: t, f: t`"}
     loop:
         if i >= n:
             break
-        if match_tok(tokens, i, n, "RBrace"):
+        if is_newline(at(tokens, i).tok):
             break
         f_name = ident_of(at(tokens, i).tok)
         if f_name == "":
-            return ComponentStep{component: empty_component_decl(), next: i, ok: false, error: "expected field name in component"}
+            return ComponentStep{component: empty_component_decl(), uses_traits: [], next: i, ok: false, error: "expected field name in type"}
         i = i + 1
         mut f_type = ""
         if match_tok(tokens, i, n, "Colon"):
@@ -500,15 +1047,43 @@ fn parse_component_decl(tokens: [Token], start: int, n: int) -> ComponentStep:
             if i < n:
                 f_type = ident_of(at(tokens, i).tok)
                 if f_type == "":
-                    return ComponentStep{component: empty_component_decl(), next: i, ok: false, error: "expected field type in component"}
+                    return ComponentStep{component: empty_component_decl(), uses_traits: [], next: i, ok: false, error: "expected field type in type decl"}
                 i = i + 1
         fields = push_mut(fields, Param{name: f_name, type_name: f_type})
         if match_tok(tokens, i, n, "Comma"):
             i = i + 1
-        i = skip_newlines(tokens, i, n)
-    if match_tok(tokens, i, n, "RBrace"):
+    ComponentStep{component: ComponentDecl{name: name, fields: fields}, uses_traits: used_traits, next: i, ok: true, error: ""}
+
+# Look up a trait by name and return its fields (empty if unknown —
+# unknown trait fires no fields; the user's own decl still lands).
+fn trait_fields(traits: [TraitDecl], name: Text) -> [Param]:
+    n = len(traits)
+    mut i = 0
+    mut out = []
+    loop:
+        if i >= n:
+            break
+        t = trait_at(traits, i)
+        if t.name == name:
+            out = t.fields
+            break
         i = i + 1
-    ComponentStep{component: ComponentDecl{name: name, fields: fields}, next: i, ok: true, error: ""}
+    out
+
+fn trait_at(xs: [TraitDecl], i: int) -> TraitDecl:
+    at(xs, i)
+
+# `trait X { field: type }` — reuses the component field-parsing but
+# stores as a TraitDecl. No composition allowed on traits themselves
+# in v1 (a trait can't `uses` another trait).
+data TraitStep: trait_decl: TraitDecl, next: int, ok: bool, error: Text
+
+fn parse_trait_decl(tokens: [Token], start: int, n: int) -> TraitStep:
+    empty = TraitDecl{name: "", fields: []}
+    cstep = parse_component_decl(tokens, start, n, [])
+    if not cstep.ok:
+        return TraitStep{trait_decl: empty, next: cstep.next, ok: false, error: cstep.error}
+    TraitStep{trait_decl: TraitDecl{name: cstep.component.name, fields: cstep.component.fields}, next: cstep.next, ok: true, error: ""}
 
 fn empty_component_decl() -> ComponentDecl:
     ComponentDecl{name: "", fields: []}
@@ -529,6 +1104,200 @@ fn parse_const_decl(tokens: [Token], start: int, n: int) -> ConstStep:
     if not val_step.ok:
         return ConstStep{cnst: ConstDecl{name: name, value: LitInt(0)}, next: val_step.next, ok: false, error: val_step.error}
     ConstStep{cnst: ConstDecl{name: name, value: val_step.value}, next: val_step.next, ok: true, error: ""}
+
+# `data NAME(col, col, …):` NEWLINE (indent) row* — a data TABLE with a
+# NAMED schema. Each row's positional values fill the columns IN ORDER
+# (bareword = symbol, "quoted" = text, 123 = int), then optional
+# `key: value` pairs override/extend. So
+#   data commands(id, label):
+#       menu      "Open Menu"
+#       minimize  "Minimize window"  hint: "Ctrl M"
+# desugars to `const commands = [ {id: menu, label: "Open Menu"}, … ]`.
+# The header is what makes `.id`/`.label` DERIVABLE, not a special case —
+# only real text is quoted. It's a const list, so `for`/`each` iterates it.
+fn looks_like_data_decl(tokens: [Token], i: int, n: int) -> bool:
+    if i + 2 >= n:
+        false
+    else:
+        if not fe_name_eq(ident_of(at(tokens, i).tok), "data"):
+            false
+        else:
+            if ident_of(at(tokens, i + 1).tok) == "":
+                false
+            else:
+                match_tok(tokens, i + 2, n, "LParen")
+
+fn parse_data_decl(tokens: [Token], start: int, n: int) -> ConstStep:
+    block_col = at(tokens, start).col
+    name = ident_of(at(tokens, start + 1).tok)
+    mut i = start + 2
+    if not match_tok(tokens, i, n, "LParen"):
+        return ConstStep{cnst: ConstDecl{name: "", value: LitInt(0)}, next: i, ok: false, error: "expected `(` after `data NAME`"}
+    i = i + 1
+    mut cols = []
+    loop:
+        if i >= n:
+            return ConstStep{cnst: ConstDecl{name: "", value: LitInt(0)}, next: i, ok: false, error: "unterminated column list"}
+        if match_tok(tokens, i, n, "RParen"):
+            i = i + 1
+            break
+        cn = ident_of(at(tokens, i).tok)
+        if cn == "":
+            return ConstStep{cnst: ConstDecl{name: "", value: LitInt(0)}, next: i, ok: false, error: "expected column name in `data NAME(...)`"}
+        cols = push_mut(cols, cn)
+        i = i + 1
+        if match_tok(tokens, i, n, "Comma"):
+            i = i + 1
+    if not match_tok(tokens, i, n, "Colon"):
+        return ConstStep{cnst: ConstDecl{name: name, value: LitInt(0)}, next: i, ok: false, error: "expected `:` after `data NAME(cols)`"}
+    i = i + 1
+    i = skip_newlines(tokens, i, n)
+    mut rows = []
+    loop:
+        if i >= n:
+            break
+        if is_newline(at(tokens, i).tok):
+            i = i + 1
+        else:
+            if at(tokens, i).col <= block_col:
+                break
+            row = parse_data_row(tokens, i, n, cols)
+            if not row.ok:
+                return ConstStep{cnst: ConstDecl{name: name, value: LitList(rows)}, next: row.next, ok: false, error: row.error}
+            rows = push_mut(rows, row.value)
+            i = row.next
+    ConstStep{cnst: ConstDecl{name: name, value: LitList(rows)}, next: i, ok: true, error: ""}
+
+# One table row → a MapLit. Positional values (bareword / string / int)
+# fill `cols` in order until a `key:` pair begins; then explicit fields.
+fn parse_data_row(tokens: [Token], start: int, n: int, cols: [Text]) -> ExprStep:
+    mut fields = []
+    mut i = start
+    mut col_idx = 0
+    loop:
+        if i >= n or is_newline(at(tokens, i).tok):
+            break
+        # A `key: value` pair (ident then colon) ends the positional run.
+        if ident_of(at(tokens, i).tok) != "" and match_tok(tokens, i + 1, n, "Colon"):
+            break
+        if col_idx >= len(cols):
+            break
+        tok = at(tokens, i)
+        if is_str_tok(tok.tok):
+            fields = push_mut(fields, FieldExpr{name: at(cols, col_idx), value: text_lit_expr(text_of(tok.tok))})
+        else:
+            iv = int_of(tok.tok)
+            if iv >= 0:
+                fields = push_mut(fields, FieldExpr{name: at(cols, col_idx), value: LitInt(iv)})
+            else:
+                fields = push_mut(fields, FieldExpr{name: at(cols, col_idx), value: LitText(ident_of(tok.tok))})
+        col_idx = col_idx + 1
+        i = i + 1
+        if match_tok(tokens, i, n, "Comma"):
+            i = i + 1
+    loop:
+        if i >= n or is_newline(at(tokens, i).tok):
+            break
+        if match_tok(tokens, i, n, "Comma"):
+            i = i + 1
+        else:
+            fstep = parse_map_field(tokens, i, n)
+            if not fstep.ok:
+                return ExprStep{value: MapLit(fields), next: fstep.next, ok: false, error: fstep.error}
+            fields = push_mut(fields, fstep.field)
+            i = fstep.next
+    ExprStep{value: MapLit(fields), next: i, ok: true, error: ""}
+
+# `test NAME:` NEWLINE step* — an inline test (pillar 5). Steps are
+# `apply CALL`, `tick N`, `expect COND`, one per line, more indented than the
+# `test` keyword. The body ends on a dedent (a token at or left of the `test`
+# column) or a top-level starter. The runner (astra_run::run_tests) executes
+# each step against a fresh effect accumulator.
+data TestDeclStep: test: TestCase, next: int, ok: bool, error: Text
+
+fn parse_test_decl(tokens: [Token], start: int, n: int) -> TestDeclStep:
+    empty = TestCase{name: "", steps: []}
+    if start >= n:
+        return TestDeclStep{test: empty, next: start, ok: false, error: "expected name after `test`"}
+    name = ident_of(at(tokens, start).tok)
+    if name == "":
+        return TestDeclStep{test: empty, next: start, ok: false, error: "expected name after `test`"}
+    mut i = start + 1
+    if not match_tok(tokens, i, n, "Colon"):
+        return TestDeclStep{test: empty, next: i, ok: false, error: "expected `:` after test name"}
+    i = i + 1
+    # Column of the `test` keyword — a step at or left of it is a dedent.
+    test_col = if start >= 1 then at(tokens, start - 1).col else 0
+    i = skip_newlines(tokens, i, n)
+    mut steps = []
+    loop:
+        if i >= n:
+            break
+        t = at(tokens, i)
+        if is_newline(t.tok):
+            i = i + 1
+        else:
+            if at_rule_starter(tokens, i, n):
+                break
+            if t.col <= test_col:
+                break
+            step = parse_test_step(tokens, i, n)
+            if not step.ok:
+                return TestDeclStep{test: empty, next: step.next, ok: false, error: step.error}
+            steps = push_mut(steps, step.step)
+            i = step.next
+    TestDeclStep{test: TestCase{name: name, steps: steps}, next: i, ok: true, error: ""}
+
+data TestStepStep: step: TestStep, next: int, ok: bool, error: Text
+
+fn empty_test_step() -> TestStep:
+    TestStep{kind: "", name: "", args: [], cond: LitBool(false)}
+
+fn parse_test_step(tokens: [Token], start: int, n: int) -> TestStepStep:
+    if match_tok(tokens, start, n, "Apply"):
+        return parse_apply_step(tokens, start + 1, n)
+    if match_tok(tokens, start, n, "Expect"):
+        estep = parse_expr(tokens, start + 1, n)
+        if not estep.ok:
+            return TestStepStep{step: empty_test_step(), next: estep.next, ok: false, error: estep.error}
+        return TestStepStep{step: TestStep{kind: "expect", name: "", args: [], cond: estep.value}, next: estep.next, ok: true, error: ""}
+    # `tick N` — `tick` is an unreserved identifier by design (hosts inject it
+    # as a ctx binding), so match it textually here in the test sub-grammar.
+    if ident_of(at(tokens, start).tok) == "tick":
+        vstep = parse_expr(tokens, start + 1, n)
+        if not vstep.ok:
+            return TestStepStep{step: empty_test_step(), next: vstep.next, ok: false, error: vstep.error}
+        return TestStepStep{step: TestStep{kind: "tick", name: "", args: [], cond: vstep.value}, next: vstep.next, ok: true, error: ""}
+    TestStepStep{step: empty_test_step(), next: start, ok: false, error: "expected `apply`, `tick`, or `expect` in test body"}
+
+# `apply NAME(args)` — start points at the rule NAME. Args are optional.
+fn parse_apply_step(tokens: [Token], start: int, n: int) -> TestStepStep:
+    if start >= n:
+        return TestStepStep{step: empty_test_step(), next: start, ok: false, error: "expected rule name after `apply`"}
+    name = ident_of(at(tokens, start).tok)
+    if name == "":
+        return TestStepStep{step: empty_test_step(), next: start, ok: false, error: "expected rule name after `apply`"}
+    mut i = start + 1
+    mut args = []
+    if match_tok(tokens, i, n, "LParen"):
+        i = i + 1
+        if match_tok(tokens, i, n, "RParen"):
+            i = i + 1
+        else:
+            loop:
+                astep = parse_expr(tokens, i, n)
+                if not astep.ok:
+                    return TestStepStep{step: empty_test_step(), next: astep.next, ok: false, error: astep.error}
+                args = push_mut(args, astep.value)
+                i = astep.next
+                if match_tok(tokens, i, n, "Comma"):
+                    i = i + 1
+                else:
+                    break
+            if not match_tok(tokens, i, n, "RParen"):
+                return TestStepStep{step: empty_test_step(), next: i, ok: false, error: "expected `)` after apply args"}
+            i = i + 1
+    TestStepStep{step: TestStep{kind: "apply", name: name, args: args, cond: LitBool(false)}, next: i, ok: true, error: ""}
 
 # `derive NAME = EXPR` — a resource that is ALWAYS its expression. It
 # desugars to a rule that recomputes NAME from EXPR every tick, so it
@@ -577,6 +1346,553 @@ fn parse_law_decl(tokens: [Token], start: int, n: int) -> RuleStep:
     src = rstep.rule
     named = Rule{name: name, params: src.params, body: src.body, trigger: src.trigger, condition: src.condition}
     RuleStep{rule: named, next: rstep.next, ok: true, error: ""}
+
+# `state NAME: TYPE [in A to B | in A through B] = INIT` — typed world
+# resource declaration. PURE PARSER SUGAR: desugars to (a) a SetVar in a
+# synthetic on Init() rule so the resource is seeded on boot/restart,
+# and (b) a bounds record consulted at end-of-parse to clamp every
+# SetVar targeting this name across ALL rules in the source.
+#
+# Type presets (all lex as Ident):
+#   int              -> no bounds
+#   nat              -> min 0
+#   percent          -> 0 through 100
+# Explicit `in A to B` / `in A through B` overrides the preset.
+# Bounds are integer-literal only in v1 (no expression bounds).
+data StateBound: name: Text, has_min: bool, min_val: int, has_max: bool, max_val: int
+data StateStep: init: Stmt, bound: StateBound, enum_consts: [ConstDecl], next: int, ok: bool, error: Text
+
+fn parse_state_decl(tokens: [Token], start: int, n: int) -> StateStep:
+    empty_stmt = SetVar("", LitInt(0))
+    empty_bound = StateBound{name: "", has_min: false, min_val: 0, has_max: false, max_val: 0}
+    if start >= n:
+        return StateStep{init: empty_stmt, bound: empty_bound, enum_consts: [], next: start, ok: false, error: "expected name after `state`"}
+    name = ident_of(at(tokens, start).tok)
+    if name == "":
+        return StateStep{init: empty_stmt, bound: empty_bound, enum_consts: [], next: start, ok: false, error: "expected name after `state`"}
+    mut i = start + 1
+    if not match_tok(tokens, i, n, "Colon"):
+        return StateStep{init: empty_stmt, bound: empty_bound, enum_consts: [], next: i, ok: false, error: "expected `:` after state name"}
+    i = i + 1
+    type_name = ident_of(at(tokens, i).tok)
+    if type_name == "":
+        return StateStep{init: empty_stmt, bound: empty_bound, enum_consts: [], next: i, ok: false, error: "expected type name after `:`"}
+    i = i + 1
+    # Apply type preset first — explicit `in ...` below overrides.
+    mut has_min = false
+    mut min_v = 0
+    mut has_max = false
+    mut max_v = 0
+    mut enum_consts = []
+    if type_name == "nat":
+        has_min = true
+        min_v = 0
+    if type_name == "percent":
+        has_min = true
+        min_v = 0
+        has_max = true
+        max_v = 100
+    # `enum(a, b, c)` — named integer states. Each value binds as a
+    # top-level const (a=0, b=1, c=2) so rules can write `game_over = dead`
+    # and `when game_over == survived: ...` instead of magic-number 0/1/2.
+    # Bounds are auto-set from the value count.
+    if type_name == "enum":
+        if not match_tok(tokens, i, n, "LParen"):
+            return StateStep{init: empty_stmt, bound: empty_bound, enum_consts: [], next: i, ok: false, error: "expected `(` after `enum`"}
+        i = i + 1
+        mut idx = 0
+        loop:
+            if i >= n:
+                return StateStep{init: empty_stmt, bound: empty_bound, enum_consts: [], next: i, ok: false, error: "unterminated enum"}
+            if match_tok(tokens, i, n, "RParen"):
+                i = i + 1
+                break
+            ev_name = ident_of(at(tokens, i).tok)
+            if ev_name == "":
+                return StateStep{init: empty_stmt, bound: empty_bound, enum_consts: [], next: i, ok: false, error: "expected enum value name"}
+            enum_consts = push_mut(enum_consts, ConstDecl{name: ev_name, value: LitInt(idx)})
+            idx = idx + 1
+            i = i + 1
+            if match_tok(tokens, i, n, "Comma"):
+                i = i + 1
+        has_min = true
+        min_v = 0
+        has_max = true
+        max_v = idx - 1
+    # `text` and `bool` skip the numeric branch — no bounds, no clamp.
+    # A `bool` reads/writes as int 0/1 (apply_set coerces BoolV → 1/0), so
+    # `= true`/`= false`, `needs not X`, and `show: X` all work uniformly.
+    if type_name != "int" and type_name != "nat" and type_name != "percent" and type_name != "text" and type_name != "bool" and type_name != "enum":
+        return StateStep{init: empty_stmt, bound: empty_bound, enum_consts: [], next: i, ok: false, error: "unknown state type `{type_name}` (expected int, nat, percent, text, bool, or enum)"}
+    # Optional explicit range: `in A to B` (half-open) or `in A through B` (inclusive)
+    if match_tok(tokens, i, n, "In"):
+        i = i + 1
+        lo = int_of(at(tokens, i).tok)
+        if lo < 0:
+            return StateStep{init: empty_stmt, bound: empty_bound, enum_consts: [], next: i, ok: false, error: "expected int literal for lower bound"}
+        i = i + 1
+        mut inclusive = false
+        if match_tok(tokens, i, n, "Through"):
+            inclusive = true
+        else:
+            if not match_tok(tokens, i, n, "To"):
+                return StateStep{init: empty_stmt, bound: empty_bound, enum_consts: [], next: i, ok: false, error: "expected `to` or `through` in state range"}
+        i = i + 1
+        hi = int_of(at(tokens, i).tok)
+        if hi < 0:
+            return StateStep{init: empty_stmt, bound: empty_bound, enum_consts: [], next: i, ok: false, error: "expected int literal for upper bound"}
+        i = i + 1
+        has_min = true
+        min_v = lo
+        has_max = true
+        max_v = if inclusive then hi else hi - 1
+    if not match_tok(tokens, i, n, "Assign"):
+        return StateStep{init: empty_stmt, bound: empty_bound, enum_consts: [], next: i, ok: false, error: "expected `=` after state type"}
+    i = i + 1
+    init_step = parse_expr(tokens, i, n)
+    if not init_step.ok:
+        return StateStep{init: empty_stmt, bound: empty_bound, enum_consts: [], next: init_step.next, ok: false, error: init_step.error}
+    bound = StateBound{name: name, has_min: has_min, min_val: min_v, has_max: has_max, max_val: max_v}
+    StateStep{init: SetVar(name, init_step.value), bound: bound, enum_consts: enum_consts, next: init_step.next, ok: true, error: ""}
+
+# Wrap `expr` in a clamp: LetIn binds expr once, then IfExpr chain
+# saturates to [min, max]. No-op branches are omitted when only one
+# side is bounded (nat = min only). __clamp_v is a reserved local name;
+# users shouldn't collide (double-underscore prefix).
+fn clamp_expr(value: Expr, bound: StateBound) -> Expr:
+    if not bound.has_min and not bound.has_max:
+        value
+    else:
+        v = VarRef("__clamp_v")
+        core = if bound.has_max then IfExpr(Binop(">", v, LitInt(bound.max_val)), LitInt(bound.max_val), v) else v
+        full = if bound.has_min then IfExpr(Binop("<", v, LitInt(bound.min_val)), LitInt(bound.min_val), core) else core
+        LetIn("__clamp_v", value, full)
+
+# Find bound for `name` in the table; returns empty (no-op) bound when absent.
+fn bound_for(bounds: [StateBound], name: Text) -> StateBound:
+    n = len(bounds)
+    mut i = 0
+    mut found = StateBound{name: "", has_min: false, min_val: 0, has_max: false, max_val: 0}
+    loop:
+        if i >= n:
+            break
+        b = bound_at(bounds, i)
+        if b.name == name:
+            found = b
+            break
+        i = i + 1
+    found
+
+fn bound_at(bs: [StateBound], i: int) -> StateBound:
+    at(bs, i)
+
+# Rewrite every SetVar in `stmts` whose name is bounded, wrapping its
+# value in a clamp. Descends into ForEach and IfStmt bodies so nested
+# writes get the same treatment. SetField is untouched (component
+# fields, not resources).
+fn rewrite_setvars_stmts(stmts: [Stmt], bounds: [StateBound]) -> [Stmt]:
+    n = len(stmts)
+    mut out = []
+    for i in 0..<n:
+        out = push_mut(out, rewrite_setvars_stmt(at(stmts, i), bounds))
+    out
+
+fn rewrite_setvars_stmt(s: Stmt, bounds: [StateBound]) -> Stmt:
+    match s:
+        SetVar(name, value) -> SetVar(name, clamp_expr(value, bound_for(bounds, name)))
+        ForEach(iter_name, list_expr, filter_expr, body) -> ForEach(iter_name, list_expr, filter_expr, rewrite_setvars_stmts(body, bounds))
+        IfStmt(cond, body) -> IfStmt(cond, rewrite_setvars_stmts(body, bounds))
+        _ -> s
+
+fn rewrite_setvars_rules(rules: [Rule], bounds: [StateBound]) -> [Rule]:
+    n = len(rules)
+    mut out = []
+    for i in 0..<n:
+        r = state_rule_at(rules, i)
+        out = push_mut(out, Rule{name: r.name, params: r.params, body: rewrite_setvars_stmts(r.body, bounds), trigger: r.trigger, condition: r.condition})
+    out
+
+fn state_rule_at(rules: [Rule], i: int) -> Rule:
+    at(rules, i)
+
+# `command NAME [needs EXPR]: body` — a player-facing action.
+# PURE PARSER SUGAR: desugars to a `when` rule watching `ui_action ==
+# "NAME"`; the body consumes the intent (writes ui_action = "") and then
+# runs the effect, optionally gated by `needs`. Same shape as the
+# manual pattern in cubsy, but named, gated, and consumed in one line
+# per command.
+#
+#   command tend_fire needs wood >= 1:
+#       wood = wood - 1
+#       heat = heat + 10
+#
+# becomes:
+#
+#   when ui_action == "tend_fire":
+#       ui_action = ""
+#       if wood >= 1:
+#           wood = wood - 1
+#           heat = heat + 10
+#
+# The intent bus is a shared text resource `ui_action` — callers
+# (click handlers, network layer, AI planner) all write the command
+# name to it. Text lets facts/why/log identify commands by name
+# without a manual code-number table.
+# Stable name→code hash for NAMED actions (djb2 — orion has no `^`, so
+# not FNV). Folded into [1000, 1_001_000) to stay clear of hand-written
+# small codes (< 1000). PUBLIC and single-source: atlas_project's
+# route_widget_clicks calls THIS (names are global in the flattened
+# build), so a widget's `do: NAME` and a `command NAME:` always agree.
+pub fn action_code(name: Text) -> int:
+    bs = bytes_from_text(name)
+    cnt = bytes_length(bs)
+    mut h = 5381
+    mut idx = 0
+    loop:
+        if idx >= cnt:
+            break
+        h = h * 33 + byte_at(bs, idx)
+        idx = idx + 1
+    m = 1000000
+    hm = h - (h / m) * m
+    pos = if hm < 0 then 0 - hm else hm
+    1000 + pos
+
+fn parse_command_decl(tokens: [Token], start: int, n: int) -> RuleStep:
+    empty = Rule{name: "", params: [], body: [], trigger: "", condition: LitBool(true)}
+    if start >= n:
+        return RuleStep{rule: empty, next: start, ok: false, error: "expected name after `command`"}
+    name = ident_of(at(tokens, start).tok)
+    if name == "":
+        return RuleStep{rule: empty, next: start, ok: false, error: "expected name after `command`"}
+    mut i = start + 1
+    # Dispatch code. Two forms:
+    #   `command close:`     → NAMED action; the code is derived from the
+    #                          name (action_code). A widget's `do: close`
+    #                          maps to the same value, so no magic number.
+    #   `command tend_fire 1:` → explicit int code (legacy / wire-stable).
+    mut code = int_of(at(tokens, i).tok)
+    if code < 0:
+        code = action_code(name)
+    else:
+        i = i + 1
+    # Optional `needs EXPR` — precondition wrapping the effect body.
+    mut gate = LitBool(true)
+    if match_tok(tokens, i, n, "Needs"):
+        gate_step = parse_expr(tokens, i + 1, n)
+        if not gate_step.ok:
+            return RuleStep{rule: empty, next: gate_step.next, ok: false, error: gate_step.error}
+        gate = gate_step.value
+        i = gate_step.next
+    if not match_tok(tokens, i, n, "Colon"):
+        return RuleStep{rule: empty, next: i, ok: false, error: "expected `:` after command header"}
+    i = i + 1
+    # Skip newlines into body.
+    loop:
+        if i >= n:
+            break
+        if is_newline(at(tokens, i).tok):
+            i = i + 1
+        else:
+            break
+    # Body stmts until the next top-level rule starter or EOF.
+    mut body_stmts = []
+    loop:
+        if i >= n:
+            break
+        t = at(tokens, i)
+        if at_rule_starter(tokens, i, n):
+            break
+        if is_newline(t.tok):
+            i = i + 1
+        else:
+            step = parse_stmt(tokens, i, n)
+            if step.ok:
+                body_stmts = push_mut(body_stmts, step.stmt)
+                i = step.next
+            else:
+                return RuleStep{rule: empty, next: i, ok: false, error: step.error}
+    # Build the desugared rule body: consume the intent first (so the
+    # trigger condition falls false immediately), then run the effect —
+    # gated by `if needs` when a precondition was given. IfStmt (not
+    # require) so the consume survives even when the effect is skipped;
+    # require's abort discards ALL prior effects including the consume.
+    consume = SetVar("ui_action", LitInt(0))
+    gated_body = if is_lit_true(gate) then body_stmts else push([], IfStmt(gate, body_stmts))
+    full_body = push_front_stmt(consume, gated_body)
+    trigger_cond = Binop("==", VarRef("ui_action"), LitInt(code))
+    r = Rule{name: "cmd:" + name, params: [], body: full_body, trigger: "$when", condition: trigger_cond}
+    RuleStep{rule: r, next: i, ok: true, error: ""}
+
+fn is_lit_true(e: Expr) -> bool:
+    match e:
+        LitBool(b) -> b
+        _ -> false
+
+fn push_front_stmt(head: Stmt, rest: [Stmt]) -> [Stmt]:
+    mut out = push([], head)
+    n = len(rest)
+    for i in 0..<n:
+        out = push_mut(out, stmt_at(rest, i))
+    out
+
+fn stmt_at(xs: [Stmt], i: int) -> Stmt:
+    at(xs, i)
+
+# `animate NAME from A to B over N unit` — one-shot tween at boot.
+# Atlas records start time, per-frame writes the interpolated value
+# to the prefixed resource `NAME`. Linear easing, int endpoints in v1.
+data AnimStep: anim: AnimationDecl, next: int, ok: bool, error: Text
+
+# `asset NAME: kind "path"` — typed asset ref. Kind is an ident
+# (sprite/audio/text/shader/font). Atlas verifies file at boot, wires
+# name→path so widgets can say `sprite: NAME` instead of raw strings.
+data AssetStep: asset: AssetDecl, next: int, ok: bool, error: Text
+
+fn parse_asset_decl(tokens: [Token], start: int, n: int) -> AssetStep:
+    empty = AssetDecl{name: "", kind: "", path: ""}
+    if start >= n:
+        return AssetStep{asset: empty, next: start, ok: false, error: "expected name after `asset`"}
+    name = ident_of(at(tokens, start).tok)
+    if name == "":
+        return AssetStep{asset: empty, next: start, ok: false, error: "expected name after `asset`"}
+    mut i = start + 1
+    if not match_tok(tokens, i, n, "Colon"):
+        return AssetStep{asset: empty, next: i, ok: false, error: "expected `:` after asset name"}
+    i = i + 1
+    kind_name = ident_of(at(tokens, i).tok)
+    if kind_name == "":
+        return AssetStep{asset: empty, next: i, ok: false, error: "expected asset kind (sprite/audio/text/shader/font)"}
+    i = i + 1
+    path_text = text_of(at(tokens, i).tok)
+    if len(path_text) == 0:
+        return AssetStep{asset: empty, next: i, ok: false, error: "expected string path after asset kind"}
+    i = i + 1
+    AssetStep{asset: AssetDecl{name: name, kind: kind_name, path: path_text}, next: i, ok: true, error: ""}
+
+fn parse_animate_decl(tokens: [Token], start: int, n: int) -> AnimStep:
+    empty = AnimationDecl{name: "", from_val: 0, to_val: 0, duration_ms: 0, trigger_name: "", trigger_value: 0, easing: "linear"}
+    if start >= n:
+        return AnimStep{anim: empty, next: start, ok: false, error: "expected name after `animate`"}
+    name = ident_of(at(tokens, start).tok)
+    if name == "":
+        return AnimStep{anim: empty, next: start, ok: false, error: "expected name after `animate`"}
+    mut i = start + 1
+    if not match_tok(tokens, i, n, "From"):
+        return AnimStep{anim: empty, next: i, ok: false, error: "expected `from` after animate name"}
+    i = i + 1
+    from_v = int_of(at(tokens, i).tok)
+    if from_v < 0:
+        return AnimStep{anim: empty, next: i, ok: false, error: "expected int literal for animate `from`"}
+    i = i + 1
+    if not match_tok(tokens, i, n, "To"):
+        return AnimStep{anim: empty, next: i, ok: false, error: "expected `to` in animate"}
+    i = i + 1
+    to_v = int_of(at(tokens, i).tok)
+    if to_v < 0:
+        return AnimStep{anim: empty, next: i, ok: false, error: "expected int literal for animate `to`"}
+    i = i + 1
+    over_ident = ident_of(at(tokens, i).tok)
+    if over_ident != "over":
+        return AnimStep{anim: empty, next: i, ok: false, error: "expected `over` in animate"}
+    i = i + 1
+    dur_n = int_of(at(tokens, i).tok)
+    if dur_n < 0:
+        return AnimStep{anim: empty, next: i, ok: false, error: "expected int duration in animate"}
+    i = i + 1
+    unit = ident_of(at(tokens, i).tok)
+    dur_ms = if unit == "s" then dur_n * 1000 else if unit == "ms" then dur_n else 0
+    if dur_ms == 0:
+        return AnimStep{anim: empty, next: i, ok: false, error: "expected `s` or `ms` after duration"}
+    i = i + 1
+    # Optional easing: `ease FUNC` — linear/out-cubic/in-cubic/
+    # in-out-cubic/out-bounce. Default is linear.
+    mut easing_fn = "linear"
+    if ident_of(at(tokens, i).tok) == "ease":
+        i = i + 1
+        ename = ident_of(at(tokens, i).tok)
+        if ename == "":
+            return AnimStep{anim: empty, next: i, ok: false, error: "expected easing name after `ease`"}
+        easing_fn = ename
+        i = i + 1
+    # Optional trigger: `when NAME becomes VALUE`. Without it, tween
+    # runs once at boot. With it, tween resets on every rising edge
+    # of NAME transitioning to VALUE.
+    mut trig_name = ""
+    mut trig_val = 0
+    if match_tok(tokens, i, n, "When"):
+        i = i + 1
+        tn = ident_of(at(tokens, i).tok)
+        if tn == "":
+            return AnimStep{anim: empty, next: i, ok: false, error: "expected trigger name after `when`"}
+        i = i + 1
+        if not match_tok(tokens, i, n, "Becomes"):
+            return AnimStep{anim: empty, next: i, ok: false, error: "expected `becomes` after trigger name"}
+        i = i + 1
+        tv = int_of(at(tokens, i).tok)
+        if tv < 0:
+            # Also accept an ident (enum name) — resolved at runtime via
+            # world resource lookup. For MVP we require int literal
+            # (enum values also compile to int world resources so this
+            # works after enum → const propagation).
+            id_name = ident_of(at(tokens, i).tok)
+            if id_name == "":
+                return AnimStep{anim: empty, next: i, ok: false, error: "expected int or ident for `becomes` target"}
+            # For MVP: unknown ident becomes value 0. Better: resolve at
+            # runtime. Follow-up.
+            trig_name = tn
+            trig_val = 0
+        else:
+            trig_name = tn
+            trig_val = tv
+        i = i + 1
+    AnimStep{anim: AnimationDecl{name: name, from_val: from_v, to_val: to_v, duration_ms: dur_ms, trigger_name: trig_name, trigger_value: trig_val, easing: easing_fn}, next: i, ok: true, error: ""}
+
+# `source NAME from file "path" [refresh N s]` — declares an external
+# data feed. Atlas reads the file at boot and (later) on a refresh
+# cadence, exposing the contents as the world resource `NAME`.
+# `from` and unit keywords (`s`/`ms`) reuse existing lexer tokens.
+data SourceStep: source: SourceDecl, next: int, ok: bool, error: Text
+
+fn parse_source_decl(tokens: [Token], start: int, n: int) -> SourceStep:
+    empty = SourceDecl{name: "", kind: "", path: "", refresh_ms: 0}
+    if start >= n:
+        return SourceStep{source: empty, next: start, ok: false, error: "expected name after `source`"}
+    name = ident_of(at(tokens, start).tok)
+    if name == "":
+        return SourceStep{source: empty, next: start, ok: false, error: "expected name after `source`"}
+    mut i = start + 1
+    if not match_tok(tokens, i, n, "From"):
+        return SourceStep{source: empty, next: i, ok: false, error: "expected `from` after source name"}
+    i = i + 1
+    kind_name = ident_of(at(tokens, i).tok)
+    if kind_name == "":
+        return SourceStep{source: empty, next: i, ok: false, error: "expected kind after `from` (v1 supports `file`)"}
+    if kind_name != "file":
+        return SourceStep{source: empty, next: i, ok: false, error: "only `file` sources supported in v1 (http/ws/mmo later)"}
+    i = i + 1
+    path_text = text_of(at(tokens, i).tok)
+    if len(path_text) == 0:
+        return SourceStep{source: empty, next: i, ok: false, error: "expected string path after source kind"}
+    i = i + 1
+    mut refresh_ms = 0
+    # Optional `refresh N s|ms`
+    ident_here = ident_of(at(tokens, i).tok)
+    if ident_here == "refresh":
+        i = i + 1
+        n_val = int_of(at(tokens, i).tok)
+        if n_val < 0:
+            return SourceStep{source: empty, next: i, ok: false, error: "expected int after `refresh`"}
+        i = i + 1
+        unit = if i < n then ident_of(at(tokens, i).tok) else ""
+        if unit == "s":
+            refresh_ms = n_val * 1000
+            i = i + 1
+        else:
+            if unit == "ms":
+                refresh_ms = n_val
+                i = i + 1
+            else:
+                return SourceStep{source: empty, next: i, ok: false, error: "expected `s` or `ms` after refresh interval"}
+    SourceStep{source: SourceDecl{name: name, kind: kind_name, path: path_text, refresh_ms: refresh_ms}, next: i, ok: true, error: ""}
+
+# `template NAME(params) = EXPR` — parameterised fragment. Shape is
+# fn-like (name + paren-params + body) but signalled with `=` instead
+# of `:` because the body is a single expression, not a statement
+# block. Runtime callers (`items:` on a Panel) invoke by name and bind
+# args positionally.
+data TemplateStep: template: TemplateDecl, next: int, ok: bool, error: Text
+
+fn parse_template_decl(tokens: [Token], start: int, n: int) -> TemplateStep:
+    empty = TemplateDecl{name: "", params: [], body: LitInt(0)}
+    if start >= n:
+        return TemplateStep{template: empty, next: start, ok: false, error: "expected template name"}
+    name = ident_of(at(tokens, start).tok)
+    if name == "":
+        return TemplateStep{template: empty, next: start, ok: false, error: "expected template name"}
+    mut i = start + 1
+    if not match_tok(tokens, i, n, "LParen"):
+        return TemplateStep{template: empty, next: i, ok: false, error: "expected `(` after template name"}
+    i = i + 1
+    mut params = []
+    loop:
+        if i >= n:
+            break
+        if match_tok(tokens, i, n, "RParen"):
+            break
+        param_name = ident_of(at(tokens, i).tok)
+        if param_name == "":
+            return TemplateStep{template: empty, next: i, ok: false, error: "expected param name or `)` in template"}
+        i = i + 1
+        mut param_type = ""
+        if match_tok(tokens, i, n, "Colon"):
+            i = i + 1
+            if i < n:
+                param_type = ident_of(at(tokens, i).tok)
+                if param_type == "":
+                    return TemplateStep{template: empty, next: i, ok: false, error: "expected type name in template param"}
+                i = i + 1
+        params = push_mut(params, Param{name: param_name, type_name: param_type})
+        if match_tok(tokens, i, n, "Comma"):
+            i = i + 1
+    if not match_tok(tokens, i, n, "RParen"):
+        return TemplateStep{template: empty, next: i, ok: false, error: "expected `)` after template params"}
+    i = i + 1
+    if not match_tok(tokens, i, n, "Assign"):
+        return TemplateStep{template: empty, next: i, ok: false, error: "expected `=` before template body"}
+    i = i + 1
+    i = skip_newlines(tokens, i, n)
+    body_step = parse_expr(tokens, i, n)
+    if not body_step.ok:
+        return TemplateStep{template: empty, next: body_step.next, ok: false, error: body_step.error}
+    TemplateStep{template: TemplateDecl{name: name, params: params, body: body_step.value}, next: body_step.next, ok: true, error: ""}
+
+# `tokens NAMESPACE:` NEWLINE (indented) `key: value` lines. The
+# namespace + key together form the resolved token id (`color.bg`,
+# `layout.card`). Block ends on dedent-or-below the `tokens` column,
+# or on any top-level starter. Values are arbitrary expressions —
+# strings for colors, ints for spacing, idents for token refs.
+data TokensStep: block: TokensDecl, next: int, ok: bool, error: Text
+
+fn parse_tokens_decl(tokens: [Token], start: int, n: int) -> TokensStep:
+    empty = TokensDecl{namespace: "", entries: []}
+    if start >= n:
+        return TokensStep{block: empty, next: start, ok: false, error: "expected namespace after `tokens`"}
+    namespace = ident_of(at(tokens, start).tok)
+    if namespace == "":
+        return TokensStep{block: empty, next: start, ok: false, error: "expected namespace after `tokens`"}
+    mut i = start + 1
+    if not match_tok(tokens, i, n, "Colon"):
+        return TokensStep{block: empty, next: i, ok: false, error: "expected `:` after tokens namespace"}
+    i = i + 1
+    # Column of the `tokens` keyword — entries at or left of it dedent out.
+    tokens_col = if start >= 1 then at(tokens, start - 1).col else 0
+    i = skip_newlines(tokens, i, n)
+    mut entries = []
+    loop:
+        if i >= n:
+            break
+        entry_tok = at(tokens, i)
+        if is_newline(entry_tok.tok):
+            i = i + 1
+        else:
+            if at_rule_starter(tokens, i, n):
+                break
+            if entry_tok.col <= tokens_col:
+                break
+            key = ident_of(entry_tok.tok)
+            if key == "":
+                return TokensStep{block: empty, next: i, ok: false, error: "expected token key ident"}
+            i = i + 1
+            if not match_tok(tokens, i, n, "Colon"):
+                return TokensStep{block: empty, next: i, ok: false, error: "expected `:` after token key"}
+            i = i + 1
+            val_step = parse_expr(tokens, i, n)
+            if not val_step.ok:
+                return TokensStep{block: empty, next: val_step.next, ok: false, error: val_step.error}
+            entries = push_mut(entries, TokenEntry{key: key, value: val_step.value})
+            i = val_step.next
+    TokensStep{block: TokensDecl{namespace: namespace, entries: entries}, next: i, ok: true, error: ""}
 
 # `belief NAME:` then a body of `fact = value` lines — declares an
 # agent's believed facts as a resource namespace `belief:NAME:fact`
@@ -632,7 +1948,70 @@ fn parse_belief_goal_or_rule(tokens: [Token], start: int, n: int) -> RuleStep:
         return parse_prefixed_derive(tokens, start + 1, n, "goal:")
     if match_tok(tokens, start, n, "Constraint"):
         return parse_prefixed_derive(tokens, start + 1, n, "constraint:")
+    if match_tok(tokens, start, n, "Intent"):
+        return parse_intent_decl(tokens, start + 1, n)
     parse_rule(tokens, start, n)
+
+# `intent NAME [for KIND]:` then `require COND` / `utility EXPR` lines — an
+# AI-native declaration (pillar 1). PURE PARSER SUGAR, like goal/constraint:
+# it desugars to a Tick rule that keeps two resources current so a utility-AI
+# can pick actions by reading them, no planner in the language:
+#   intent:NAME:applicable = COND ? 1 : 0    (is this intent viable now?)
+#   intent:NAME:score      = COND ? UTILITY : 0   (its utility when viable)
+# `for KIND` is accepted for readability and stored nowhere (documentation);
+# the PLANNER that sequences chosen intents is the host's job (a future slice).
+fn parse_intent_decl(tokens: [Token], start: int, n: int) -> RuleStep:
+    empty = Rule{name: "", params: [], body: [], trigger: "", condition: LitBool(true)}
+    if start >= n:
+        return RuleStep{rule: empty, next: start, ok: false, error: "expected name after `intent`"}
+    name = ident_of(at(tokens, start).tok)
+    if name == "":
+        return RuleStep{rule: empty, next: start, ok: false, error: "expected name after `intent`"}
+    mut i = start + 1
+    # Optional `for KIND` — `for` lexes to the For token; consume it and the
+    # kind name purely as documentation.
+    if match_tok(tokens, i, n, "For"):
+        i = i + 1
+        if i < n and ident_of(at(tokens, i).tok) != "":
+            i = i + 1
+    if not match_tok(tokens, i, n, "Colon"):
+        return RuleStep{rule: empty, next: i, ok: false, error: "expected `:` after intent header"}
+    i = i + 1
+    # Column of the `intent` keyword — a body line at or left of it is a dedent.
+    intent_col = if start >= 1 then at(tokens, start - 1).col else 0
+    i = skip_newlines(tokens, i, n)
+    mut cond = LitBool(true)
+    mut util = LitInt(0)
+    loop:
+        if i >= n:
+            break
+        t = at(tokens, i)
+        if is_newline(t.tok):
+            i = i + 1
+        else:
+            if at_rule_starter(tokens, i, n) or t.col <= intent_col:
+                break
+            if match_tok(tokens, i, n, "Require"):
+                cstep = parse_expr(tokens, i + 1, n)
+                if not cstep.ok:
+                    return RuleStep{rule: empty, next: cstep.next, ok: false, error: cstep.error}
+                cond = cstep.value
+                i = cstep.next
+            else:
+                if ident_of(t.tok) == "utility":
+                    ustep = parse_expr(tokens, i + 1, n)
+                    if not ustep.ok:
+                        return RuleStep{rule: empty, next: ustep.next, ok: false, error: ustep.error}
+                    util = ustep.value
+                    i = ustep.next
+                else:
+                    return RuleStep{rule: empty, next: i, ok: false, error: "intent body takes `require COND` and `utility EXPR`"}
+    prefix = "intent:" + name
+    applicable = SetVar(prefix + ":applicable", IfExpr(cond, LitInt(1), LitInt(0)))
+    score = SetVar(prefix + ":score", IfExpr(cond, util, LitInt(0)))
+    body = push(push([], applicable), score)
+    r = Rule{name: prefix, params: [], body: body, trigger: "Tick", condition: LitBool(true)}
+    RuleStep{rule: r, next: i, ok: true, error: ""}
 
 # `goal NAME = COND` / `constraint NAME = COND` — the world describes its
 # intent, not the behavior (B3). Both desugar (like derive) to a Tick
@@ -672,6 +2051,21 @@ fn parse_prefixed_derive(tokens: [Token], start: int, n: int, ns: Text) -> RuleS
 # Runtime sees N independent rules — edge detection, ctx threading,
 # everything else is unchanged.
 data ForStep: rules: [Rule], next: int, ok: bool, error: Text
+
+# Distinguish the two top-level `for`s: a RANGE macro `for x in [from] INT ..`
+# vs a runtime foreach `for x in [list]/ident:`. Peek past `for IDENT in
+# [from]` and check whether the source starts with an int literal.
+fn is_range_for(tokens: [Token], i: int, n: int) -> bool:
+    if i + 2 >= n:
+        false
+    else:
+        if not match_tok(tokens, i + 2, n, "In"):
+            false
+        else:
+            mut j = i + 3
+            if match_tok(tokens, j, n, "From"):
+                j = j + 1
+            if j >= n then false else int_of(at(tokens, j).tok) >= 0
 
 fn parse_for_loop(tokens: [Token], start: int, n: int) -> ForStep:
     if start >= n:
@@ -732,6 +2126,34 @@ fn parse_every_rule(tokens: [Token], start: int, n: int) -> RuleStep:
     if period <= 0:
         return RuleStep{rule: empty_rule(), next: start, ok: false, error: "expected positive int period after `every`"}
     mut i = start + 1
+    # An optional unit (s/ms/m) turns the frame period into a WALL-CLOCK
+    # cadence: `every 2s:` is scheduled on real time by the engine's timer
+    # scheduler (sleep-to-deadline, no polling). A bare `every 4:` stays the
+    # legacy frame desugar (when tick % 4 == 0).
+    mut interval_ms = 0
+    unit = if i < n then ident_of(at(tokens, i).tok) else ""
+    if unit == "ms":
+        interval_ms = period
+        i = i + 1
+    else:
+        if unit == "s":
+            interval_ms = period * 1000
+            i = i + 1
+        else:
+            if unit == "m":
+                interval_ms = period * 60000
+                i = i + 1
+    # Optional `if EXPR` gate: `every 3s if heat > 0: heat -= 1` — cadence
+    # fires the tick, EXPR gates the body. Cleaner than nesting an if inside
+    # the body manually. Combines the two most common patterns
+    # (periodic + conditional) into one line.
+    mut guard = LitBool(true)
+    if match_tok(tokens, i, n, "If"):
+        gate_step = parse_expr(tokens, i + 1, n)
+        if not gate_step.ok:
+            return RuleStep{rule: empty_rule(), next: gate_step.next, ok: false, error: gate_step.error}
+        guard = gate_step.value
+        i = gate_step.next
     if not match_tok(tokens, i, n, "Colon"):
         return RuleStep{rule: empty_rule(), next: i, ok: false, error: "expected `:` after every period"}
     i = i + 1
@@ -758,8 +2180,14 @@ fn parse_every_rule(tokens: [Token], start: int, n: int) -> RuleStep:
                 i = step.next
             else:
                 return RuleStep{rule: empty_rule(), next: i, ok: false, error: step.error}
-    cond = Binop("==", Binop("%", VarRef("tick"), LitInt(period)), LitInt(0))
-    RuleStep{rule: Rule{name: "", params: [], body: body, trigger: "$when", condition: cond}, next: i, ok: true, error: ""}
+    # Wrap body in IfStmt when a guard is present; LitBool(true) short-
+    # circuits so the no-guard path pays nothing.
+    final_body = if is_lit_true(guard) then body else push([], IfStmt(guard, body))
+    if interval_ms > 0:
+        RuleStep{rule: Rule{name: "", params: [], body: final_body, trigger: "$every:{interval_ms}", condition: LitBool(true)}, next: i, ok: true, error: ""}
+    else:
+        cond = Binop("==", Binop("%", VarRef("tick"), LitInt(period)), LitInt(0))
+        RuleStep{rule: Rule{name: "", params: [], body: final_body, trigger: "$when", condition: cond}, next: i, ok: true, error: ""}
 
 # ---- stmt = "emit" IDENT [ "{" field-list "}" ] ----
 
@@ -771,8 +2199,11 @@ fn parse_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
         return parse_require_stmt(tokens, start + 1, n)
     if match_tok(tokens, start, n, "Let"):
         return parse_let_stmt(tokens, start + 1, n)
-    if match_tok(tokens, start, n, "Spawn"):
-        return parse_spawn_stmt(tokens, start + 1, n)
+    # `create X ...` — the only shape. `spawn` was Doom/Quake baggage;
+    # Cypher/SurrealDB/EdgeDB agree on CREATE. First-version cleanup:
+    # one-way syntax, no aliases.
+    if match_tok(tokens, start, n, "Create"):
+        return parse_spawn_stmt(tokens, start + 1, n, at(tokens, start).col)
     if match_tok(tokens, start, n, "Destroy"):
         return parse_destroy_stmt(tokens, start + 1, n)
     if match_tok(tokens, start, n, "Set"):
@@ -783,18 +2214,29 @@ fn parse_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
         return parse_after_stmt(tokens, start + 1, n)
     if match_tok(tokens, start, n, "Each") or match_tok(tokens, start, n, "For"):
         return parse_foreach_stmt(tokens, start + 1, n)
-    if match_tok(tokens, start, n, "When"):
+    if match_tok(tokens, start, n, "If"):
         return parse_if_stmt(tokens, start + 1, n)
     if looks_like_assignment(tokens, start, n):
         return parse_set_stmt(tokens, start, n)
+    # Bare `Panel ...` (no `create` keyword): a leading Uppercase Type is a
+    # spawn. `create` stays valid — this is pure sugar for the UI parts.
+    if is_type_stmt(tokens, start, n):
+        return parse_spawn_stmt(tokens, start, n, at(tokens, start).col)
     mut i = start
-    if not match_tok(tokens, i, n, "Emit"):
-        return StmtStep{stmt: EmitEffect("", []), next: i, ok: false, error: "expected emit/require/let/spawn/destroy/set/for/assignment"}
+    # `emit X {...}` and `signal X {...}` are the same AST today, but the
+    # keyword split marks INTENT — `emit` is a buffered message (renderer /
+    # audio / log drains it), `signal` is an observed event (any `on X:`
+    # handler fires synchronously). Runtime is identical for now; the
+    # semantic tag lets us diverge behavior later (buffered vs dispatched)
+    # without a source-wide rewrite. Bevy's 0.17 lesson: split early or
+    # regret it (they went 2 years mixing the shapes).
+    if not (match_tok(tokens, i, n, "Emit") or match_tok(tokens, i, n, "Signal")):
+        return StmtStep{stmt: EmitEffect("", []), next: i, ok: false, error: "expected emit/signal/require/let/spawn/destroy/set/for/assignment"}
     i = i + 1
     name_tok = if i < n then at(tokens, i) else newline_token()
     event = ident_of(name_tok.tok)
     if event == "":
-        return StmtStep{stmt: EmitEffect("", []), next: i, ok: false, error: "expected event name after `emit`"}
+        return StmtStep{stmt: EmitEffect("", []), next: i, ok: false, error: "expected event name after `emit`/`signal`"}
     i = i + 1
     # Optional `{ ... }` field block.
     fields = []
@@ -805,28 +2247,28 @@ fn parse_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
         i2 = i2 + 1
         if match_tok(tokens, i2, n, "RParen"):
             i2 = i2 + 1
-    # `emit X { f1: v1, f2: v2, ... }` — field-block form. Separate guard
-    # (not an else) because the dangling-else binding in Orion's parser
-    # would otherwise attach the else to the inner RParen check instead
-    # of the outer LParen check, silently skipping this branch entirely.
+    # `emit X f1: v1, f2: v2` — brace-less only in v1. Braces `{}` are
+    # forbidden; use comma-separated fields terminated by newline.
     if match_tok(tokens, i2, n, "LBrace"):
-        brace = parse_field_block(tokens, i2, n)
-        if not brace.ok:
-            return StmtStep{stmt: EmitEffect(event, []), next: brace.next, ok: false, error: brace.error}
-        field_list = brace.fields
-        i2 = brace.next
+        return StmtStep{stmt: EmitEffect(event, []), next: i2, ok: false, error: "braces not allowed for emit — use `emit X f: v, f: v`"}
+    if i2 < n and not is_newline(at(tokens, i2).tok) and not at_rule_starter(tokens, i2, n):
+        line = parse_field_list_line(tokens, i2, n)
+        if line.ok:
+            field_list = line.fields
+            i2 = line.next
     StmtStep{stmt: EmitEffect(event, field_list), next: i2, ok: true, error: ""}
 
 data FieldBlockStep: fields: [FieldExpr], next: int, ok: bool, error: Text
 
-fn parse_field_block(tokens: [Token], start: int, n: int) -> FieldBlockStep:
-    mut i = start + 1
+# Brace-less field-list: reads `f: v, f: v, ...` until a Newline.
+# The only shape — no C-family `{}` litter in Astra v1.
+fn parse_field_list_line(tokens: [Token], start: int, n: int) -> FieldBlockStep:
     mut out = []
-    i = skip_newlines(tokens, i, n)
+    mut i = start
     loop:
         if i >= n:
             break
-        if match_tok(tokens, i, n, "RBrace"):
+        if is_newline(at(tokens, i).tok):
             break
         step = parse_field(tokens, i, n)
         if not step.ok:
@@ -835,9 +2277,6 @@ fn parse_field_block(tokens: [Token], start: int, n: int) -> FieldBlockStep:
         i = step.next
         if match_tok(tokens, i, n, "Comma"):
             i = i + 1
-        i = skip_newlines(tokens, i, n)
-    if match_tok(tokens, i, n, "RBrace"):
-        i = i + 1
     FieldBlockStep{fields: out, next: i, ok: true, error: ""}
 
 fn skip_newlines(tokens: [Token], start: int, n: int) -> int:
@@ -865,11 +2304,139 @@ fn parse_field(tokens: [Token], start: int, n: int) -> FieldStep:
     if not match_tok(tokens, i, n, "Colon"):
         return FieldStep{field: FieldExpr{name: "", value: LitInt(0)}, next: i, ok: false, error: "expected `:`"}
     i = i + 1
+    # Symbolic value: a SYMBOLIC field (anchor/layout/color/show/…) whose
+    # value is a lone bareword is an atom — its own name as text. So
+    # `anchor: fill` == `anchor: "fill"`, quotes reserved for real text.
+    # Only lone idents atomise; `cmd.label` / `a and b` / numbers / strings
+    # still parse as expressions. Numeric + text fields never atomise, so
+    # `w: 20` and `text: "ATLAS"` are unaffected.
+    if is_symbolic_field(name) and is_bareword_value(tokens, i, n):
+        atom = ident_of(at(tokens, i).tok)
+        return FieldStep{field: FieldExpr{name: name, value: LitText(atom)}, next: i + 1, ok: true, error: ""}
+    # `size: WxH` dimension shorthand — `18x14` lexes as Int(18)+Ident("x14"),
+    # so recombine into a [w, h] pair the spawn post-pass expands to w:/h:.
+    # (`size: 16` stays a plain int → a square.)
+    if fe_name_eq(name, "size") and is_dim_pair(tokens, i, n):
+        wv = int_of(at(tokens, i).tok)
+        hv = int_from_x_ident(ident_of(at(tokens, i + 1).tok))
+        return FieldStep{field: FieldExpr{name: name, value: LitList([LitInt(wv), LitInt(hv)])}, next: i + 2, ok: true, error: ""}
     step = parse_expr(tokens, i, n)
     if step.ok:
         FieldStep{field: FieldExpr{name: name, value: step.value}, next: step.next, ok: true, error: ""}
     else:
         FieldStep{field: FieldExpr{name: "", value: LitInt(0)}, next: i, ok: false, error: step.error}
+
+# Map-literal field: like parse_field but a lone bareword value ALWAYS
+# atomises (map literals are data — `{ icon: menu, act: menu }` — so any
+# unquoted word is a symbol, quotes are reserved for real text). Also ends
+# a value at `}`/`]`, not just comma/newline.
+fn parse_map_field(tokens: [Token], start: int, n: int) -> FieldStep:
+    mut i = start
+    name = if i < n then ident_of(at(tokens, i).tok) else ""
+    if name == "":
+        return FieldStep{field: FieldExpr{name: "", value: LitInt(0)}, next: i, ok: false, error: "expected field name"}
+    i = i + 1
+    if not match_tok(tokens, i, n, "Colon"):
+        return FieldStep{field: FieldExpr{name: "", value: LitInt(0)}, next: i, ok: false, error: "expected `:`"}
+    i = i + 1
+    if is_bareword_map_value(tokens, i, n):
+        return FieldStep{field: FieldExpr{name: name, value: LitText(ident_of(at(tokens, i).tok))}, next: i + 1, ok: true, error: ""}
+    step = parse_expr(tokens, i, n)
+    if step.ok:
+        FieldStep{field: FieldExpr{name: name, value: step.value}, next: step.next, ok: true, error: ""}
+    else:
+        FieldStep{field: FieldExpr{name: "", value: LitInt(0)}, next: i, ok: false, error: step.error}
+
+fn is_bareword_map_value(tokens: [Token], i: int, n: int) -> bool:
+    if i >= n:
+        false
+    else:
+        if len(ident_of(at(tokens, i).tok)) == 0:
+            false
+        else:
+            j = i + 1
+            if j >= n then true else (is_newline(at(tokens, j).tok) or match_tok(tokens, j, n, "Comma") or match_tok(tokens, j, n, "RBrace") or match_tok(tokens, j, n, "RBracket"))
+
+# Fields whose value is a symbolic atom (an enum-ish name), not text or a
+# number. A bare identifier in one of these is its own name. Text fields
+# (text/label/hint/placeholder/desc) are absent on purpose — they keep
+# quotes; numeric fields never reach here (a bareword there stays an expr).
+fn is_symbolic_field(name: Text) -> bool:
+    name == "anchor" or name == "layout" or name == "align" or name == "justify" or name == "role" or name == "fill" or name == "blend" or name == "kind" or name == "tint" or name == "easing" or name == "do" or name == "style" or name == "name" or name == "parent" or name == "show" or name == "hide" or name == "search" or name == "image" or name == "color" or name == "render" or name == "items" or name == "bind" or name == "changed"
+
+# A lone bareword value = an Ident immediately followed by end-of-value
+# (comma, newline, or EOF). Idents followed by `.`/operators/`(` are the
+# start of a larger expression and are NOT atomised.
+fn is_bareword_value(tokens: [Token], i: int, n: int) -> bool:
+    if i >= n:
+        false
+    else:
+        id = ident_of(at(tokens, i).tok)
+        if len(id) == 0:
+            false
+        else:
+            j = i + 1
+            if j >= n then true else (is_newline(at(tokens, j).tok) or match_tok(tokens, j, n, "Comma"))
+
+# `18x14` → Int(18) then Ident("x14"). Detect that pair (an int followed by
+# an `x` + digits identifier) so `size:` can read a WxH dimension without a
+# dedicated lexer token.
+fn is_dim_pair(tokens: [Token], i: int, n: int) -> bool:
+    if i + 1 >= n:
+        false
+    else:
+        if int_of(at(tokens, i).tok) < 0:
+            false
+        else:
+            x_ident_digits(ident_of(at(tokens, i + 1).tok))
+
+fn x_ident_digits(id: Text) -> bool:
+    b = bytes_from_text(id)
+    if len(b) < 2:
+        false
+    else:
+        if byte_at(b, 0) != 120:
+            false
+        else:
+            mut ok = true
+            for k in 1..<len(b):
+                c = byte_at(b, k)
+                if c < 48 or c > 57:
+                    ok = false
+            ok
+
+fn int_from_x_ident(id: Text) -> int:
+    b = bytes_from_text(id)
+    mut v = 0
+    for k in 1..<len(b):
+        v = v * 10 + (byte_at(b, k) - 48)
+    v
+
+# Expand a `size:` field into `w:`/`h:` at spawn build. `size: N` → N×N,
+# `size: WxH` → W×H. On Text `size` stays FONT size (Text has no box), so
+# it is left untouched.
+fn expand_size(fields: [FieldExpr], kind: Text) -> [FieldExpr]:
+    if fe_name_eq(kind, "Text"):
+        fields
+    else:
+        mut out = []
+        for i in 0..<len(fields):
+            f = at(fields, i)
+            if fe_name_eq(f.name, "size"):
+                match f.value:
+                    LitInt(v) ->
+                        out = push_mut(out, FieldExpr{name: "w", value: LitInt(v)})
+                        out = push_mut(out, FieldExpr{name: "h", value: LitInt(v)})
+                    LitList(items) ->
+                        if len(items) >= 2:
+                            out = push_mut(out, FieldExpr{name: "w", value: at(items, 0)})
+                            out = push_mut(out, FieldExpr{name: "h", value: at(items, 1)})
+                        else:
+                            out = push_mut(out, f)
+                    _ -> out = push_mut(out, f)
+            else:
+                out = push_mut(out, f)
+        out
 
 # ---- require / let stmt parsers ----
 
@@ -940,24 +2507,379 @@ fn parse_let_destructure(tokens: [Token], start: int, n: int) -> StmtStep:
         return StmtStep{stmt: Let("", LitInt(0)), next: val.next, ok: false, error: val.error}
     StmtStep{stmt: LetDestructure(names, val.value), next: val.next, ok: true, error: ""}
 
-# `spawn Kind { f: v, f: v, ... }` — re-uses the brace field-block
-# parser from emit. Host registers a constructor for Kind and acts on
-# the resulting AstraSpawnKind(kind, fields) effect.
-fn parse_spawn_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
+# `create Kind f: v, f: v, ...` — the only shape. Fields comma-
+# separated after Kind, terminated by newline. Braces `{}` are
+# forbidden in v1 (C-family litter has no place in an indent-driven
+# data language).
+fn parse_spawn_stmt(tokens: [Token], start: int, n: int, stmt_col: int) -> StmtStep:
     if start >= n:
-        return StmtStep{stmt: SpawnEntity("", []), next: start, ok: false, error: "expected Kind after `spawn`"}
-    kind = ident_of(at(tokens, start).tok)
-    if kind == "":
-        return StmtStep{stmt: SpawnEntity("", []), next: start, ok: false, error: "expected Kind after `spawn`"}
-    mut i = start + 1
+        return StmtStep{stmt: SpawnEntity("", []), next: start, ok: false, error: "expected type name after `create`"}
+    raw_kind = ident_of(at(tokens, start).tok)
+    if raw_kind == "":
+        return StmtStep{stmt: SpawnEntity("", []), next: start, ok: false, error: "expected type name after `create`"}
+    # Element sugar — the name says what it is, so you don't spell the flag:
+    #   Input  = an editable Text (`Input bind:…` not `Text editable: true`)
+    #   Spacer = a Panel that just grows (fills the gap in a row/column)
+    kind = if raw_kind == "Input" then "Text" else if raw_kind == "Spacer" then "Panel" else raw_kind
     mut fields = []
+    if raw_kind == "Input":
+        fields = push_mut(fields, FieldExpr{name: "editable", value: LitInt(1)})
+    if raw_kind == "Spacer":
+        fields = push_mut(fields, FieldExpr{name: "grow", value: LitInt(1)})
+    mut i = start + 1
     if match_tok(tokens, i, n, "LBrace"):
-        brace = parse_field_block(tokens, i, n)
-        if not brace.ok:
-            return StmtStep{stmt: SpawnEntity(kind, []), next: brace.next, ok: false, error: brace.error}
-        fields = brace.fields
-        i = brace.next
-    StmtStep{stmt: SpawnEntity(kind, fields), next: i, ok: true, error: ""}
+        return StmtStep{stmt: SpawnEntity(kind, []), next: i, ok: false, error: "braces not allowed — use `Panel f: v, f: v` or indented `f: v` lines"}
+    # Positional primary value: a leading string with no `key:` is the
+    # element's main content — `Text "ATLAS"` == `Text text: "ATLAS"`.
+    if i < n and is_str_tok(at(tokens, i).tok):
+        fields = push_mut(fields, FieldExpr{name: "text", value: text_lit_expr(text_of(at(tokens, i).tok))})
+        i = i + 1
+        if match_tok(tokens, i, n, "Comma"):
+            i = i + 1
+    line = parse_field_list_line(tokens, i, n)
+    if not line.ok:
+        return StmtStep{stmt: SpawnEntity(kind, []), next: line.next, ok: false, error: line.error}
+    for lf in line.fields:
+        fields = push_mut(fields, lf)
+    # Continuation props: `key: value` lines indented DEEPER than this
+    # create fold in as more fields (readability for many-prop widgets —
+    # >4 props reads better stacked). A deeper line starting with an
+    # Uppercase Type is a CHILD, not a prop → stop and let the body loop +
+    # parent-inference handle it. Dedent ends the create.
+    mut cur = line.next
+    loop:
+        j = skip_newlines(tokens, cur, n)
+        if j >= n:
+            cur = j
+            break
+        if at(tokens, j).col <= stmt_col:
+            break
+        if is_type_stmt(tokens, j, n):
+            break
+        fstep = parse_field(tokens, j, n)
+        if not fstep.ok:
+            break
+        fields = push_mut(fields, fstep.field)
+        cur = fstep.next
+        if match_tok(tokens, cur, n, "Comma"):
+            cur = cur + 1
+    # Expand `size:` → w:/h: (skips Text, where size is font), then stash the
+    # create's column so parent-inference can nest by indentation. Both
+    # __size-expansion and __col stripping happen before the entity is built.
+    sized = expand_size(fields, kind)
+    fields_c = push(sized, FieldExpr{name: "__col", value: LitInt(stmt_col)})
+    StmtStep{stmt: SpawnEntity(kind, fields_c), next: cur, ok: true, error: ""}
+
+# A statement that starts with an Uppercase identifier is a bare spawn
+# (`Panel ...` — no `create` keyword). Keywords lex to non-Ident tokens
+# (ident_of → "") and assignments/props start lowercase, so this never
+# collides.
+fn is_type_stmt(tokens: [Token], start: int, n: int) -> bool:
+    if start >= n:
+        false
+    else:
+        nm = ident_of(at(tokens, start).tok)
+        if len(nm) == 0:
+            false
+        else:
+            c = byte_at(bytes_from_text(nm), 0)
+            c >= 65 and c <= 90
+
+# ── Styles ── `style NAME:` declares a reusable prop bundle; a create
+# with `style: NAME` gets those props merged in (its own fields win).
+# styles are collected here and exposed on ParseResult; atlas loads them
+# globally and merges them into a widget's payload at SPAWN — so a style
+# in one file styles a create in another (cross-bundle).
+data StyleStep: style: StyleDecl, next: int, ok: bool, error: Text
+
+# `style` is a bare Ident at top level (no keyword → no Tok enum surgery):
+# `style NAME :` — NAME is an Ident, then a Colon.
+fn looks_like_style_decl(tokens: [Token], start: int, n: int) -> bool:
+    if start + 2 >= n:
+        false
+    else:
+        w = ident_of(at(tokens, start).tok)
+        if not fe_name_eq(w, "style"):
+            false
+        else:
+            nm = ident_of(at(tokens, start + 1).tok)
+            len(nm) > 0 and match_tok(tokens, start + 2, n, "Colon")
+
+fn parse_style_decl(tokens: [Token], start: int, n: int) -> StyleStep:
+    empty = StyleDecl{name: "", fields: []}
+    if start >= n:
+        return StyleStep{style: empty, next: start, ok: false, error: "expected name after `style`"}
+    name = ident_of(at(tokens, start).tok)
+    if name == "":
+        return StyleStep{style: empty, next: start, ok: false, error: "expected name after `style`"}
+    mut i = start + 1
+    if not match_tok(tokens, i, n, "Colon"):
+        return StyleStep{style: empty, next: i, ok: false, error: "expected `:` after style name"}
+    i = i + 1
+    style_col = if start >= 1 then at(tokens, start - 1).col else 0
+    mut fields = []
+    loop:
+        i = skip_newlines(tokens, i, n)
+        if i >= n:
+            break
+        if at(tokens, i).col <= style_col:
+            break
+        if at_rule_starter(tokens, i, n):
+            break
+        fstep = parse_field(tokens, i, n)
+        if not fstep.ok:
+            return StyleStep{style: empty, next: i, ok: false, error: fstep.error}
+        fields = push_mut(fields, fstep.field)
+        i = fstep.next
+        if match_tok(tokens, i, n, "Comma"):
+            i = i + 1
+    StyleStep{style: StyleDecl{name: name, fields: fields}, next: i, ok: true, error: ""}
+
+fn apply_styles_rules(rules: [Rule], styles: [StyleDecl]) -> [Rule]:
+    mut out = []
+    for i in 0..<len(rules):
+        r = at(rules, i)
+        out = push_mut(out, Rule{name: r.name, params: r.params, body: apply_styles_body(r.body, styles), trigger: r.trigger, condition: r.condition})
+    out
+
+fn apply_styles_body(body: [Stmt], styles: [StyleDecl]) -> [Stmt]:
+    mut out = []
+    for i in 0..<len(body):
+        out = push_mut(out, apply_styles_stmt(at(body, i), styles))
+    out
+
+fn apply_styles_stmt(s: Stmt, styles: [StyleDecl]) -> Stmt:
+    if stmt_is_spawn(s):
+        fields = stmt_spawn_fields(s)
+        sname = fe_field_text(fields, "style")
+        if len(sname) == 0:
+            s
+        else:
+            sfields = find_style_fields(styles, sname)
+            merged = merge_missing_fields(fe_strip_field(fields, "style"), sfields)
+            SpawnEntity(stmt_spawn_kind(s), merged)
+    else:
+        apply_styles_control(s, styles)
+
+fn apply_styles_control(s: Stmt, styles: [StyleDecl]) -> Stmt:
+    match s:
+        IfStmt(c, b) -> IfStmt(c, apply_styles_body(b, styles))
+        ForEach(vn, sr, pr, b) -> ForEach(vn, sr, pr, apply_styles_body(b, styles))
+        _ -> s
+
+fn find_style_fields(styles: [StyleDecl], name: Text) -> [FieldExpr]:
+    mut out = []
+    for i in 0..<len(styles):
+        st = at(styles, i)
+        if fe_name_eq(st.name, name):
+            out = st.fields
+    out
+
+# base wins; append extra fields whose names aren't already in base.
+fn merge_missing_fields(base: [FieldExpr], extra: [FieldExpr]) -> [FieldExpr]:
+    mut out = base
+    for i in 0..<len(extra):
+        f = at(extra, i)
+        if not fe_field_has(base, f.name):
+            out = push_mut(out, f)
+    out
+
+# ── Parent inference ── a `create` indented deeper than another becomes
+# its child. Post-pass over every rule body: parse_spawn_stmt stashed each
+# create's column as __col; here we resolve parent = nearest EARLIER create
+# with a smaller column, then strip __col so it never reaches the entity.
+# An explicit `parent:` always wins; a nameless create can't be a parent.
+# Existing apps are untouched: flat creates (same column) infer nothing.
+pub fn infer_parents_rules(rules: [Rule]) -> [Rule]:
+    mut out = []
+    for i in 0..<len(rules):
+        r = at(rules, i)
+        out = push_mut(out, Rule{name: r.name, params: r.params, body: infer_parents_body(r.body), trigger: r.trigger, condition: r.condition})
+    out
+
+fn infer_parents_body(body: [Stmt]) -> [Stmt]:
+    mut out = []
+    for i in 0..<len(body):
+        out = push_mut(out, infer_one_stmt(body, i))
+    out
+
+fn infer_one_stmt(body: [Stmt], idx: int) -> Stmt:
+    s = at(body, idx)
+    if stmt_is_spawn(s):
+        col = stmt_spawn_col(s)
+        pname = nearest_parent_name(body, idx, col)
+        f2 = fe_strip_field(stmt_spawn_fields(s), "__col")
+        f3 = if fe_field_has(f2, "parent") or len(pname) == 0 then f2 else push(f2, FieldExpr{name: "parent", value: LitText(pname)})
+        # Stamp source order so flex layout follows how creates are WRITTEN
+        # (entity ids batch per type, so id order isn't source order). An
+        # explicit `order:` still overrides. Kills the manual `order:` prop.
+        f4 = if fe_field_has(f3, "order") then f3 else push(f3, FieldExpr{name: "order", value: LitInt(idx)})
+        # Auto-name nameless creates so children can reference them (parent
+        # + the visibility cascade look parents up by name). `name:` stays
+        # optional — you only write it when YOU need to target the widget.
+        f5 = if fe_field_has(f4, "name") then f4 else push(f4, FieldExpr{name: "name", value: LitText("__w{idx}")})
+        SpawnEntity(stmt_spawn_kind(s), f5)
+    else:
+        match s:
+            # A `for` nested in the tree: its rows attach to the container the
+            # loop sits under (nearest earlier spawn with a smaller column
+            # than the `each` keyword) and sort at the loop's own position.
+            # So a nested `for` drops explicit `parent:`/`order:`. Top-level
+            # loops (each_col 0) find no such container → parent stays empty,
+            # so game loops that spawn free entities are unaffected.
+            ForEach(iter, src, filter, fbody) -> ForEach(iter, src, filter, infer_foreach_body(fbody, nearest_parent_name(body, idx, foreach_eachcol(fbody)), idx))
+            _ -> strip_one_stmt(s)
+
+# Attach every root row of a nested loop's body to `parent` at `order_val`.
+# Explicit parent/order on a row still win. Flat bodies (one Panel per item,
+# the palette-row case) are exact; a row with its OWN children keeps them via
+# explicit parent (deep nesting inside a loop is not inferred).
+fn infer_foreach_body(fbody: [Stmt], parent: Text, order_val: int) -> [Stmt]:
+    mut out = []
+    for i in 0..<len(fbody):
+        bs = at(fbody, i)
+        if stmt_is_spawn(bs):
+            f = fe_strip_field(fe_strip_field(stmt_spawn_fields(bs), "__col"), "__eachcol")
+            f2 = if fe_field_has(f, "parent") or len(parent) == 0 then f else push(f, FieldExpr{name: "parent", value: LitText(parent)})
+            f3 = if fe_field_has(f2, "order") then f2 else push(f2, FieldExpr{name: "order", value: LitInt(order_val)})
+            out = push_mut(out, SpawnEntity(stmt_spawn_kind(bs), f3))
+        else:
+            out = push_mut(out, strip_one_stmt(bs))
+    out
+
+fn foreach_eachcol(fbody: [Stmt]) -> int:
+    mut col = 0 - 1
+    for i in 0..<len(fbody):
+        s = at(fbody, i)
+        if col < 0 and stmt_is_spawn(s):
+            c = fe_field_int(stmt_spawn_fields(s), "__eachcol", 0 - 1)
+            if c >= 0:
+                col = c
+    col
+
+# Nearest earlier create with a STRICTLY smaller column is the parent.
+fn nearest_parent_name(body: [Stmt], idx: int, col: int) -> Text:
+    mut j = idx - 1
+    mut result = ""
+    mut done = false
+    loop:
+        if done or j < 0:
+            break
+        cj = stmt_spawn_col(at(body, j))
+        if cj >= 0 and cj < col:
+            pn = stmt_spawn_name(at(body, j))
+            # Match the auto-name infer_one_stmt assigns to a nameless parent.
+            result = if len(pn) > 0 then pn else "__w{j}"
+            done = true
+        else:
+            j = j - 1
+    result
+
+# Strip __col from a stmt (and recurse into control-flow bodies) without
+# inferring parent — nested-in-if/for creates keep their explicit parent.
+fn strip_one_stmt(s: Stmt) -> Stmt:
+    match s:
+        SpawnEntity(k, f) -> SpawnEntity(k, fe_strip_field(f, "__col"))
+        IfStmt(c, b) -> IfStmt(c, strip_cols_body(b))
+        ForEach(vn, sr, pr, b) -> ForEach(vn, sr, pr, strip_cols_body(b))
+        _ -> s
+
+fn strip_cols_body(body: [Stmt]) -> [Stmt]:
+    mut out = []
+    for i in 0..<len(body):
+        out = push_mut(out, strip_one_stmt(at(body, i)))
+    out
+
+fn stmt_is_spawn(s: Stmt) -> bool:
+    match s:
+        SpawnEntity(k, f) -> true
+        _ -> false
+
+fn stmt_spawn_kind(s: Stmt) -> Text:
+    match s:
+        SpawnEntity(k, f) -> k
+        _ -> ""
+
+fn stmt_spawn_fields(s: Stmt) -> [FieldExpr]:
+    match s:
+        SpawnEntity(k, f) -> f
+        _ -> []
+
+fn stmt_spawn_col(s: Stmt) -> int:
+    match s:
+        SpawnEntity(k, f) -> fe_field_int(f, "__col", 0 - 1)
+        _ -> 0 - 1
+
+fn fe_field_int(fields: [FieldExpr], key: Text, dflt: int) -> int:
+    mut r = dflt
+    for i in 0..<len(fields):
+        f = at(fields, i)
+        if fe_name_eq(f.name, key):
+            r = expr_as_int(f.value, dflt)
+    r
+
+fn fe_field_text(fields: [FieldExpr], key: Text) -> Text:
+    mut r = ""
+    for i in 0..<len(fields):
+        f = at(fields, i)
+        if fe_name_eq(f.name, key):
+            r = expr_as_text(f.value)
+    r
+
+fn fe_field_has(fields: [FieldExpr], key: Text) -> bool:
+    mut found = false
+    for i in 0..<len(fields):
+        f = at(fields, i)
+        if fe_name_eq(f.name, key):
+            found = true
+    found
+
+fn fe_strip_field(fields: [FieldExpr], key: Text) -> [FieldExpr]:
+    mut out = []
+    for i in 0..<len(fields):
+        f = at(fields, i)
+        if not fe_name_eq(f.name, key):
+            out = push_mut(out, f)
+    out
+
+# Pub so atlas_project can read style-field literal values at load time.
+pub fn expr_as_int(e: Expr, dflt: int) -> int:
+    match e:
+        LitInt(v) -> v
+        _ -> dflt
+
+pub fn expr_as_text(e: Expr) -> Text:
+    match e:
+        LitText(s) -> s
+        _ -> ""
+
+pub fn expr_is_int(e: Expr) -> bool:
+    match e:
+        LitInt(v) -> true
+        _ -> false
+
+# Content equality (Text `==` is pointer-eq on runtime strings).
+fn fe_name_eq(a: Text, b: Text) -> bool:
+    ba = bytes_from_text(a)
+    bb = bytes_from_text(b)
+    la = bytes_length(ba)
+    if la != bytes_length(bb):
+        false
+    else:
+        mut eq = true
+        mut i = 0
+        loop:
+            if i >= la:
+                break
+            if byte_at(ba, i) != byte_at(bb, i):
+                eq = false
+            i = i + 1
+        eq
+
+fn stmt_spawn_name(s: Stmt) -> Text:
+    match s:
+        SpawnEntity(k, f) -> fe_field_text(f, "name")
+        _ -> ""
 
 # `destroy EXPR` — EXPR yields a RefV/IntV. For bulk delete use
 # `each x in list: destroy x.eid` — one consistent way to iterate.
@@ -1151,28 +3073,43 @@ fn classify_set(lhs: Expr, rhs: Expr, next: int) -> StmtStep:
 fn parse_foreach_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
     if start >= n:
         return StmtStep{stmt: ForEach("", LitInt(0), LitBool(true), []), next: start, ok: false, error: "expected iter name after `for`"}
-    iter_name = ident_of(at(tokens, start).tok)
-    if iter_name == "":
-        return StmtStep{stmt: ForEach("", LitInt(0), LitBool(true), []), next: start, ok: false, error: "expected iter name after `for`"}
-    mut i = start + 1
-    if not match_tok(tokens, i, n, "In"):
-        return StmtStep{stmt: ForEach(iter_name, LitInt(0), LitBool(true), []), next: i, ok: false, error: "expected `in` after iter name"}
-    i = i + 1
-    list_step = parse_postfix(tokens, i, n)
-    if not list_step.ok:
-        return StmtStep{stmt: ForEach(iter_name, LitInt(0), LitBool(true), []), next: list_step.next, ok: false, error: list_step.error}
-    i = list_step.next
+    # Two spellings: `for ITER in EXPR:` and `each EXPR as ITER:`. The
+    # for-form leads with the iter name then `in`; anything else is the
+    # each-form (source first, then `as ITER`) — reads like plain English.
+    mut iter_name = ""
+    mut src_expr = LitInt(0)
+    mut i = start
+    if ident_of(at(tokens, start).tok) != "" and match_tok(tokens, start + 1, n, "In"):
+        iter_name = ident_of(at(tokens, start).tok)
+        ps = parse_postfix(tokens, start + 2, n)
+        if not ps.ok:
+            return StmtStep{stmt: ForEach(iter_name, LitInt(0), LitBool(true), []), next: ps.next, ok: false, error: ps.error}
+        src_expr = ps.value
+        i = ps.next
+    else:
+        ps = parse_postfix(tokens, start, n)
+        if not ps.ok:
+            return StmtStep{stmt: ForEach("", LitInt(0), LitBool(true), []), next: ps.next, ok: false, error: ps.error}
+        src_expr = ps.value
+        i = ps.next
+        if ident_of(at(tokens, i).tok) != "as":
+            return StmtStep{stmt: ForEach("", LitInt(0), LitBool(true), []), next: i, ok: false, error: "expected `in` (for x in list) or `as` (each list as x)"}
+        i = i + 1
+        iter_name = ident_of(at(tokens, i).tok)
+        if iter_name == "":
+            return StmtStep{stmt: ForEach("", LitInt(0), LitBool(true), []), next: i, ok: false, error: "expected iter name after `as`"}
+        i = i + 1
     # Optional `where COND_EXPR`
     mut filter = LitBool(true)
     if match_tok(tokens, i, n, "Where"):
         i = i + 1
         f_step = parse_expr(tokens, i, n)
         if not f_step.ok:
-            return StmtStep{stmt: ForEach(iter_name, list_step.value, LitBool(true), []), next: f_step.next, ok: false, error: f_step.error}
+            return StmtStep{stmt: ForEach(iter_name, src_expr, LitBool(true), []), next: f_step.next, ok: false, error: f_step.error}
         filter = f_step.value
         i = f_step.next
     if not match_tok(tokens, i, n, "Colon"):
-        return StmtStep{stmt: ForEach(iter_name, list_step.value, filter, []), next: i, ok: false, error: "expected `:` after for-each header"}
+        return StmtStep{stmt: ForEach(iter_name, src_expr, filter, []), next: i, ok: false, error: "expected `:` after for-each header"}
     i = i + 1
     i = skip_newlines(tokens, i, n)
     # Body: stmts more indented than the `each` keyword itself. A stmt
@@ -1195,10 +3132,24 @@ fn parse_foreach_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
                 break
             step = parse_stmt(tokens, i, n)
             if not step.ok:
-                return StmtStep{stmt: ForEach(iter_name, list_step.value, filter, body_stmts), next: step.next, ok: false, error: step.error}
+                return StmtStep{stmt: ForEach(iter_name, src_expr, filter, body_stmts), next: step.next, ok: false, error: step.error}
             body_stmts = push_mut(body_stmts, step.stmt)
             i = step.next
-    StmtStep{stmt: ForEach(iter_name, list_step.value, filter, body_stmts), next: i, ok: true, error: ""}
+    # Stamp the `each` keyword's own column onto the body spawns so the
+    # parent-inference post-pass can attach the body's root rows to the
+    # container the loop is NESTED UNDER (not the preceding sibling). This
+    # is what lets a `for` inside a Panel drop its explicit `parent:`/`order:`.
+    stamped = stamp_body_eachcol(body_stmts, each_col)
+    StmtStep{stmt: ForEach(iter_name, src_expr, filter, stamped), next: i, ok: true, error: ""}
+
+fn stamp_body_eachcol(body: [Stmt], col: int) -> [Stmt]:
+    mut out = []
+    for i in 0..<len(body):
+        s = at(body, i)
+        match s:
+            SpawnEntity(k, f) -> out = push_mut(out, SpawnEntity(k, push(f, FieldExpr{name: "__eachcol", value: LitInt(col)})))
+            _ -> out = push_mut(out, s)
+    out
 
 # ---- expression grammar (precedence climbing) ----
 #
@@ -1308,6 +3259,88 @@ fn parse_postfix(tokens: [Token], start: int, n: int) -> ExprStep:
             break
     ExprStep{value: e, next: i, ok: true, error: ""}
 
+# String interpolation: `"wood: {n}"` expands at parse time into a `+`
+# concat chain — `"wood: " + n` — reusing the text-coercing `+` in the
+# evaluator. `{{` and `}}` are literal braces. A string with no `{` is a
+# plain LitText (fast path, unchanged). Interpolated strings always start
+# from an empty LitText so a bare `"{n}"` still evaluates to text, not the
+# raw value of `n`.
+fn text_lit_expr(s: Text) -> Expr:
+    bs = bytes_from_text(s)
+    n = bytes_length(bs)
+    if not has_open_brace(bs, n, 0):
+        LitText(s)
+    else:
+        fold_concat(interp_parts(bs, n), 0, LitText(""))
+
+fn has_open_brace(bs: [int], n: int, i: int) -> bool:
+    if i >= n:
+        false
+    else:
+        if at(bs, i) == 123 then true else has_open_brace(bs, n, i + 1)
+
+fn fold_concat(parts: [Expr], i: int, acc: Expr) -> Expr:
+    if i >= len(parts):
+        acc
+    else:
+        fold_concat(parts, i + 1, Binop("+", acc, at(parts, i)))
+
+data InnerStep: text: Text, next: int
+
+fn collect_inner(bs: [int], n: int, start: int) -> InnerStep:
+    mut i = start
+    mut chars = []
+    loop:
+        if i >= n:
+            break
+        c = at(bs, i)
+        if c == 125:
+            break
+        chars = push_mut(chars, c)
+        i = i + 1
+    InnerStep{text: bytes_to_text(chars), next: i + 1}
+
+# Lex + parse one interpolation hole as an astra expression. A hole that
+# fails to lex/parse stays literal (braces and all) rather than aborting
+# the whole string — a forgiving default for authored game text.
+fn parse_inner_expr(src: Text) -> Expr:
+    lr = lex(src)
+    if not lr.ok:
+        LitText("\{" + src + "\}")
+    else:
+        step = parse_expr(lr.tokens, 0, len(lr.tokens))
+        if step.ok then step.value else LitText("\{" + src + "\}")
+
+fn interp_parts(bs: [int], n: int) -> [Expr]:
+    mut parts = []
+    mut lit = []
+    mut i = 0
+    loop:
+        if i >= n:
+            break
+        c = at(bs, i)
+        if c == 123:
+            if i + 1 < n and at(bs, i + 1) == 123:
+                lit = push_mut(lit, 123)
+                i = i + 2
+            else:
+                if len(lit) > 0:
+                    parts = push_mut(parts, LitText(bytes_to_text(lit)))
+                    lit = []
+                inner = collect_inner(bs, n, i + 1)
+                parts = push_mut(parts, parse_inner_expr(inner.text))
+                i = inner.next
+        else:
+            if c == 125 and i + 1 < n and at(bs, i + 1) == 125:
+                lit = push_mut(lit, 125)
+                i = i + 2
+            else:
+                lit = push_mut(lit, c)
+                i = i + 1
+    if len(lit) > 0:
+        parts = push_mut(parts, LitText(bytes_to_text(lit)))
+    parts
+
 fn parse_primary(tokens: [Token], start: int, n: int) -> ExprStep:
     if start >= n:
         return ExprStep{value: LitInt(0), next: start, ok: false, error: "unexpected EOF in expression"}
@@ -1315,9 +3348,8 @@ fn parse_primary(tokens: [Token], start: int, n: int) -> ExprStep:
     int_v = int_of(t.tok)
     if int_v >= 0:
         return ExprStep{value: LitInt(int_v), next: start + 1, ok: true, error: ""}
-    s = text_of(t.tok)
-    if s != "":
-        return ExprStep{value: LitText(s), next: start + 1, ok: true, error: ""}
+    if is_str_tok(t.tok):
+        return ExprStep{value: text_lit_expr(text_of(t.tok)), next: start + 1, ok: true, error: ""}
     if match_tok(tokens, start, n, "True"):
         return ExprStep{value: LitBool(true), next: start + 1, ok: true, error: ""}
     if match_tok(tokens, start, n, "False"):
@@ -1497,9 +3529,8 @@ fn parse_match_pattern(tokens: [Token], start: int, n: int) -> ExprStep:
     int_v = int_of(t.tok)
     if int_v >= 0:
         return ExprStep{value: LitInt(int_v), next: start + 1, ok: true, error: ""}
-    s = text_of(t.tok)
-    if s != "":
-        return ExprStep{value: LitText(s), next: start + 1, ok: true, error: ""}
+    if is_str_tok(t.tok):
+        return ExprStep{value: text_lit_expr(text_of(t.tok)), next: start + 1, ok: true, error: ""}
     ExprStep{value: LitInt(0), next: start, ok: false, error: "expected literal pattern or _"}
 
 # `NAME = VAL <body-expr>` without the leading `let` keyword. Triggered
@@ -1568,7 +3599,7 @@ fn parse_map_literal(tokens: [Token], start: int, n: int) -> ExprStep:
     if match_tok(tokens, i, n, "RBrace"):
         return ExprStep{value: MapLit([]), next: i + 1, ok: true, error: ""}
     loop:
-        f_step = parse_field(tokens, i, n)
+        f_step = parse_map_field(tokens, i, n)
         if not f_step.ok:
             return ExprStep{value: MapLit(fields), next: f_step.next, ok: false, error: f_step.error}
         fields = push_mut(fields, f_step.field)
@@ -1706,9 +3737,6 @@ fn is_newline(t: Tok) -> bool:
         Newline -> true
         _ -> false
 
-fn is_eof_or_done(_t: Token) -> bool:
-    false
-
 # Compare current token against a kind name. We dispatch by short string
 # because Orion match on tagged enums with no payload is verbose to write
 # inline. Returns true when token at i is the expected variant.
@@ -1749,7 +3777,6 @@ fn tok_kind(t: Tok) -> Text:
         All -> "All"
         In -> "In"
         Where -> "Where"
-        Empty -> "Empty"
         True -> "True"
         False -> "False"
         Not -> "Not"
@@ -1767,6 +3794,7 @@ fn tok_kind(t: Tok) -> Text:
         Confidence -> "Confidence"
         Goal -> "Goal"
         Constraint -> "Constraint"
+        Intent -> "Intent"
         Each -> "Each"
         To -> "To"
         From -> "From"
@@ -1777,6 +3805,19 @@ fn tok_kind(t: Tok) -> Text:
         Spawned -> "Spawned"
         Destroyed -> "Destroyed"
         Component -> "Component"
+        State -> "State"
+        Command -> "Command"
+        Needs -> "Needs"
+        Signal -> "Signal"
+        Type -> "Type"
+        Create -> "Create"
+        Source -> "Source"
+        Animate -> "Animate"
+        Asset -> "Asset"
+        Trait -> "Trait"
+        Patch -> "Patch"
+        Template -> "Template"
+        Tokens -> "Tokens"
         Arrow -> "Arrow"
         LParen -> "LParen"
         RParen -> "RParen"
@@ -1816,3 +3857,11 @@ fn text_of(t: Tok) -> Text:
     match t:
         Str(s) -> s
         _ -> ""
+
+# Is this token a string literal? Distinguishes `Str("")` (a real empty
+# string) from a non-string token — `text_of` alone can't, since both
+# yield "".
+fn is_str_tok(t: Tok) -> bool:
+    match t:
+        Str(_) -> true
+        _ -> false

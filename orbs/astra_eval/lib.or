@@ -30,14 +30,26 @@ pub data EvalState: env: [Binding], effects: [AstraEffect], refused: bool
 # none are defined.
 pub fn run_rule(r: Rule, args: [Value], funcs: [Function]) -> Outcome:
     env = bind_params(r.params, args, 0, [])
-    run_rule_env(r, env, funcs)
+    if rule_gate_open(r, env, funcs) then run_rule_env(r, env, funcs) else empty_outcome()
 
 # Run a rule with both positional params AND a ctx-binding list. ctx
 # binds host-supplied free names (e.g. `tray`, `blocks`); params come
 # in after so they shadow ctx on name collision.
 pub fn run_rule_args_ctx(r: Rule, args: [Value], ctx: [Binding], funcs: [Function]) -> Outcome:
     env = bind_args_into(r.params, args, 0, ctx)
-    run_rule_env(r, env, funcs)
+    if rule_gate_open(r, env, funcs) then run_rule_env(r, env, funcs) else empty_outcome()
+
+# Observer run condition: `on X(...) when EXPR:` stores EXPR in
+# r.condition. Parser defaults condition to LitBool(true) for guardless
+# handlers — the equality check below short-circuits the eval so the
+# common (no-guard) path pays nothing.
+fn rule_gate_open(r: Rule, env: [Binding], funcs: [Function]) -> bool:
+    match r.condition:
+        LitBool(b) -> b
+        _ -> value_is_truthy(eval_expr(r.condition, env, funcs))
+
+fn empty_outcome() -> Outcome:
+    Outcome{effects: [], reads: []}
 
 fn bind_args_into(params: [Param], args: [Value], i: int, acc: [Binding]) -> [Binding]:
     if i >= len(params):
@@ -251,8 +263,20 @@ fn emit_to_effect(event: Text, fields: [FieldExpr], env: [Binding], funcs: [Func
 fn spawn_to_effect(kind: Text, fields: [FieldExpr], env: [Binding], funcs: [Function]) -> AstraEffect:
     mut entries = []
     for f in fields:
-        entries = push_mut(entries, ValueField{name: f.name, value: eval_expr(f.value, env, funcs)})
+        v = eval_expr(f.value, env, funcs)
+        # A field that evaluates to NOTHING (e.g. `hint: cmd.hint` where the
+        # data row has no hint) is simply left unset — the component takes
+        # its type default. Skipping it keeps optional data-driven fields
+        # crash-proof: without this, NoneV reached spawn_effect's text concat
+        # as a bad pointer and faulted.
+        if not is_none_value(v):
+            entries = push_mut(entries, ValueField{name: f.name, value: v})
     AstraSpawnKind(kind, entries)
+
+fn is_none_value(v: Value) -> bool:
+    match v:
+        NoneV -> true
+        _ -> false
 
 fn destroy_to_effect(target: Expr, env: [Binding], funcs: [Function]) -> AstraEffect:
     v = eval_expr(target, env, funcs)
@@ -329,42 +353,46 @@ fn eval_call(name: Text, args: [Expr], env: [Binding], funcs: [Function]) -> Val
               if name == "related":
                 eval_builtin_related(args, env, funcs)
               else:
-                f = lookup_func(funcs, name)
-                if f.name == "":
-                    NoneV
+               if name == "related_from":
+                eval_builtin_related_from(args, env, funcs)
+               else:
+                if name == "entities_of_trait":
+                  eval_builtin_entities_of_trait(args, env, funcs)
                 else:
-                    # Helper fns are pure: everything a call allocates is
-                    # garbage except its result. Calls run in the frame
-                    # arena as an obstack — each call saves a watermark,
-                    # scalar results are re-boxed after rewinding to it, so
-                    # env copies and value boxes cost nothing and the arena
-                    # high-water stays at the live call chain. Non-scalar
-                    # results keep their arena block (rare in hot paths);
-                    # the top-level call evacuates by deep copy and resets.
-                    # (Depth slot is written BEFORE arena_on so the slot
-                    # entry itself never lives in the arena.)
-                    d = if slot_has("astra:call_depth") then slot_get_int("astra:call_depth") else 0
-                    slot_set("astra:call_depth", d + 1)
-                    if d == 0:
-                        orion_arena_reset()
-                        orion_arena_on()
-                    mark = orion_arena_used()
-                    evaluated = eval_args(args, env, funcs, 0, [])
-                    # Inherit outer env (consts + ctx bindings), then bind
-                    # params on top so a param can shadow but a fn body still
-                    # sees top-level constants like `board_width`.
-                    call_env = bind_params(f.params, evaluated, 0, env)
-                    r = eval_expr(f.body, call_env, funcs)
-                    slot_set("astra:call_depth", d)
-                    if d == 0:
-                        orion_arena_off()
-                        orion_persist_on()
-                        rc = value_copy(r)
-                        orion_persist_off()
-                        orion_arena_reset()
-                        rc
-                    else:
-                        rewind_scalar(r, mark)
+                 if name == "entity_field":
+                  eval_builtin_entity_field(args, env, funcs)
+                 else:
+                  eval_user_call(name, args, env, funcs)
+
+# Helper fn call — extracted so the builtin ladder above stays flat.
+# Helper fns are pure: everything a call allocates is garbage except
+# its result. Calls run in the frame arena as an obstack — each call
+# saves a watermark, scalar results are re-boxed after rewinding to it.
+# The top-level call evacuates by deep copy and resets.
+fn eval_user_call(name: Text, args: [Expr], env: [Binding], funcs: [Function]) -> Value:
+    f = lookup_func(funcs, name)
+    if f.name == "":
+        NoneV
+    else:
+        d = if slot_has("astra:call_depth") then slot_get_int("astra:call_depth") else 0
+        slot_set("astra:call_depth", d + 1)
+        if d == 0:
+            orion_arena_reset()
+            orion_arena_on()
+        mark = orion_arena_used()
+        evaluated = eval_args(args, env, funcs, 0, [])
+        call_env = bind_params(f.params, evaluated, 0, env)
+        r = eval_expr(f.body, call_env, funcs)
+        slot_set("astra:call_depth", d)
+        if d == 0:
+            orion_arena_off()
+            orion_persist_on()
+            rc = value_copy(r)
+            orion_persist_off()
+            orion_arena_reset()
+            rc
+        else:
+            rewind_scalar(r, mark)
 
 fn eval_builtin_at(args: [Expr], env: [Binding], funcs: [Function]) -> Value:
     if len(args) < 2:
@@ -388,6 +416,47 @@ fn eval_builtin_related(args: [Expr], env: [Binding], funcs: [Function]) -> Valu
         src = as_int(eval_expr(at(args, 0), env, funcs))
         kind = text_of_value(eval_expr(at(args, 1), env, funcs))
         related_lookup(lookup(env, "__rel"), "{src}:{kind}")
+
+# `entities_of_trait(name)` -> [int] — all entity ids of every type
+# that `uses NAME` as a trait. Reads the __trait_index ctx binding
+# populated by the host (atlas). Empty when the index isn't wired or
+# no matching entities exist.
+fn eval_builtin_entities_of_trait(args: [Expr], env: [Binding], funcs: [Function]) -> Value:
+    if len(args) < 1:
+        ListV([])
+    else:
+        trait_name = text_of_value(eval_expr(at(args, 0), env, funcs))
+        related_lookup(lookup(env, "__trait_index"), trait_name)
+
+# `entity_field(eid, field_name)` -> Value — read one field off an
+# entity regardless of its component type. The host resolves via the
+# __ent_fields ctx binding: MapV keyed by "{eid}:{field}". Missing =
+# NoneV. Used with entities_of_trait to iterate cross-type queries.
+fn eval_builtin_entity_field(args: [Expr], env: [Binding], funcs: [Function]) -> Value:
+    if len(args) < 2:
+        NoneV
+    else:
+        eid = as_int(eval_expr(at(args, 0), env, funcs))
+        field_name = text_of_value(eval_expr(at(args, 1), env, funcs))
+        entity_field_lookup(lookup(env, "__ent_fields"), "{eid}:{field_name}")
+
+fn entity_field_lookup(idx: Value, key: Text) -> Value:
+    match idx:
+        MapV(entries) -> lookup_field(entries, key)
+        _ -> NoneV
+
+# `related_from(target, kind)` -> [sources] — the reverse relation query.
+# Reads the __rel_rev ctx binding (keys "target:kind"), symmetric to
+# `related()`. Bevy's #9 idea: an auto-mirrored index maintained by
+# atlas (do_relate/do_unrelate write both fwd and rev) — a graph
+# integrity guarantee no user code has to enforce.
+fn eval_builtin_related_from(args: [Expr], env: [Binding], funcs: [Function]) -> Value:
+    if len(args) < 2:
+        ListV([])
+    else:
+        target = as_int(eval_expr(at(args, 0), env, funcs))
+        kind = text_of_value(eval_expr(at(args, 1), env, funcs))
+        related_lookup(lookup(env, "__rel_rev"), "{target}:{kind}")
 
 fn related_lookup(rel_val: Value, key: Text) -> Value:
     match rel_val:
@@ -419,14 +488,6 @@ fn concat_items(a: [Value], b: [Value], i: int, acc: [Value]) -> [Value]:
         acc
     else:
         concat_items(a, b, i + 1, push(acc, at(b, i)))
-
-fn eval_builtin_range(args: [Expr], env: [Binding], funcs: [Function]) -> Value:
-    if len(args) < 2:
-        ListV([])
-    else:
-        start = as_int(eval_expr(at(args, 0), env, funcs))
-        finish = as_int(eval_expr(at(args, 1), env, funcs))
-        ListV(build_range(start, finish, []))
 
 fn build_range(i: int, finish: int, acc: [Value]) -> [Value]:
     if i >= finish:
@@ -528,11 +589,18 @@ fn eval_binop(op: Text, a: Value, b: Value) -> Value:
         if op == "or":
             BoolV(is_truthy(a) or is_truthy(b))
         else:
-            if (op == "==" or op == "!=") and (is_text_value(a) or is_text_value(b)):
-                eq = text_of_value(a) == text_of_value(b)
-                if op == "==" then BoolV(eq) else BoolV(not eq)
+            # `+` concatenates when either side is text: "wood: " + count
+            # is the workhorse of a text-first game (A Dark Room). The
+            # non-text side coerces to its printed form so scripts never
+            # need an explicit to_text. Numeric `+` still routes below.
+            if op == "+" and (is_text_value(a) or is_text_value(b)):
+                TextV(text_coerce(a) + text_coerce(b))
             else:
-                eval_binop_numeric(op, a, b)
+                if (op == "==" or op == "!=") and (is_text_value(a) or is_text_value(b)):
+                    eq = text_of_value(a) == text_of_value(b)
+                    if op == "==" then BoolV(eq) else BoolV(not eq)
+                else:
+                    eval_binop_numeric(op, a, b)
 
 fn is_text_value(v: Value) -> bool:
     match v:
@@ -542,6 +610,17 @@ fn is_text_value(v: Value) -> bool:
 fn text_of_value(v: Value) -> Text:
     match v:
         TextV(s) -> s
+        _ -> ""
+
+# Printed form of any scalar for text concatenation. Int/Ref render as
+# digits, Bool as true/false, absence as empty — the same shapes an
+# interpolation would produce.
+fn text_coerce(v: Value) -> Text:
+    match v:
+        TextV(s) -> s
+        IntV(n) -> "{n}"
+        BoolV(b) -> if b then "true" else "false"
+        RefV(r) -> "{r}"
         _ -> ""
 
 fn eval_binop_numeric(op: Text, a: Value, b: Value) -> Value:
