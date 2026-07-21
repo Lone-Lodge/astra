@@ -362,7 +362,23 @@ fn eval_call(name: Text, args: [Expr], env: [Binding], funcs: [Function]) -> Val
                  if name == "entity_field":
                   eval_builtin_entity_field(args, env, funcs)
                  else:
-                  eval_user_call(name, args, env, funcs)
+                  if name == "__hole":
+                   eval_hole(args, env, funcs)
+                  else:
+                   eval_user_call(name, args, env, funcs)
+
+# A string-interpolation hole: `__hole(expr, "{raw}")`. Yields the hole's
+# value coerced to text if `expr` resolves, else the literal `{raw}` so an
+# interpolation over a not-yet-seeded resource survives to render-time
+# expansion (expand_widget_text) instead of baking empty at spawn.
+fn eval_hole(args: [Expr], env: [Binding], funcs: [Function]) -> Value:
+    if len(args) == 0:
+        TextV("")
+    else:
+        v = eval_expr(at(args, 0), env, funcs)
+        match v:
+            NoneV -> if len(args) > 1 then eval_expr(at(args, 1), env, funcs) else TextV("")
+            _ -> TextV(text_coerce(v))
 
 # Helper fn call — extracted so the builtin ladder above stays flat.
 # Helper fns are pure: everything a call allocates is garbage except

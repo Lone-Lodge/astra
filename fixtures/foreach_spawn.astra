@@ -2,4 +2,4 @@ entity Block { col: int, row: int, color: Text }
 
 on PlacePiece(col, row, color, cells):
     each cell in cells:
-        spawn Block { col: col + cell.dc, row: row - cell.dr, color: color }
+        create Block col: col + cell.dc, row: row - cell.dr, color: color

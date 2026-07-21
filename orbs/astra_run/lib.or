@@ -153,6 +153,13 @@ fn tick_with(c: Compiled, cid: Text, ctx: [Binding], prev_truths: [bool]) -> Tic
     mut truths = []
     mut idx = 0
     for r in c.rules:
+        # A view/derive is a standing definition, not an event: recompute
+        # it every pass with no edge test and no truths slot (the truths
+        # bitmask is indexed by `$when` order — `idx` must not advance).
+        if r.trigger == "$derive":
+            outcome = run_rule_env(r, full_ctx, c.functions)
+            for e in outcome.effects:
+                effects = push_mut(effects, e)
         if r.trigger == "$when":
             v = eval_in_env(r.condition, full_ctx, c.functions)
             now = value_is_truthy(v)

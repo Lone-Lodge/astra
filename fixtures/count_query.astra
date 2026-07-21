@@ -1,2 +1,2 @@
-rule reds(items): emit Reds { n: count(b in items where b.color == "red") }
-rule row3(items): emit Row3 { n: count(b in items where b.row == 3) }
+rule reds(items): emit Reds n: count(b in items where b.color == "red")
+rule row3(items): emit Row3 n: count(b in items where b.row == 3)

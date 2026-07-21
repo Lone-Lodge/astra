@@ -149,6 +149,98 @@ fn ast_copy_arms(xs: [MatchArm]) -> [MatchArm]:
 fn arm_at(xs: [MatchArm], i: int) -> MatchArm:
     at(xs, i)
 
+# ---- Component template (a parameterised widget subtree) ----
+# `component NAME(params):` declares a named widget subtree. An instantiation
+# NAME(args) is expanded at PARSE TIME (astra_parser): the body is spliced in
+# with every param VarRef replaced by its arg expression (ct_subst_* below). No
+# new Stmt variant, no runtime change — pure sugar over the widget tree.
+pub data ComponentTemplate: name: Text, params: [Param], body: [Stmt]
+
+# Byte-wise name compare — `==` on Text is pointer equality for runtime-built
+# strings, so match param names by content.
+fn ct_names_eq(a: Text, b: Text) -> bool:
+    ab = bytes_from_text(a)
+    bb = bytes_from_text(b)
+    an = len(ab)
+    if an != len(bb):
+        false
+    else:
+        mut same = true
+        for i in 0..<an:
+            if at(ab, i) != at(bb, i):
+                same = false
+        same
+
+# VarRef(param) → the matching arg expression; other names pass through.
+# params[k] is replaced by args[k].
+fn ct_subst_var(name: Text, params: [Text], args: [Expr]) -> Expr:
+    n = len(params)
+    mut out = VarRef("" + name)
+    mut done = false
+    for i in 0..<n:
+        if not done and ct_names_eq(txt_at(params, i), name):
+            out = ast_copy_expr(at(args, i))
+            done = true
+    out
+
+pub fn ct_subst_expr(e: Expr, params: [Text], args: [Expr]) -> Expr:
+    match e:
+        LitInt(n) -> LitInt(n)
+        LitText(s) -> LitText("" + s)
+        LitBool(b) -> LitBool(b)
+        VarRef(name) -> ct_subst_var(name, params, args)
+        Binop(op, l, r) -> Binop("" + op, ct_subst_expr(l, params, args), ct_subst_expr(r, params, args))
+        Unop(op, x) -> Unop("" + op, ct_subst_expr(x, params, args))
+        IfExpr(c, t, f) -> IfExpr(ct_subst_expr(c, params, args), ct_subst_expr(t, params, args), ct_subst_expr(f, params, args))
+        Call(name, cargs) -> Call("" + name, ct_subst_exprs(cargs, params, args))
+        Field(base, name) -> Field(ct_subst_expr(base, params, args), "" + name)
+        CountQuery(name, src, pred) -> CountQuery("" + name, ct_subst_expr(src, params, args), ct_subst_expr(pred, params, args))
+        LetIn(name, val, body) -> LetIn("" + name, ct_subst_expr(val, params, args), ct_subst_expr(body, params, args))
+        LitList(items) -> LitList(ct_subst_exprs(items, params, args))
+        MapLit(fields) -> MapLit(ct_subst_field_exprs(fields, params, args))
+        RangeExpr(a, b) -> RangeExpr(ct_subst_expr(a, params, args), ct_subst_expr(b, params, args))
+        MatchExpr(s, arms) -> MatchExpr(ct_subst_expr(s, params, args), ct_subst_arms(arms, params, args))
+
+fn ct_subst_exprs(xs: [Expr], params: [Text], args: [Expr]) -> [Expr]:
+    mut out = []
+    for i in 0..<len(xs):
+        out = push_mut(out, ct_subst_expr(at(xs, i), params, args))
+    out
+
+fn ct_subst_field_exprs(xs: [FieldExpr], params: [Text], args: [Expr]) -> [FieldExpr]:
+    mut out = []
+    for i in 0..<len(xs):
+        f = fe_at(xs, i)
+        out = push_mut(out, FieldExpr{name: "" + f.name, value: ct_subst_expr(f.value, params, args)})
+    out
+
+fn ct_subst_arms(xs: [MatchArm], params: [Text], args: [Expr]) -> [MatchArm]:
+    mut out = []
+    for i in 0..<len(xs):
+        a = arm_at(xs, i)
+        out = push_mut(out, MatchArm{pattern: ct_subst_expr(a.pattern, params, args), body: ct_subst_expr(a.body, params, args)})
+    out
+
+pub fn ct_subst_stmt(s: Stmt, params: [Text], args: [Expr]) -> Stmt:
+    match s:
+        EmitEffect(name, fields) -> EmitEffect("" + name, ct_subst_field_exprs(fields, params, args))
+        Require(e) -> Require(ct_subst_expr(e, params, args))
+        Let(name, e) -> Let("" + name, ct_subst_expr(e, params, args))
+        LetDestructure(names, e) -> LetDestructure(ast_copy_texts(names), ct_subst_expr(e, params, args))
+        SpawnEntity(kind, fields) -> SpawnEntity("" + kind, ct_subst_field_exprs(fields, params, args))
+        DestroyEntity(e) -> DestroyEntity(ct_subst_expr(e, params, args))
+        SetField(base, name, val) -> SetField(ct_subst_expr(base, params, args), "" + name, ct_subst_expr(val, params, args))
+        SetVar(name, val) -> SetVar("" + name, ct_subst_expr(val, params, args))
+        ForEach(name, src, pred, body) -> ForEach("" + name, ct_subst_expr(src, params, args), ct_subst_expr(pred, params, args), ct_subst_stmts(body, params, args))
+        IfStmt(cond, body) -> IfStmt(ct_subst_expr(cond, params, args), ct_subst_stmts(body, params, args))
+        RelateStmt(a, kind, b) -> RelateStmt(ct_subst_expr(a, params, args), "" + kind, ct_subst_expr(b, params, args))
+
+pub fn ct_subst_stmts(xs: [Stmt], params: [Text], args: [Expr]) -> [Stmt]:
+    mut out = []
+    for i in 0..<len(xs):
+        out = push_mut(out, ct_subst_stmt(at(xs, i), params, args))
+    out
+
 pub fn ast_copy_stmt(s: Stmt) -> Stmt:
     match s:
         EmitEffect(name, fields) -> EmitEffect("" + name, ast_copy_field_exprs(fields))

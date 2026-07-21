@@ -25,6 +25,7 @@ pub enum Tok:
     SpawnKw
     Destroy
     Emit
+    Effect
     On
     View
     Entity
@@ -391,6 +392,7 @@ fn keyword_of(text: Text) -> Tok:
     else if text == "spawn" then SpawnKw
     else if text == "destroy" then Destroy
     else if text == "emit" then Emit
+    else if text == "effect" then Effect
     else if text == "on" then On
     else if text == "view" then View
     else if text == "entity" then Entity

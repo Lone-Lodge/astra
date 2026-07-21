@@ -101,6 +101,7 @@ pub fn parse(tokens: [Token]) -> ParseResult:
     mut traits = []
     mut type_traits = []
     mut templates = []
+    mut component_templates = []
     mut token_blocks = []
     mut styles = []
     # Top-level widget tree: `Panel ...` / `for x in [..]:` written at the
@@ -352,6 +353,20 @@ pub fn parse(tokens: [Token]) -> ParseResult:
                     failed = true
                     err_msg = tmplstep.error
                     err_line = t.line
+            if not handled and match_tok(tokens, i, n, "Component"):
+                # `component NAME(params):` + an indented widget subtree — a
+                # parameterised, reusable component. Instantiations NAME(args)
+                # in the tree are expanded (subst + splice) after parsing.
+                handled = true
+                comp_col = t.col
+                cmpstep = parse_component_template(tokens, i + 1, n, comp_col)
+                if cmpstep.ok:
+                    component_templates = push_mut(component_templates, cmpstep.template)
+                    i = cmpstep.next
+                else:
+                    failed = true
+                    err_msg = cmpstep.error
+                    err_line = t.line
             if not handled and match_tok(tokens, i, n, "Tokens"):
                 # `tokens NAMESPACE:` NEWLINE (indent) key: value ... ->
                 # design-system token block. Atlas resolver joins namespace
@@ -464,7 +479,12 @@ pub fn parse(tokens: [Token]) -> ParseResult:
         # `view __show_N = <expr>` rule (recomputed each tick) and the field
         # is repointed at that derived resource. So `show: overlay == palette`
         # is reactive, reusing the same res-lookup as `show: resource_name`.
-        hoisted = hoist_show_body(tree_stmts, 0)
+        # Expand component instantiations first: a `NAME(args)` at tree
+        # position (parsed as SpawnEntity with __argN fields) whose NAME is a
+        # declared component is replaced by the component's body, with params
+        # substituted and columns/loop-stamps rebased to the call site.
+        expanded_tree = expand_components(tree_stmts, component_templates)
+        hoisted = hoist_show_body(expanded_tree, 0)
         mut rules_hoisted = rules
         for hoisted_view in hoisted.views:
             rules_hoisted = push_mut(rules_hoisted, hoisted_view)
@@ -504,7 +524,7 @@ fn hoist_show_fields(fields: [FieldExpr], counter: int) -> FieldsHoist:
         f = at(fields, i)
         if fe_name_eq(f.name, "show") and not is_lit_text_expr(f.value):
             nm = "__show{c}"
-            view_rule = Rule{name: "derive:" + nm, params: [], body: push([], SetVar(nm, f.value)), trigger: "Tick", condition: LitBool(true)}
+            view_rule = Rule{name: "derive:" + nm, params: [], body: push([], SetVar(nm, f.value)), trigger: "$derive", condition: LitBool(true)}
             out_views = push_mut(out_views, view_rule)
             out_fields = push_mut(out_fields, FieldExpr{name: "show", value: LitText(nm)})
             c = c + 1
@@ -1321,7 +1341,11 @@ fn parse_derive_decl(tokens: [Token], start: int, n: int) -> RuleStep:
     if not val_step.ok:
         return RuleStep{rule: empty, next: val_step.next, ok: false, error: val_step.error}
     body = push([], SetVar(name, val_step.value))
-    r = Rule{name: "derive:" + name, params: [], body: body, trigger: "Tick", condition: LitBool(true)}
+    # `$derive`, not "Tick": a view is a definition that is ALWAYS its
+    # expression, so it recomputes every sims pass — including the boot
+    # pass, before any Tick event exists. Binding it to Tick left every
+    # view unset on the first frame (`{view}` empty, `show:` gates 0).
+    r = Rule{name: "derive:" + name, params: [], body: body, trigger: "$derive", condition: LitBool(true)}
     RuleStep{rule: r, next: val_step.next, ok: true, error: ""}
 
 # `law NAME:` then a rule — names the rule after the law. Pure sugar
@@ -2230,13 +2254,18 @@ fn parse_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
     # semantic tag lets us diverge behavior later (buffered vs dispatched)
     # without a source-wide rewrite. Bevy's 0.17 lesson: split early or
     # regret it (they went 2 years mixing the shapes).
-    if not (match_tok(tokens, i, n, "Emit") or match_tok(tokens, i, n, "Signal")):
-        return StmtStep{stmt: EmitEffect("", []), next: i, ok: false, error: "expected emit/signal/require/let/spawn/destroy/set/for/assignment"}
+    is_effect = match_tok(tokens, i, n, "Effect")
+    if not (match_tok(tokens, i, n, "Emit") or match_tok(tokens, i, n, "Signal") or is_effect):
+        return StmtStep{stmt: EmitEffect("", []), next: i, ok: false, error: "expected emit/effect/signal/require/let/create/destroy/set/for/assignment"}
     i = i + 1
     name_tok = if i < n then at(tokens, i) else newline_token()
-    event = ident_of(name_tok.tok)
-    if event == "":
-        return StmtStep{stmt: EmitEffect("", []), next: i, ok: false, error: "expected event name after `emit`/`signal`"}
+    raw_event = ident_of(name_tok.tok)
+    if raw_event == "":
+        return StmtStep{stmt: EmitEffect("", []), next: i, ok: false, error: "expected event name after `emit`/`effect`/`signal`"}
+    # `effect X` is an EXTERNAL op the host performs (window/file/net) — it
+    # lands on a namespaced channel `effect:X`, so rules can't observe it
+    # (`on X` watches channel `X`). `emit X` stays an internal fact.
+    event = if is_effect then "effect:" + raw_event else raw_event
     i = i + 1
     # Optional `{ ... }` field block.
     fields = []
@@ -2362,7 +2391,7 @@ fn is_bareword_map_value(tokens: [Token], i: int, n: int) -> bool:
 # (text/label/hint/placeholder/desc) are absent on purpose — they keep
 # quotes; numeric fields never reach here (a bareword there stays an expr).
 fn is_symbolic_field(name: Text) -> bool:
-    name == "anchor" or name == "layout" or name == "align" or name == "justify" or name == "role" or name == "fill" or name == "blend" or name == "kind" or name == "tint" or name == "easing" or name == "do" or name == "style" or name == "name" or name == "parent" or name == "show" or name == "hide" or name == "search" or name == "image" or name == "color" or name == "render" or name == "items" or name == "bind" or name == "changed"
+    name == "anchor" or name == "layout" or name == "align" or name == "justify" or name == "role" or name == "fill" or name == "blend" or name == "kind" or name == "tint" or name == "easing" or name == "do" or name == "submit" or name == "style" or name == "name" or name == "parent" or name == "show" or name == "hide" or name == "search" or name == "image" or name == "color" or name == "ink" or name == "w_from" or name == "render" or name == "items" or name == "bind" or name == "changed"
 
 # A lone bareword value = an Ident immediately followed by end-of-value
 # (comma, newline, or EOF). Idents followed by `.`/operators/`(` are the
@@ -2527,6 +2556,33 @@ fn parse_spawn_stmt(tokens: [Token], start: int, n: int, stmt_col: int) -> StmtS
     if raw_kind == "Spacer":
         fields = push_mut(fields, FieldExpr{name: "grow", value: LitInt(1)})
     mut i = start + 1
+    # Component instantiation: `NAME(argA, argB)` — a capitalised name directly
+    # followed by `(` is a call, not a widget (Panel/Text never take parens).
+    # Args park in __argN fields; the expand_components post-pass splices the
+    # component body in with these bound to its params. Unknown names stay a
+    # plain SpawnEntity (a wrong widget type surfaces later, not here).
+    if match_tok(tokens, i, n, "LParen"):
+        i = i + 1
+        mut call_fields = []
+        mut argn = 0
+        loop:
+            if i >= n:
+                break
+            if match_tok(tokens, i, n, "RParen"):
+                break
+            astep = parse_expr(tokens, i, n)
+            if not astep.ok:
+                return StmtStep{stmt: SpawnEntity(kind, []), next: astep.next, ok: false, error: astep.error}
+            call_fields = push_mut(call_fields, FieldExpr{name: "__arg{argn}", value: astep.value})
+            argn = argn + 1
+            i = astep.next
+            if match_tok(tokens, i, n, "Comma"):
+                i = i + 1
+        if not match_tok(tokens, i, n, "RParen"):
+            return StmtStep{stmt: SpawnEntity(kind, call_fields), next: i, ok: false, error: "expected `)` after component args"}
+        i = i + 1
+        call_fields = push_mut(call_fields, FieldExpr{name: "__col", value: LitInt(stmt_col)})
+        return StmtStep{stmt: SpawnEntity(kind, call_fields), next: i, ok: true, error: ""}
     if match_tok(tokens, i, n, "LBrace"):
         return StmtStep{stmt: SpawnEntity(kind, []), next: i, ok: false, error: "braces not allowed — use `Panel f: v, f: v` or indented `f: v` lines"}
     # Positional primary value: a leading string with no `key:` is the
@@ -2703,22 +2759,33 @@ fn infer_parents_body(body: [Stmt]) -> [Stmt]:
         out = push_mut(out, infer_one_stmt(body, i))
     out
 
+# Layout metadata (parent / source-order / auto-name) is a WIDGET concern:
+# only Panel and Text are auto-rendered + laid out. A game-entity create
+# (Block, Bullet, …) is imperative gameplay — it keeps EXACTLY its authored
+# fields, no dead `name`/`order` riding along at spawn scale.
+fn is_widget_kind(k: Text) -> bool:
+    k == "Panel" or k == "Text"
+
 fn infer_one_stmt(body: [Stmt], idx: int) -> Stmt:
     s = at(body, idx)
     if stmt_is_spawn(s):
-        col = stmt_spawn_col(s)
-        pname = nearest_parent_name(body, idx, col)
-        f2 = fe_strip_field(stmt_spawn_fields(s), "__col")
-        f3 = if fe_field_has(f2, "parent") or len(pname) == 0 then f2 else push(f2, FieldExpr{name: "parent", value: LitText(pname)})
-        # Stamp source order so flex layout follows how creates are WRITTEN
-        # (entity ids batch per type, so id order isn't source order). An
-        # explicit `order:` still overrides. Kills the manual `order:` prop.
-        f4 = if fe_field_has(f3, "order") then f3 else push(f3, FieldExpr{name: "order", value: LitInt(idx)})
-        # Auto-name nameless creates so children can reference them (parent
-        # + the visibility cascade look parents up by name). `name:` stays
-        # optional — you only write it when YOU need to target the widget.
-        f5 = if fe_field_has(f4, "name") then f4 else push(f4, FieldExpr{name: "name", value: LitText("__w{idx}")})
-        SpawnEntity(stmt_spawn_kind(s), f5)
+        kind = stmt_spawn_kind(s)
+        base = fe_strip_field(stmt_spawn_fields(s), "__col")
+        if not is_widget_kind(kind):
+            SpawnEntity(kind, base)
+        else:
+            col = stmt_spawn_col(s)
+            pname = nearest_parent_name(body, idx, col)
+            f3 = if fe_field_has(base, "parent") or len(pname) == 0 then base else push(base, FieldExpr{name: "parent", value: LitText(pname)})
+            # Stamp source order so flex layout follows how creates are WRITTEN
+            # (entity ids batch per type, so id order isn't source order). An
+            # explicit `order:` still overrides. Kills the manual `order:` prop.
+            f4 = if fe_field_has(f3, "order") then f3 else push(f3, FieldExpr{name: "order", value: LitInt(idx)})
+            # Auto-name nameless creates so children can reference them (parent
+            # + the visibility cascade look parents up by name). `name:` stays
+            # optional — you only write it when YOU need to target the widget.
+            f5 = if fe_field_has(f4, "name") then f4 else push(f4, FieldExpr{name: "name", value: LitText("__w{idx}")})
+            SpawnEntity(kind, f5)
     else:
         match s:
             # A `for` nested in the tree: its rows attach to the container the
@@ -2735,14 +2802,90 @@ fn infer_one_stmt(body: [Stmt], idx: int) -> Stmt:
 # the palette-row case) are exact; a row with its OWN children keeps them via
 # explicit parent (deep nesting inside a loop is not inferred).
 fn infer_foreach_body(fbody: [Stmt], parent: Text, order_val: int) -> [Stmt]:
+    # A KEYED body (`each … key EXPR`) can nest: children resolve `parent:` to
+    # their in-body root by column, and every widget is named from the key so
+    # per-type id batching can't collide names across iterations. A keyless
+    # body keeps the old flat behaviour (one Panel per item, all re-parented
+    # to the container).
+    if foreach_body_keyed(fbody):
+        return infer_keyed_body(fbody, parent, order_val)
     mut out = []
     for i in 0..<len(fbody):
         bs = at(fbody, i)
         if stmt_is_spawn(bs):
             f = fe_strip_field(fe_strip_field(stmt_spawn_fields(bs), "__col"), "__eachcol")
-            f2 = if fe_field_has(f, "parent") or len(parent) == 0 then f else push(f, FieldExpr{name: "parent", value: LitText(parent)})
-            f3 = if fe_field_has(f2, "order") then f2 else push(f2, FieldExpr{name: "order", value: LitInt(order_val)})
-            out = push_mut(out, SpawnEntity(stmt_spawn_kind(bs), f3))
+            if not is_widget_kind(stmt_spawn_kind(bs)):
+                out = push_mut(out, SpawnEntity(stmt_spawn_kind(bs), f))
+            else:
+                f2 = if fe_field_has(f, "parent") or len(parent) == 0 then f else push(f, FieldExpr{name: "parent", value: LitText(parent)})
+                f3 = if fe_field_has(f2, "order") then f2 else push(f2, FieldExpr{name: "order", value: LitInt(order_val)})
+                out = push_mut(out, SpawnEntity(stmt_spawn_kind(bs), f3))
+        else:
+            out = push_mut(out, strip_one_stmt(bs))
+    out
+
+fn foreach_body_keyed(fbody: [Stmt]) -> bool:
+    mut r = false
+    for i in 0..<len(fbody):
+        bs = at(fbody, i)
+        if stmt_is_spawn(bs) and fe_field_has(stmt_spawn_fields(bs), "__key"):
+            r = true
+    r
+
+fn fe_field_expr(fields: [FieldExpr], key: Text) -> Expr:
+    mut r = LitInt(0)
+    for i in 0..<len(fields):
+        f = at(fields, i)
+        if fe_name_eq(f.name, key):
+            r = f.value
+    r
+
+# Nearest earlier body spawn with a STRICTLY smaller column — its INDEX (so a
+# keyed name can be rebuilt from its position). -1 = none (this row is a root).
+fn nearest_smaller_col_idx(body: [Stmt], idx: int, col: int) -> int:
+    mut j = idx - 1
+    mut result = 0 - 1
+    mut done = false
+    loop:
+        if done or j < 0:
+            break
+        cj = stmt_spawn_col(at(body, j))
+        if cj >= 0 and cj < col:
+            result = j
+            done = true
+        else:
+            j = j - 1
+    result
+
+# Per-instance widget name: a position-stable prefix + the loop's key value
+# (`"__k{pos}_" + cmd.id`). Unique per widget (distinct pos) AND per row
+# (distinct key), so a child's `parent:` resolves to ITS row's root, not the
+# last-spawned one.
+fn keyed_name(idx: int, key: Expr) -> Expr:
+    Binop("+", LitText("__k{idx}_"), ast_copy_expr(key))
+
+# Keyed loop body: infer nesting by column (like infer_one_stmt does outside a
+# loop), naming every widget from the key so the structure survives batching.
+fn infer_keyed_body(fbody: [Stmt], container: Text, order_val: int) -> [Stmt]:
+    mut out = []
+    for i in 0..<len(fbody):
+        bs = at(fbody, i)
+        if stmt_is_spawn(bs):
+            f0 = stmt_spawn_fields(bs)
+            col = fe_field_int(f0, "__col", 0)
+            keyexpr = fe_field_expr(f0, "__key")
+            fa = if fe_field_has(f0, "name") then f0 else push(f0, FieldExpr{name: "name", value: keyed_name(i, keyexpr)})
+            pidx = nearest_smaller_col_idx(fbody, i, col)
+            # `order` is a GLOBAL paint index (z-order render sorts every widget
+            # by it). The whole keyed subtree must sit at the loop's slot, so
+            # base it on order_val: root (i=0) = order_val, each nested child
+            # +i after. A bare `i` would be a tiny local index (1,2) → the child
+            # paints FIRST, then the card + everything paints over it (invisible).
+            row_order = order_val + i
+            fb = if fe_field_has(fa, "parent") then fa else if pidx >= 0 then push(fa, FieldExpr{name: "parent", value: keyed_name(pidx, keyexpr)}) else if len(container) > 0 then push(fa, FieldExpr{name: "parent", value: LitText(container)}) else fa
+            fc = if fe_field_has(fb, "order") then fb else push(fb, FieldExpr{name: "order", value: LitInt(row_order)})
+            fd = fe_strip_field(fe_strip_field(fe_strip_field(fc, "__col"), "__eachcol"), "__key")
+            out = push_mut(out, SpawnEntity(stmt_spawn_kind(bs), fd))
         else:
             out = push_mut(out, strip_one_stmt(bs))
     out
@@ -3099,6 +3242,22 @@ fn parse_foreach_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
         if iter_name == "":
             return StmtStep{stmt: ForEach("", LitInt(0), LitBool(true), []), next: i, ok: false, error: "expected iter name after `as`"}
         i = i + 1
+    # Optional `key EXPR` — a per-item STABLE IDENTITY (`each commands as cmd
+    # key cmd.id`). Stamped onto the body's root spawns as `__key`; the
+    # runtime derives a per-instance name from it, so nested children inside a
+    # loop can reference their own row (entity ids batch per type, so a static
+    # name would collide across iterations) AND the same key maps to the same
+    # entity across re-renders (identity for animation/focus/diff). `key` is a
+    # bare ident (no keyword surgery); absent → today's behaviour, no __key.
+    mut key_expr = LitInt(0)
+    mut has_key = false
+    if ident_of(at(tokens, i).tok) == "key":
+        k_step = parse_expr(tokens, i + 1, n)
+        if not k_step.ok:
+            return StmtStep{stmt: ForEach(iter_name, src_expr, LitBool(true), []), next: k_step.next, ok: false, error: k_step.error}
+        key_expr = k_step.value
+        has_key = true
+        i = k_step.next
     # Optional `where COND_EXPR`
     mut filter = LitBool(true)
     if match_tok(tokens, i, n, "Where"):
@@ -3140,7 +3299,8 @@ fn parse_foreach_stmt(tokens: [Token], start: int, n: int) -> StmtStep:
     # container the loop is NESTED UNDER (not the preceding sibling). This
     # is what lets a `for` inside a Panel drop its explicit `parent:`/`order:`.
     stamped = stamp_body_eachcol(body_stmts, each_col)
-    StmtStep{stmt: ForEach(iter_name, src_expr, filter, stamped), next: i, ok: true, error: ""}
+    keyed = if has_key then stamp_body_key(stamped, key_expr) else stamped
+    StmtStep{stmt: ForEach(iter_name, src_expr, filter, keyed), next: i, ok: true, error: ""}
 
 fn stamp_body_eachcol(body: [Stmt], col: int) -> [Stmt]:
     mut out = []
@@ -3149,6 +3309,157 @@ fn stamp_body_eachcol(body: [Stmt], col: int) -> [Stmt]:
         match s:
             SpawnEntity(k, f) -> out = push_mut(out, SpawnEntity(k, push(f, FieldExpr{name: "__eachcol", value: LitInt(col)})))
             _ -> out = push_mut(out, s)
+    out
+
+# Stamp the loop's `key EXPR` onto each root spawn as `__key`, so the runtime
+# can derive a per-instance identity from it (the key expr references the iter
+# var, evaluated per iteration at spawn). ast_copy per stamp so root rows
+# don't share one expr node.
+fn stamp_body_key(body: [Stmt], key: Expr) -> [Stmt]:
+    mut out = []
+    for i in 0..<len(body):
+        s = at(body, i)
+        match s:
+            SpawnEntity(k, f) -> out = push_mut(out, SpawnEntity(k, push(f, FieldExpr{name: "__key", value: ast_copy_expr(key)})))
+            _ -> out = push_mut(out, s)
+    out
+
+# ---- components: `component NAME(params):` + a widget subtree ----
+
+data CompTemplStep: template: ComponentTemplate, next: int, ok: bool, error: Text
+
+fn parse_component_template(tokens: [Token], start: int, n: int, kw_col: int) -> CompTemplStep:
+    empty = ComponentTemplate{name: "", params: [], body: []}
+    if start >= n:
+        return CompTemplStep{template: empty, next: start, ok: false, error: "expected component name"}
+    name = ident_of(at(tokens, start).tok)
+    if name == "":
+        return CompTemplStep{template: empty, next: start, ok: false, error: "expected component name"}
+    mut i = start + 1
+    if not match_tok(tokens, i, n, "LParen"):
+        return CompTemplStep{template: empty, next: i, ok: false, error: "expected `(` after component name"}
+    i = i + 1
+    mut params = []
+    loop:
+        if i >= n:
+            break
+        if match_tok(tokens, i, n, "RParen"):
+            break
+        pname = ident_of(at(tokens, i).tok)
+        if pname == "":
+            return CompTemplStep{template: empty, next: i, ok: false, error: "expected param name or `)` in component"}
+        i = i + 1
+        mut ptype = ""
+        if match_tok(tokens, i, n, "Colon"):
+            i = i + 1
+            if i < n:
+                ptype = ident_of(at(tokens, i).tok)
+                i = i + 1
+        params = push_mut(params, Param{name: pname, type_name: ptype})
+        if match_tok(tokens, i, n, "Comma"):
+            i = i + 1
+    if not match_tok(tokens, i, n, "RParen"):
+        return CompTemplStep{template: empty, next: i, ok: false, error: "expected `)` after component params"}
+    i = i + 1
+    if not match_tok(tokens, i, n, "Colon"):
+        return CompTemplStep{template: empty, next: i, ok: false, error: "expected `:` after component header"}
+    i = i + 1
+    i = skip_newlines(tokens, i, n)
+    # Body: stmts indented deeper than the `component` keyword (like a for body).
+    mut body_stmts = []
+    loop:
+        if i >= n:
+            break
+        if at_rule_starter(tokens, i, n):
+            break
+        tk = at(tokens, i)
+        if is_newline(tk.tok):
+            i = i + 1
+        else:
+            if tk.col <= kw_col:
+                break
+            step = parse_stmt(tokens, i, n)
+            if not step.ok:
+                return CompTemplStep{template: empty, next: step.next, ok: false, error: step.error}
+            body_stmts = push_mut(body_stmts, step.stmt)
+            i = step.next
+    CompTemplStep{template: ComponentTemplate{name: name, params: params, body: body_stmts}, next: i, ok: true, error: ""}
+
+# Index of the template named `name`, or -1. Byte-compare (parsed idents).
+fn find_template(name: Text, templates: [ComponentTemplate]) -> int:
+    mut idx = 0 - 1
+    for i in 0..<len(templates):
+        t = at(templates, i)
+        if fe_name_eq(t.name, name):
+            idx = i
+    idx
+
+# Lowest __col in a body — the root's column (children indent deeper).
+fn body_min_col(body: [Stmt]) -> int:
+    mut m = 1000000
+    for i in 0..<len(body):
+        s = at(body, i)
+        if stmt_is_spawn(s):
+            c = fe_field_int(stmt_spawn_fields(s), "__col", 0)
+            if c < m:
+                m = c
+    if m == 1000000 then 0 else m
+
+fn fe_set_field(fields: [FieldExpr], key: Text, value: Expr) -> [FieldExpr]:
+    push(fe_strip_field(fields, key), FieldExpr{name: key, value: value})
+
+# Rebase one expanded body stmt onto the call site: shift its column by
+# `delta` so it nests under the call's parent, and carry the call's loop
+# stamps (__eachcol / __key) so a component used inside a keyed loop behaves
+# exactly like the hand-written subtree.
+fn rebase_stmt(s: Stmt, delta: int, eachcol: int, has_key: bool, key: Expr) -> Stmt:
+    match s:
+        SpawnEntity(k, f) ->
+            oldcol = fe_field_int(f, "__col", 0)
+            f1 = fe_set_field(f, "__col", LitInt(oldcol + delta))
+            f2 = if eachcol >= 0 then fe_set_field(f1, "__eachcol", LitInt(eachcol)) else f1
+            f3 = if has_key then fe_set_field(f2, "__key", ast_copy_expr(key)) else f2
+            SpawnEntity(k, f3)
+        _ -> s
+
+# Expand one `NAME(args)` call into the component's body: bind params to the
+# __argN exprs, substitute, expand any nested calls, then rebase to the call.
+fn expand_one_call(call: Stmt, tmpl: ComponentTemplate, templates: [ComponentTemplate]) -> [Stmt]:
+    cf = stmt_spawn_fields(call)
+    call_col = fe_field_int(cf, "__col", 0)
+    call_eachcol = fe_field_int(cf, "__eachcol", 0 - 1)
+    has_key = fe_field_has(cf, "__key")
+    call_key = fe_field_expr(cf, "__key")
+    mut param_names = []
+    mut arg_exprs = []
+    for k in 0..<len(tmpl.params):
+        p = at(tmpl.params, k)
+        param_names = push_mut(param_names, p.name)
+        arg_exprs = push_mut(arg_exprs, fe_field_expr(cf, "__arg{k}"))
+    substituted = ct_subst_stmts(tmpl.body, param_names, arg_exprs)
+    nested = expand_components(substituted, templates)
+    delta = call_col - body_min_col(tmpl.body)
+    mut out = []
+    for i in 0..<len(nested):
+        out = push_mut(out, rebase_stmt(at(nested, i), delta, call_eachcol, has_key, call_key))
+    out
+
+# Walk the tree; replace every `NAME(args)` SpawnEntity (NAME a declared
+# component) with its expanded body. Recurses into for/if bodies.
+fn expand_components(stmts: [Stmt], templates: [ComponentTemplate]) -> [Stmt]:
+    mut out = []
+    for i in 0..<len(stmts):
+        s = at(stmts, i)
+        ti = if stmt_is_spawn(s) then find_template(stmt_spawn_kind(s), templates) else 0 - 1
+        if ti >= 0:
+            expanded = expand_one_call(s, at(templates, ti), templates)
+            for j in 0..<len(expanded):
+                out = push_mut(out, at(expanded, j))
+        else:
+            match s:
+                ForEach(vn, sr, pr, b) -> out = push_mut(out, ForEach(vn, sr, pr, expand_components(b, templates)))
+                IfStmt(c, b) -> out = push_mut(out, IfStmt(c, expand_components(b, templates)))
+                _ -> out = push_mut(out, s)
     out
 
 # ---- expression grammar (precedence climbing) ----
@@ -3328,7 +3639,17 @@ fn interp_parts(bs: [int], n: int) -> [Expr]:
                     parts = push_mut(parts, LitText(bytes_to_text(lit)))
                     lit = []
                 inner = collect_inner(bs, n, i + 1)
-                parts = push_mut(parts, parse_inner_expr(inner.text))
+                # Wrap each hole in `__hole(expr, "{raw}")`. At eval the hole
+                # yields its value if the name resolves (a loop var already
+                # substituted, or a seeded resource), else the LITERAL `{raw}`
+                # — so a hole over a resource not yet seeded when a widget
+                # spawns at Init survives as `{name}` and expand_widget_text
+                # resolves it at render (live), instead of baking empty.
+                # ct_subst/subst recurse into Call args, so loop/component
+                # substitution still reaches the inner expr.
+                hole_expr = parse_inner_expr(inner.text)
+                raw_lit = LitText("\{" + inner.text + "\}")
+                parts = push_mut(parts, Call("__hole", [hole_expr, raw_lit]))
                 i = inner.next
         else:
             if c == 125 and i + 1 < n and at(bs, i + 1) == 125:
@@ -3761,6 +4082,7 @@ fn tok_kind(t: Tok) -> Text:
         SpawnKw -> "Spawn"
         Destroy -> "Destroy"
         Emit -> "Emit"
+        Effect -> "Effect"
         On -> "On"
         View -> "View"
         Entity -> "Entity"

@@ -1,2 +1,2 @@
 each r in 0 to 3:
-    when r == 2: emit Hit { row: r }
+    when r == 2: emit Hit row: r

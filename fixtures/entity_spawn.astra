@@ -1,3 +1,3 @@
 entity Block { col: int, row: int, color: Text }
 
-rule make_block(col, row): spawn Block { col: col, row: row, color: "red" }
+rule make_block(col, row): create Block col: col, row: row, color: "red"
