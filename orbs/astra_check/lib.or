@@ -14,190 +14,262 @@
 # Every check is zero-false-positive on a valid bundle: each flags a program
 # that provably does something other than what it reads like.
 
-use astra_ast
 
-pub data CheckError: rule: Text, message: Text
+public type CheckError: rule: text, message: text
 
 # eval_call's built-in helpers — calls to these are always valid regardless of
 # the bundle's own `fn` table, and they self-tolerate arg count, so no arity
 # check applies (mirror astra_eval::eval_call + astra_run::call_is_known).
-fn is_builtin(name: Text) -> bool:
-    name == "size" or name == "at" or name == "concat" or name == "related"
+define is_builtin(name: text) -> truth:
+    name is "size" or name is "at" or name is "concat" or name is "related"
 
 # The whole bundle: rules (condition + body) and function bodies. Returns an
 # empty list when the bundle is well-formed.
-pub fn check_program(rules: [Rule], functions: [Function]) -> [CheckError]:
-    mut errs = []
+public define check_program(rules: [Rule], functions: [Function], enum_states: [EnumState]) -> [CheckError]:
+    edit errs = []
     errs = check_dup_functions(functions, 0, errs)
     errs = check_dup_rules(rules, 0, errs)
-    nf = len(functions)
-    for i in 0..<nf:
+    nf = length(functions)
+    loop i in 0 until nf:
         f = ck_fn_at(functions, i)
         errs = check_expr(f.body, f.name, functions, errs)
-    nr = len(rules)
-    for i in 0..<nr:
+    nr = length(rules)
+    loop i in 0 until nr:
         r = ck_rule_at(rules, i)
         owner = rule_label(r)
         errs = check_expr(r.condition, owner, functions, errs)
         errs = check_stmts(r.body, owner, functions, errs)
+    errs = check_exhaustive_when(rules, enum_states, errs)
     errs
 
-# Single-rule entry — kept for callers that hold one rule + the fn table.
-pub fn check_rule(rule: Rule, functions: [Function]) -> [CheckError]:
-    owner = rule_label(rule)
-    check_stmts(rule.body, owner, functions, check_expr(rule.condition, owner, functions, []))
+# Non-exhaustive `when` switch on an enum state (NEXTGEN #5a). Enum variants
+# stay as `VarRef`s (a variant resolves to its int via world state at eval, not
+# by parse-time folding), so `when door is Open` is `door is VarRef("Open")`;
+# we match the variant NAME directly against the retained EnumState registry.
+# This is the one intentionally-ADVISORY check (the others flag provably-wrong
+# programs): it fires only when an enum is branched on EXCLUSIVELY by
+# `enum is Variant` equalities (no ` is not `, no `<`, no dynamic/bare reference) and
+# at least one — but not every — variant has a branch. That keeps it
+# effectively zero-false-positive: a partial equality-switch is almost always a
+# forgotten case, and any construct we cannot reason about suppresses the hint.
+define check_exhaustive_when(rules: [Rule], enum_states: [EnumState], acc: [CheckError]) -> [CheckError]:
+    edit out = acc
+    loop es in enum_states:
+        edit agg = ScanRef{covered: [], other: false}
+        loop r in rules:
+            if r.trigger is "$when":
+                agg = merge_scan(agg, scan_enum_ref(r.condition, es.name, es.variants))
+        if length(agg.covered) > 0 and not agg.other:
+            loop v in es.variants:
+                if not text_in(agg.covered, v):
+                    out = append(out, CheckError{rule: "when:" + es.name, message: "non-exhaustive `when` on enum `{es.name}`: variant `{v}` has no branch"})
+    out
+
+# How an enum state is referenced across a condition tree: the set of variant
+# NAMES covered by `enum is Variant`, and whether it is touched in any way we
+# cannot reason about (a dynamic ` is `, a ` is not `/`<`, or a bare read) — which
+# voids exhaustiveness reasoning for that enum.
+type ScanRef: covered: [text], other: truth
+
+define merge_scan(a: ScanRef, b: ScanRef) -> ScanRef:
+    edit cov = a.covered
+    loop x in b.covered:
+        cov = append(cov, x)
+    ScanRef{covered: cov, other: a.other or b.other}
+
+define varref_is(e: Expr, name: text) -> truth:
+    choose e:
+        VarRef(nm) then nm is name
+        _ then false
+
+define varref_name(e: Expr) -> text:
+    choose e:
+        VarRef(nm) then nm
+        _ then ""
+
+define text_in(xs: [text], s: text) -> truth:
+    edit found = false
+    loop x in xs:
+        if x is s:
+            found = true
+    found
+
+define scan_args(args: [Expr], name: text, variants: [text]) -> ScanRef:
+    edit acc = ScanRef{covered: [], other: false}
+    loop a in args:
+        acc = merge_scan(acc, scan_enum_ref(a, name, variants))
+    acc
+
+define scan_enum_ref(e: Expr, name: text, variants: [text]) -> ScanRef:
+    choose e:
+        Binop(op, l, r) then 
+            if op is "==" and (varref_is(l, name) or varref_is(r, name)):
+                other_side = if varref_is(l, name) then r else l
+                vn = varref_name(other_side)
+                if vn is not "" and text_in(variants, vn):
+                    ScanRef{covered: append([], vn), other: false}
+                else:
+                    ScanRef{covered: [], other: true}
+            else:
+                merge_scan(scan_enum_ref(l, name, variants), scan_enum_ref(r, name, variants))
+        Unop(_, x) then scan_enum_ref(x, name, variants)
+        IfExpr(c, t, f) then merge_scan(scan_enum_ref(c, name, variants), merge_scan(scan_enum_ref(t, name, variants), scan_enum_ref(f, name, variants)))
+        Field(base, _) then scan_enum_ref(base, name, variants)
+        Call(_, args) then scan_args(args, name, variants)
+        VarRef(nm) then if nm is name then ScanRef{covered: [], other: true} else ScanRef{covered: [], other: false}
+        _ then ScanRef{covered: [], other: false}
 
 # A rule's identity for error attribution: its name, else its trigger (event /
 # $when / Tick), else anonymous.
-fn rule_label(r: Rule) -> Text:
-    if r.name != "":
+define rule_label(r: Rule) -> text:
+    if r.name is not "":
         r.name
     else:
-        if r.trigger != "":
+        if r.trigger is not "":
             r.trigger
         else:
             "<anonymous>"
 
-fn ck_fn_at(fs: [Function], i: int) -> Function:
-    at(fs, i)
+define ck_fn_at(fs: [Function], i: number) -> Function:
+    fs[i]
 
-fn ck_rule_at(rs: [Rule], i: int) -> Rule:
-    at(rs, i)
+define ck_rule_at(rs: [Rule], i: number) -> Rule:
+    rs[i]
 
-fn ck_empty_fn() -> Function:
+define ck_empty_fn() -> Function:
     Function{name: "", params: [], return_type: "", body: LitInt(0)}
 
 # First index of a function with `name` (or -1). Used to flag every definition
 # after the first as a duplicate.
-fn first_fn_index(fs: [Function], name: Text) -> int:
-    n = len(fs)
-    for i in 0..<n:
-        if ck_fn_at(fs, i).name == name:
+define first_fn_index(fs: [Function], name: text) -> number:
+    n = length(fs)
+    loop i in 0 until n:
+        if ck_fn_at(fs, i).name is name:
             return i
     0 - 1
 
-fn find_function(fs: [Function], name: Text) -> Function:
-    mut found = ck_empty_fn()
-    n = len(fs)
-    for i in 0..<n:
+define find_function(fs: [Function], name: text) -> Function:
+    edit found = ck_empty_fn()
+    n = length(fs)
+    loop i in 0 until n:
         f = ck_fn_at(fs, i)
-        if f.name == name:
+        if f.name is name:
             found = f
     found
 
-fn check_dup_functions(fs: [Function], i: int, acc: [CheckError]) -> [CheckError]:
-    n = len(fs)
+define check_dup_functions(fs: [Function], i: number, acc: [CheckError]) -> [CheckError]:
+    n = length(fs)
     if i >= n:
         acc
     else:
         name = ck_fn_at(fs, i).name
-        mut out = acc
-        if name != "" and first_fn_index(fs, name) < i:
-            out = push(out, CheckError{rule: name, message: "duplicate function `{name}`"})
+        edit out = acc
+        if name is not "" and first_fn_index(fs, name) < i:
+            out = append(out, CheckError{rule: name, message: "duplicate function `{name}`"})
         check_dup_functions(fs, i + 1, out)
 
 # Only PLAIN callable rules collide harmfully: run() picks the LAST rule of a
 # given name, so two `rule foo(...)` silently shadow. `on Event` handlers share
 # their event name on purpose (many handlers per event is valid), and desugared
-# rules (derive:/goal:/belief:) carry a trigger — all excluded by trigger == "".
-fn check_dup_rules(rs: [Rule], i: int, acc: [CheckError]) -> [CheckError]:
-    n = len(rs)
+# rules (derive:/goal:/belief:) carry a trigger — all excluded by trigger is "".
+define check_dup_rules(rs: [Rule], i: number, acc: [CheckError]) -> [CheckError]:
+    n = length(rs)
     if i >= n:
         acc
     else:
         r = ck_rule_at(rs, i)
-        mut out = acc
-        if r.name != "" and r.trigger == "" and first_plain_rule_index(rs, r.name) < i:
-            out = push(out, CheckError{rule: r.name, message: "duplicate rule `{r.name}`"})
+        edit out = acc
+        if r.name is not "" and r.trigger is "" and first_plain_rule_index(rs, r.name) < i:
+            out = append(out, CheckError{rule: r.name, message: "duplicate rule `{r.name}`"})
         check_dup_rules(rs, i + 1, out)
 
-fn first_plain_rule_index(rs: [Rule], name: Text) -> int:
-    n = len(rs)
-    for i in 0..<n:
+define first_plain_rule_index(rs: [Rule], name: text) -> number:
+    n = length(rs)
+    loop i in 0 until n:
         r = ck_rule_at(rs, i)
-        if r.name == name and r.trigger == "":
+        if r.name is name and r.trigger is "":
             return i
     0 - 1
 
 # A Call: verify the callee resolves, then its arity, then recurse into args.
-fn check_call(name: Text, args: [Expr], owner: Text, fs: [Function], acc: [CheckError]) -> [CheckError]:
-    mut out = acc
+define check_call(name: text, args: [Expr], owner: text, fs: [Function], acc: [CheckError]) -> [CheckError]:
+    edit out = acc
     if not is_builtin(name):
         f = find_function(fs, name)
-        if f.name == "":
-            out = push(out, CheckError{rule: owner, message: "unknown function `{name}`"})
+        if f.name is "":
+            out = append(out, CheckError{rule: owner, message: "unknown function `{name}`"})
         else:
-            na = len(args)
-            np = len(f.params)
-            if na != np:
-                out = push(out, CheckError{rule: owner, message: "`{name}` expects {np} args, got {na}"})
+            na = length(args)
+            np = length(f.params)
+            if na is not np:
+                out = append(out, CheckError{rule: owner, message: "`{name}` expects {np} args, got {na}"})
     check_exprs(args, owner, fs, out)
 
-fn check_expr(e: Expr, owner: Text, fs: [Function], acc: [CheckError]) -> [CheckError]:
-    match e:
-        Call(name, args) -> check_call(name, args, owner, fs, acc)
-        Binop(_, l, r) -> check_expr(r, owner, fs, check_expr(l, owner, fs, acc))
-        Unop(_, x) -> check_expr(x, owner, fs, acc)
-        IfExpr(c, t, f) -> check_expr(f, owner, fs, check_expr(t, owner, fs, check_expr(c, owner, fs, acc)))
-        Field(base, _) -> check_expr(base, owner, fs, acc)
-        CountQuery(_, src, pred) -> check_expr(pred, owner, fs, check_expr(src, owner, fs, acc))
-        LetIn(_, v, body) -> check_expr(body, owner, fs, check_expr(v, owner, fs, acc))
-        LitList(xs) -> check_exprs(xs, owner, fs, acc)
-        MapLit(flds) -> check_field_exprs(flds, owner, fs, acc)
-        RangeExpr(a, b) -> check_expr(b, owner, fs, check_expr(a, owner, fs, acc))
-        MatchExpr(s, arms) -> check_arms(arms, owner, fs, check_expr(s, owner, fs, acc))
-        _ -> acc
+define check_expr(e: Expr, owner: text, fs: [Function], acc: [CheckError]) -> [CheckError]:
+    choose e:
+        Call(name, args) then check_call(name, args, owner, fs, acc)
+        Binop(_, l, r) then check_expr(r, owner, fs, check_expr(l, owner, fs, acc))
+        Unop(_, x) then check_expr(x, owner, fs, acc)
+        IfExpr(c, t, f) then check_expr(f, owner, fs, check_expr(t, owner, fs, check_expr(c, owner, fs, acc)))
+        Field(base, _) then check_expr(base, owner, fs, acc)
+        CountQuery(_, src, pred) then check_expr(pred, owner, fs, check_expr(src, owner, fs, acc))
+        LetIn(_, v, body) then check_expr(body, owner, fs, check_expr(v, owner, fs, acc))
+        LitList(xs) then check_exprs(xs, owner, fs, acc)
+        MapLit(flds) then check_field_exprs(flds, owner, fs, acc)
+        RangeExpr(a, b) then check_expr(b, owner, fs, check_expr(a, owner, fs, acc))
+        MatchExpr(s, arms) then check_arms(arms, owner, fs, check_expr(s, owner, fs, acc))
+        _ then acc
 
-fn check_exprs(xs: [Expr], owner: Text, fs: [Function], acc: [CheckError]) -> [CheckError]:
-    n = len(xs)
-    mut out = acc
-    for i in 0..<n:
-        out = check_expr(at(xs, i), owner, fs, out)
+define check_exprs(xs: [Expr], owner: text, fs: [Function], acc: [CheckError]) -> [CheckError]:
+    n = length(xs)
+    edit out = acc
+    loop i in 0 until n:
+        out = check_expr(xs[i], owner, fs, out)
     out
 
-fn check_field_exprs(flds: [FieldExpr], owner: Text, fs: [Function], acc: [CheckError]) -> [CheckError]:
-    n = len(flds)
-    mut out = acc
-    for i in 0..<n:
+define check_field_exprs(flds: [FieldExpr], owner: text, fs: [Function], acc: [CheckError]) -> [CheckError]:
+    n = length(flds)
+    edit out = acc
+    loop i in 0 until n:
         fe = ck_fe_at(flds, i)
         out = check_expr(fe.value, owner, fs, out)
     out
 
-fn ck_fe_at(flds: [FieldExpr], i: int) -> FieldExpr:
-    at(flds, i)
+define ck_fe_at(flds: [FieldExpr], i: number) -> FieldExpr:
+    flds[i]
 
-fn check_arms(arms: [MatchArm], owner: Text, fs: [Function], acc: [CheckError]) -> [CheckError]:
-    n = len(arms)
-    mut out = acc
-    for i in 0..<n:
+define check_arms(arms: [MatchArm], owner: text, fs: [Function], acc: [CheckError]) -> [CheckError]:
+    n = length(arms)
+    edit out = acc
+    loop i in 0 until n:
         arm = ck_arm_at(arms, i)
         out = check_expr(arm.body, owner, fs, check_expr(arm.pattern, owner, fs, out))
     out
 
-fn ck_arm_at(arms: [MatchArm], i: int) -> MatchArm:
-    at(arms, i)
+define ck_arm_at(arms: [MatchArm], i: number) -> MatchArm:
+    arms[i]
 
-fn check_stmts(ss: [Stmt], owner: Text, fs: [Function], acc: [CheckError]) -> [CheckError]:
-    n = len(ss)
-    mut out = acc
-    for i in 0..<n:
+define check_stmts(ss: [Stmt], owner: text, fs: [Function], acc: [CheckError]) -> [CheckError]:
+    n = length(ss)
+    edit out = acc
+    loop i in 0 until n:
         out = check_stmt(ck_stmt_at(ss, i), owner, fs, out)
     out
 
-fn ck_stmt_at(ss: [Stmt], i: int) -> Stmt:
-    at(ss, i)
+define ck_stmt_at(ss: [Stmt], i: number) -> Stmt:
+    ss[i]
 
-fn check_stmt(s: Stmt, owner: Text, fs: [Function], acc: [CheckError]) -> [CheckError]:
-    match s:
-        EmitEffect(_, flds) -> check_field_exprs(flds, owner, fs, acc)
-        Require(e) -> check_expr(e, owner, fs, acc)
-        Let(_, v) -> check_expr(v, owner, fs, acc)
-        LetDestructure(_, v) -> check_expr(v, owner, fs, acc)
-        SpawnEntity(_, flds) -> check_field_exprs(flds, owner, fs, acc)
-        DestroyEntity(e) -> check_expr(e, owner, fs, acc)
-        SetField(base, _, v) -> check_expr(v, owner, fs, check_expr(base, owner, fs, acc))
-        SetVar(_, v) -> check_expr(v, owner, fs, acc)
-        ForEach(_, src, pred, body) -> check_stmts(body, owner, fs, check_expr(pred, owner, fs, check_expr(src, owner, fs, acc)))
-        IfStmt(c, body) -> check_stmts(body, owner, fs, check_expr(c, owner, fs, acc))
-        RelateStmt(a, _, b) -> check_expr(b, owner, fs, check_expr(a, owner, fs, acc))
-        _ -> acc
+define check_stmt(s: Stmt, owner: text, fs: [Function], acc: [CheckError]) -> [CheckError]:
+    choose s:
+        EmitEffect(_, flds) then check_field_exprs(flds, owner, fs, acc)
+        Require(e) then check_expr(e, owner, fs, acc)
+        Let(_, v) then check_expr(v, owner, fs, acc)
+        LetDestructure(_, v) then check_expr(v, owner, fs, acc)
+        SpawnEntity(_, flds) then check_field_exprs(flds, owner, fs, acc)
+        DestroyEntity(e) then check_expr(e, owner, fs, acc)
+        SetField(base, _, v) then check_expr(v, owner, fs, check_expr(base, owner, fs, acc))
+        SetVar(_, v) then check_expr(v, owner, fs, acc)
+        ForEach(_, src, pred, body) then check_stmts(body, owner, fs, check_expr(pred, owner, fs, check_expr(src, owner, fs, acc)))
+        IfStmt(c, body) then check_stmts(body, owner, fs, check_expr(c, owner, fs, acc))
+        RelateStmt(a, _, b) then check_expr(b, owner, fs, check_expr(a, owner, fs, acc))
+        _ then acc

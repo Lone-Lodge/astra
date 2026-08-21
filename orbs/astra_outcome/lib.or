@@ -4,7 +4,6 @@
 # (Emit), nothing else. No IO, no mutation, no unbounded loop — the
 # sandbox is the grammar, not a runtime guard.
 
-use astra_value
 
 # One write or signal the rule proposed. Atlas turns these into
 # atlas_event::Event values at the seam.
@@ -13,51 +12,51 @@ use astra_value
 # values so the host can construct a real typed component. The atlas
 # bridge fans it out as ToChannel("astra:spawn:Kind", payload_map);
 # the host listens per-kind and does the actual ECS insert.
-pub enum AstraEffect:
-    AstraSet(int, Text, Value)
-    AstraSpawn(int)
-    AstraSpawnKind(Text, [ValueField])
-    AstraDestroy(int)
-    AstraSetVar(Text, Value)
-    AstraEmit(Text, Value)
-    AstraRelate(int, Text, int)
+public type AstraEffect:
+    AstraSet(number, text, Value)
+    AstraSpawn(number)
+    AstraSpawnKind(text, [ValueField])
+    AstraDestroy(number)
+    AstraSetVar(text, Value)
+    AstraEmit(text, Value)
+    AstraRelate(number, text, number)
 
 # One read trace — used by the typed Trace UI to show where a rule
 # looked when it computed its answer.
-pub data Read: entity: int, field: Text
+public type Read: entity: number, field: text
 
-pub data Outcome: effects: [AstraEffect], reads: [Read]
+public type Outcome: effects: [AstraEffect], reads: [Read]
 
-pub fn empty() -> Outcome:
+public define empty() -> Outcome:
     Outcome{effects: [], reads: []}
 
 # A failed `require` proposes zero effects: an illegal move is a
 # silent no-op, exactly Atlas's contract.
-pub fn refused() -> Outcome:
+public define refused() -> Outcome:
     empty()
 
 # Deep copies — evacuate a rule's outcome out of the eval frame arena.
-pub fn effect_copy(e: AstraEffect) -> AstraEffect:
-    match e:
-        AstraSet(eid, field, v) -> AstraSet(eid, "" + field, value_copy(v))
-        AstraSpawn(eid) -> AstraSpawn(eid)
-        AstraSpawnKind(kind, fields) -> AstraSpawnKind("" + kind, fields_copy(fields, 0, []))
-        AstraDestroy(eid) -> AstraDestroy(eid)
-        AstraSetVar(name, v) -> AstraSetVar("" + name, value_copy(v))
-        AstraEmit(event, v) -> AstraEmit("" + event, value_copy(v))
-        AstraRelate(a, kind, b) -> AstraRelate(a, "" + kind, b)
+public define effect_copy(e: AstraEffect) -> AstraEffect:
+    choose e:
+        AstraSet(eid, field, v) then AstraSet(eid, "" + field, value_copy(v))
+        AstraSpawn(eid) then AstraSpawn(eid)
+        AstraSpawnKind(kind, fields) then AstraSpawnKind("" + kind, fields_copy(fields, 0, []))
+        AstraDestroy(eid) then AstraDestroy(eid)
+        AstraSetVar(name, v) then AstraSetVar("" + name, value_copy(v))
+        AstraEmit(event, v) then AstraEmit("" + event, value_copy(v))
+        AstraRelate(a, kind, b) then AstraRelate(a, "" + kind, b)
 
-fn fields_copy(fields: [ValueField], i: int, acc: [ValueField]) -> [ValueField]:
-    if i >= len(fields):
+define fields_copy(fields: [ValueField], i: number, acc: [ValueField]) -> [ValueField]:
+    if i >= length(fields):
         acc
     else:
-        f = at(fields, i)
-        fields_copy(fields, i + 1, push(acc, ValueField{name: "" + f.name, value: value_copy(f.value)}))
+        f = fields[i]
+        fields_copy(fields, i + 1, append(acc, ValueField{name: "" + f.name, value: value_copy(f.value)}))
 
-pub fn outcome_copy(o: Outcome) -> Outcome:
-    n = len(o.effects)
+public define outcome_copy(o: Outcome) -> Outcome:
+    n = length(o.effects)
     # fx is owned (fresh []) until wrapped — in-place accumulation.
-    mut fx = []
-    for i in 0..<n:
-        fx = push_mut(fx, effect_copy(at(o.effects, i)))
+    edit fx = []
+    loop i in 0 until n:
+        fx = append(fx, effect_copy(o.effects[i]))
     Outcome{effects: fx, reads: o.reads}

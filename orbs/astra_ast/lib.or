@@ -3,64 +3,69 @@
 # M1 grammar: rule + params + body of (emit | require | let) stmts,
 # expressions support literals/varref/binop/unop/if/call/field access.
 
-use astra_value
 
 # ---- Expressions ----
 # Note: Field is `base.name` (entity-field-access). Call is `name(args)`.
-pub enum Expr:
-    LitInt(int)
-    LitText(Text)
-    LitBool(bool)
-    VarRef(Text)
-    Binop(Text, Expr, Expr)        # op tag: "+" / "*" / "==" / "and" / ...
-    Unop(Text, Expr)               # "not" / "-"
+public type Expr:
+    LitInt(number)
+    LitText(text)
+    LitBool(truth)
+    VarRef(text)
+    Binop(text, Expr, Expr)        # op tag: "+" / "*" / " is " / "and" / ...
+    Unop(text, Expr)               # "not" / "-"
     IfExpr(Expr, Expr, Expr)       # cond then else
-    Call(Text, [Expr])             # callee + args
-    Field(Expr, Text)              # base.name
-    CountQuery(Text, Expr, Expr)   # count(NAME in LIST where COND) — iter binding, list source, predicate
-    LetIn(Text, Expr, Expr)        # let NAME = VAL <expr> — binds NAME in scope of body expr
+    Call(text, [Expr])             # callee + args
+    Field(Expr, text)              # base.name
+    CountQuery(text, Expr, Expr)   # count(NAME in LIST where COND) — iter binding, list source, predicate
+    LetIn(text, Expr, Expr)        # let NAME = VAL <expr> — binds NAME in scope of body expr
     LitList([Expr])                # [a, b, c] — list literal, evaluates to ListV
     MapLit([FieldExpr])            # { f: v, f: v } in expression position — evaluates to MapV
-    RangeExpr(Expr, Expr)          # a..<b — half-open int range, evaluates to ListV
+    RangeExpr(Expr, Expr)          # a until b — half-open int range, evaluates to ListV
     MatchExpr(Expr, [MatchArm])    # match scrutinee: PAT -> RESULT, ...
 
-pub data MatchArm: pattern: Expr, body: Expr
+public type MatchArm: pattern: Expr, body: Expr
 
 # A `name: expr` pair inside emit body.
-pub data FieldExpr: name: Text, value: Expr
+public type FieldExpr: name: text, value: Expr
+
+# An enum-typed state (`state door: enum(Shut, Open, Locked) = Shut`) retained
+# through parse so the checker can flag a non-exhaustive `when` switch. Variants
+# are in declaration order; variant i has the int value i (how the parser
+# flattens them). Non-enum states produce no EnumState.
+public type EnumState: name: text, variants: [text]
 
 # Statement = one piece of a rule body.
-pub enum Stmt:
-    EmitEffect(Text, [FieldExpr])
+public type Stmt:
+    EmitEffect(text, [FieldExpr])
     Require(Expr)                  # silent no-op if false
-    Let(Text, Expr)                # bind name in env for rest of body
-    LetDestructure([Text], Expr)   # let { a, b } = mapv — bind every name to the same-named MapV field
-    SpawnEntity(Text, [FieldExpr]) # spawn Kind { f: v, ... } — host constructs the typed entity
+    Let(text, Expr)                # bind name in env for rest of body
+    LetDestructure([text], Expr)   # let { a, b } = mapv — bind every name to the same-named MapV field
+    SpawnEntity(text, [FieldExpr]) # spawn Kind { f: v, ... } — host constructs the typed entity
     DestroyEntity(Expr)            # destroy expr_yielding_ref — host despawns the ref
-    SetField(Expr, Text, Expr)     # set base.field = value — host applies field mutation
-    SetVar(Text, Expr)             # set name = value — host applies resource/var write
-    ForEach(Text, Expr, Expr, [Stmt])  # for x in list [where pred]: stmts — runtime list iteration with optional filter
+    SetField(Expr, text, Expr)     # set base.field = value — host applies field mutation
+    SetVar(text, Expr)             # set name = value — host applies resource/var write
+    ForEach(text, Expr, Expr, [Stmt])  # for x in list [where pred]: stmts — runtime list iteration with optional filter
     IfStmt(Expr, [Stmt])               # if cond: body-stmt (single-branch conditional)
-    RelateStmt(Expr, Text, Expr)       # `relate A kind B` — create relation A -kind-> B (A3)
+    RelateStmt(Expr, text, Expr)       # `relate A kind B` — create relation A -kind-> B (A3)
 
 # A rule's parameter.
-pub data Param: name: Text, type_name: Text
+public type Param: name: text, type_name: text
 
 # A whole rule. `trigger` is empty for plain rules (called by name),
 # the event name for `on Event(...)` handlers (fired via dispatch),
 # or "$when"/"$every" for reactive rules (fired by astra_run::tick).
 # For `when EXPR:` the watch expression lives in `condition`; for all
 # other rule kinds it's LitBool(true) so eval logic can ignore it.
-pub data Rule: name: Text, params: [Param], body: [Stmt], trigger: Text, condition: Expr
+public type Rule: name: text, params: [Param], body: [Stmt], trigger: text, condition: Expr
 
 # A pure helper. Body is a single expression — `let x = ... <expr>`-style
 # multi-line bodies aren't supported yet; one expression suffices for
 # pixel-math / piece-catalog use cases. Called from rule expressions via
 # `Call(name, args)`; the runtime looks the name up in the parsed
 # function table and evaluates the body with args bound to params.
-pub data Function: name: Text, params: [Param], return_type: Text, body: Expr
+public type Function: name: text, params: [Param], return_type: text, body: Expr
 
-pub data ConstDecl: name: Text, value: Expr
+public type ConstDecl: name: text, value: Expr
 
 # ---- Tests (pillar 5: tests as syntax) ----
 # A `test NAME:` block is a sequence of steps the test runner executes
@@ -76,21 +81,21 @@ pub data ConstDecl: name: Text, value: Expr
 #   kind="apply"  -> name + args   (run the named rule)
 #   kind="tick"   -> cond          (advance the counter by cond's value)
 #   kind="expect" -> cond          (assert)
-pub data TestStep: kind: Text, name: Text, args: [Expr], cond: Expr
+public type TestStep: kind: text, name: text, args: [Expr], cond: Expr
 
-pub data TestCase: name: Text, steps: [TestStep]
+public type TestCase: name: text, steps: [TestStep]
 
 # An entity declaration — `entity Kind { f: type, ... }`. The host
 # registers a constructor for `Kind` so `spawn Kind { ... }` can produce
 # a real typed entity. Fields are parsed for documentation and future
 # type-checking; the runtime doesn't enforce them yet.
-pub data EntityDecl: name: Text, fields: [Param]
+public type EntityDecl: name: text, fields: [Param]
 
 # A component declaration — `component Kind: field:type, field:type`.
 # Declares an ECS component type inline in Astra. atlas_astra registers
 # the type in the world at load time so `spawn Kind { ... }` and
 # `for x in Kind` work without any Orion glue code.
-pub data ComponentDecl: name: Text, fields: [Param]
+public type ComponentDecl: name: text, fields: [Param]
 
 # ---- Deep copy: compile-epoch evacuation ----
 #
@@ -102,240 +107,240 @@ pub data ComponentDecl: name: Text, fields: [Param]
 # via "" + s (allocates in the active scope, persist during
 # evacuation). Accumulators are fresh owned locals — push_mut.
 
-pub fn ast_copy_expr(e: Expr) -> Expr:
-    match e:
-        LitInt(n) -> LitInt(n)
-        LitText(s) -> LitText("" + s)
-        LitBool(b) -> LitBool(b)
-        VarRef(name) -> VarRef("" + name)
-        Binop(op, l, r) -> Binop("" + op, ast_copy_expr(l), ast_copy_expr(r))
-        Unop(op, x) -> Unop("" + op, ast_copy_expr(x))
-        IfExpr(c, t, f) -> IfExpr(ast_copy_expr(c), ast_copy_expr(t), ast_copy_expr(f))
-        Call(name, args) -> Call("" + name, ast_copy_exprs(args))
-        Field(base, name) -> Field(ast_copy_expr(base), "" + name)
-        CountQuery(name, src, pred) -> CountQuery("" + name, ast_copy_expr(src), ast_copy_expr(pred))
-        LetIn(name, val, body) -> LetIn("" + name, ast_copy_expr(val), ast_copy_expr(body))
-        LitList(items) -> LitList(ast_copy_exprs(items))
-        MapLit(fields) -> MapLit(ast_copy_field_exprs(fields))
-        RangeExpr(a, b) -> RangeExpr(ast_copy_expr(a), ast_copy_expr(b))
-        MatchExpr(s, arms) -> MatchExpr(ast_copy_expr(s), ast_copy_arms(arms))
+public define ast_copy_expr(e: Expr) -> Expr:
+    choose e:
+        LitInt(n) then LitInt(n)
+        LitText(s) then LitText("" + s)
+        LitBool(b) then LitBool(b)
+        VarRef(name) then VarRef("" + name)
+        Binop(op, l, r) then Binop("" + op, ast_copy_expr(l), ast_copy_expr(r))
+        Unop(op, x) then Unop("" + op, ast_copy_expr(x))
+        IfExpr(c, t, f) then IfExpr(ast_copy_expr(c), ast_copy_expr(t), ast_copy_expr(f))
+        Call(name, args) then Call("" + name, ast_copy_exprs(args))
+        Field(base, name) then Field(ast_copy_expr(base), "" + name)
+        CountQuery(name, src, pred) then CountQuery("" + name, ast_copy_expr(src), ast_copy_expr(pred))
+        LetIn(name, val, body) then LetIn("" + name, ast_copy_expr(val), ast_copy_expr(body))
+        LitList(items) then LitList(ast_copy_exprs(items))
+        MapLit(fields) then MapLit(ast_copy_field_exprs(fields))
+        RangeExpr(a, b) then RangeExpr(ast_copy_expr(a), ast_copy_expr(b))
+        MatchExpr(s, arms) then MatchExpr(ast_copy_expr(s), ast_copy_arms(arms))
 
-fn ast_copy_exprs(xs: [Expr]) -> [Expr]:
-    n = len(xs)
-    mut out = []
-    for i in 0..<n:
-        out = push_mut(out, ast_copy_expr(at(xs, i)))
+define ast_copy_exprs(xs: [Expr]) -> [Expr]:
+    n = length(xs)
+    edit out = []
+    loop i in 0 until n:
+        out = append(out, ast_copy_expr(xs[i]))
     out
 
-fn ast_copy_field_exprs(xs: [FieldExpr]) -> [FieldExpr]:
-    n = len(xs)
-    mut out = []
-    for i in 0..<n:
+define ast_copy_field_exprs(xs: [FieldExpr]) -> [FieldExpr]:
+    n = length(xs)
+    edit out = []
+    loop i in 0 until n:
         f = fe_at(xs, i)
-        out = push_mut(out, FieldExpr{name: "" + f.name, value: ast_copy_expr(f.value)})
+        out = append(out, FieldExpr{name: "" + f.name, value: ast_copy_expr(f.value)})
     out
 
-fn fe_at(xs: [FieldExpr], i: int) -> FieldExpr:
-    at(xs, i)
+define fe_at(xs: [FieldExpr], i: number) -> FieldExpr:
+    xs[i]
 
-fn ast_copy_arms(xs: [MatchArm]) -> [MatchArm]:
-    n = len(xs)
-    mut out = []
-    for i in 0..<n:
+define ast_copy_arms(xs: [MatchArm]) -> [MatchArm]:
+    n = length(xs)
+    edit out = []
+    loop i in 0 until n:
         a = arm_at(xs, i)
-        out = push_mut(out, MatchArm{pattern: ast_copy_expr(a.pattern), body: ast_copy_expr(a.body)})
+        out = append(out, MatchArm{pattern: ast_copy_expr(a.pattern), body: ast_copy_expr(a.body)})
     out
 
-fn arm_at(xs: [MatchArm], i: int) -> MatchArm:
-    at(xs, i)
+define arm_at(xs: [MatchArm], i: number) -> MatchArm:
+    xs[i]
 
 # ---- Component template (a parameterised widget subtree) ----
 # `component NAME(params):` declares a named widget subtree. An instantiation
 # NAME(args) is expanded at PARSE TIME (astra_parser): the body is spliced in
 # with every param VarRef replaced by its arg expression (ct_subst_* below). No
 # new Stmt variant, no runtime change — pure sugar over the widget tree.
-pub data ComponentTemplate: name: Text, params: [Param], body: [Stmt]
+public type ComponentTemplate: name: text, params: [Param], body: [Stmt]
 
-# Byte-wise name compare — `==` on Text is pointer equality for runtime-built
+# Byte-wise name compare — ` is ` on Text is pointer equality for runtime-built
 # strings, so match param names by content.
-fn ct_names_eq(a: Text, b: Text) -> bool:
-    ab = bytes_from_text(a)
-    bb = bytes_from_text(b)
-    an = len(ab)
-    if an != len(bb):
+define ct_names_eq(a: text, b: text) -> truth:
+    ab = bytes_of(a)
+    bb = bytes_of(b)
+    an = length(ab)
+    if an is not length(bb):
         false
     else:
-        mut same = true
-        for i in 0..<an:
-            if at(ab, i) != at(bb, i):
+        edit same = true
+        loop i in 0 until an:
+            if ab[i] is not bb[i]:
                 same = false
         same
 
 # VarRef(param) → the matching arg expression; other names pass through.
 # params[k] is replaced by args[k].
-fn ct_subst_var(name: Text, params: [Text], args: [Expr]) -> Expr:
-    n = len(params)
-    mut out = VarRef("" + name)
-    mut done = false
-    for i in 0..<n:
+define ct_subst_var(name: text, params: [text], args: [Expr]) -> Expr:
+    n = length(params)
+    edit out = VarRef("" + name)
+    edit done = false
+    loop i in 0 until n:
         if not done and ct_names_eq(txt_at(params, i), name):
-            out = ast_copy_expr(at(args, i))
+            out = ast_copy_expr(args[i])
             done = true
     out
 
-pub fn ct_subst_expr(e: Expr, params: [Text], args: [Expr]) -> Expr:
-    match e:
-        LitInt(n) -> LitInt(n)
-        LitText(s) -> LitText("" + s)
-        LitBool(b) -> LitBool(b)
-        VarRef(name) -> ct_subst_var(name, params, args)
-        Binop(op, l, r) -> Binop("" + op, ct_subst_expr(l, params, args), ct_subst_expr(r, params, args))
-        Unop(op, x) -> Unop("" + op, ct_subst_expr(x, params, args))
-        IfExpr(c, t, f) -> IfExpr(ct_subst_expr(c, params, args), ct_subst_expr(t, params, args), ct_subst_expr(f, params, args))
-        Call(name, cargs) -> Call("" + name, ct_subst_exprs(cargs, params, args))
-        Field(base, name) -> Field(ct_subst_expr(base, params, args), "" + name)
-        CountQuery(name, src, pred) -> CountQuery("" + name, ct_subst_expr(src, params, args), ct_subst_expr(pred, params, args))
-        LetIn(name, val, body) -> LetIn("" + name, ct_subst_expr(val, params, args), ct_subst_expr(body, params, args))
-        LitList(items) -> LitList(ct_subst_exprs(items, params, args))
-        MapLit(fields) -> MapLit(ct_subst_field_exprs(fields, params, args))
-        RangeExpr(a, b) -> RangeExpr(ct_subst_expr(a, params, args), ct_subst_expr(b, params, args))
-        MatchExpr(s, arms) -> MatchExpr(ct_subst_expr(s, params, args), ct_subst_arms(arms, params, args))
+public define ct_subst_expr(e: Expr, params: [text], args: [Expr]) -> Expr:
+    choose e:
+        LitInt(n) then LitInt(n)
+        LitText(s) then LitText("" + s)
+        LitBool(b) then LitBool(b)
+        VarRef(name) then ct_subst_var(name, params, args)
+        Binop(op, l, r) then Binop("" + op, ct_subst_expr(l, params, args), ct_subst_expr(r, params, args))
+        Unop(op, x) then Unop("" + op, ct_subst_expr(x, params, args))
+        IfExpr(c, t, f) then IfExpr(ct_subst_expr(c, params, args), ct_subst_expr(t, params, args), ct_subst_expr(f, params, args))
+        Call(name, cargs) then Call("" + name, ct_subst_exprs(cargs, params, args))
+        Field(base, name) then Field(ct_subst_expr(base, params, args), "" + name)
+        CountQuery(name, src, pred) then CountQuery("" + name, ct_subst_expr(src, params, args), ct_subst_expr(pred, params, args))
+        LetIn(name, val, body) then LetIn("" + name, ct_subst_expr(val, params, args), ct_subst_expr(body, params, args))
+        LitList(items) then LitList(ct_subst_exprs(items, params, args))
+        MapLit(fields) then MapLit(ct_subst_field_exprs(fields, params, args))
+        RangeExpr(a, b) then RangeExpr(ct_subst_expr(a, params, args), ct_subst_expr(b, params, args))
+        MatchExpr(s, arms) then MatchExpr(ct_subst_expr(s, params, args), ct_subst_arms(arms, params, args))
 
-fn ct_subst_exprs(xs: [Expr], params: [Text], args: [Expr]) -> [Expr]:
-    mut out = []
-    for i in 0..<len(xs):
-        out = push_mut(out, ct_subst_expr(at(xs, i), params, args))
+define ct_subst_exprs(xs: [Expr], params: [text], args: [Expr]) -> [Expr]:
+    edit out = []
+    loop i in 0 until length(xs):
+        out = append(out, ct_subst_expr(xs[i], params, args))
     out
 
-fn ct_subst_field_exprs(xs: [FieldExpr], params: [Text], args: [Expr]) -> [FieldExpr]:
-    mut out = []
-    for i in 0..<len(xs):
+define ct_subst_field_exprs(xs: [FieldExpr], params: [text], args: [Expr]) -> [FieldExpr]:
+    edit out = []
+    loop i in 0 until length(xs):
         f = fe_at(xs, i)
-        out = push_mut(out, FieldExpr{name: "" + f.name, value: ct_subst_expr(f.value, params, args)})
+        out = append(out, FieldExpr{name: "" + f.name, value: ct_subst_expr(f.value, params, args)})
     out
 
-fn ct_subst_arms(xs: [MatchArm], params: [Text], args: [Expr]) -> [MatchArm]:
-    mut out = []
-    for i in 0..<len(xs):
+define ct_subst_arms(xs: [MatchArm], params: [text], args: [Expr]) -> [MatchArm]:
+    edit out = []
+    loop i in 0 until length(xs):
         a = arm_at(xs, i)
-        out = push_mut(out, MatchArm{pattern: ct_subst_expr(a.pattern, params, args), body: ct_subst_expr(a.body, params, args)})
+        out = append(out, MatchArm{pattern: ct_subst_expr(a.pattern, params, args), body: ct_subst_expr(a.body, params, args)})
     out
 
-pub fn ct_subst_stmt(s: Stmt, params: [Text], args: [Expr]) -> Stmt:
-    match s:
-        EmitEffect(name, fields) -> EmitEffect("" + name, ct_subst_field_exprs(fields, params, args))
-        Require(e) -> Require(ct_subst_expr(e, params, args))
-        Let(name, e) -> Let("" + name, ct_subst_expr(e, params, args))
-        LetDestructure(names, e) -> LetDestructure(ast_copy_texts(names), ct_subst_expr(e, params, args))
-        SpawnEntity(kind, fields) -> SpawnEntity("" + kind, ct_subst_field_exprs(fields, params, args))
-        DestroyEntity(e) -> DestroyEntity(ct_subst_expr(e, params, args))
-        SetField(base, name, val) -> SetField(ct_subst_expr(base, params, args), "" + name, ct_subst_expr(val, params, args))
-        SetVar(name, val) -> SetVar("" + name, ct_subst_expr(val, params, args))
-        ForEach(name, src, pred, body) -> ForEach("" + name, ct_subst_expr(src, params, args), ct_subst_expr(pred, params, args), ct_subst_stmts(body, params, args))
-        IfStmt(cond, body) -> IfStmt(ct_subst_expr(cond, params, args), ct_subst_stmts(body, params, args))
-        RelateStmt(a, kind, b) -> RelateStmt(ct_subst_expr(a, params, args), "" + kind, ct_subst_expr(b, params, args))
+public define ct_subst_stmt(s: Stmt, params: [text], args: [Expr]) -> Stmt:
+    choose s:
+        EmitEffect(name, fields) then EmitEffect("" + name, ct_subst_field_exprs(fields, params, args))
+        Require(e) then Require(ct_subst_expr(e, params, args))
+        Let(name, e) then Let("" + name, ct_subst_expr(e, params, args))
+        LetDestructure(names, e) then LetDestructure(ast_copy_texts(names), ct_subst_expr(e, params, args))
+        SpawnEntity(kind, fields) then SpawnEntity("" + kind, ct_subst_field_exprs(fields, params, args))
+        DestroyEntity(e) then DestroyEntity(ct_subst_expr(e, params, args))
+        SetField(base, name, val) then SetField(ct_subst_expr(base, params, args), "" + name, ct_subst_expr(val, params, args))
+        SetVar(name, val) then SetVar("" + name, ct_subst_expr(val, params, args))
+        ForEach(name, src, pred, body) then ForEach("" + name, ct_subst_expr(src, params, args), ct_subst_expr(pred, params, args), ct_subst_stmts(body, params, args))
+        IfStmt(cond, body) then IfStmt(ct_subst_expr(cond, params, args), ct_subst_stmts(body, params, args))
+        RelateStmt(a, kind, b) then RelateStmt(ct_subst_expr(a, params, args), "" + kind, ct_subst_expr(b, params, args))
 
-pub fn ct_subst_stmts(xs: [Stmt], params: [Text], args: [Expr]) -> [Stmt]:
-    mut out = []
-    for i in 0..<len(xs):
-        out = push_mut(out, ct_subst_stmt(at(xs, i), params, args))
+public define ct_subst_stmts(xs: [Stmt], params: [text], args: [Expr]) -> [Stmt]:
+    edit out = []
+    loop i in 0 until length(xs):
+        out = append(out, ct_subst_stmt(xs[i], params, args))
     out
 
-pub fn ast_copy_stmt(s: Stmt) -> Stmt:
-    match s:
-        EmitEffect(name, fields) -> EmitEffect("" + name, ast_copy_field_exprs(fields))
-        Require(e) -> Require(ast_copy_expr(e))
-        Let(name, e) -> Let("" + name, ast_copy_expr(e))
-        LetDestructure(names, e) -> LetDestructure(ast_copy_texts(names), ast_copy_expr(e))
-        SpawnEntity(kind, fields) -> SpawnEntity("" + kind, ast_copy_field_exprs(fields))
-        DestroyEntity(e) -> DestroyEntity(ast_copy_expr(e))
-        SetField(base, name, val) -> SetField(ast_copy_expr(base), "" + name, ast_copy_expr(val))
-        SetVar(name, val) -> SetVar("" + name, ast_copy_expr(val))
-        ForEach(name, src, pred, body) -> ForEach("" + name, ast_copy_expr(src), ast_copy_expr(pred), ast_copy_stmts(body))
-        IfStmt(cond, body) -> IfStmt(ast_copy_expr(cond), ast_copy_stmts(body))
-        RelateStmt(a, kind, b) -> RelateStmt(ast_copy_expr(a), "" + kind, ast_copy_expr(b))
+public define ast_copy_stmt(s: Stmt) -> Stmt:
+    choose s:
+        EmitEffect(name, fields) then EmitEffect("" + name, ast_copy_field_exprs(fields))
+        Require(e) then Require(ast_copy_expr(e))
+        Let(name, e) then Let("" + name, ast_copy_expr(e))
+        LetDestructure(names, e) then LetDestructure(ast_copy_texts(names), ast_copy_expr(e))
+        SpawnEntity(kind, fields) then SpawnEntity("" + kind, ast_copy_field_exprs(fields))
+        DestroyEntity(e) then DestroyEntity(ast_copy_expr(e))
+        SetField(base, name, val) then SetField(ast_copy_expr(base), "" + name, ast_copy_expr(val))
+        SetVar(name, val) then SetVar("" + name, ast_copy_expr(val))
+        ForEach(name, src, pred, body) then ForEach("" + name, ast_copy_expr(src), ast_copy_expr(pred), ast_copy_stmts(body))
+        IfStmt(cond, body) then IfStmt(ast_copy_expr(cond), ast_copy_stmts(body))
+        RelateStmt(a, kind, b) then RelateStmt(ast_copy_expr(a), "" + kind, ast_copy_expr(b))
 
-pub fn ast_copy_stmts(xs: [Stmt]) -> [Stmt]:
-    n = len(xs)
-    mut out = []
-    for i in 0..<n:
-        out = push_mut(out, ast_copy_stmt(at(xs, i)))
+public define ast_copy_stmts(xs: [Stmt]) -> [Stmt]:
+    n = length(xs)
+    edit out = []
+    loop i in 0 until n:
+        out = append(out, ast_copy_stmt(xs[i]))
     out
 
-fn ast_copy_texts(xs: [Text]) -> [Text]:
-    n = len(xs)
-    mut out = []
-    for i in 0..<n:
-        out = push_mut(out, "" + txt_at(xs, i))
+define ast_copy_texts(xs: [text]) -> [text]:
+    n = length(xs)
+    edit out = []
+    loop i in 0 until n:
+        out = append(out, "" + txt_at(xs, i))
     out
 
-fn txt_at(xs: [Text], i: int) -> Text:
-    at(xs, i)
+define txt_at(xs: [text], i: number) -> text:
+    xs[i]
 
-pub fn ast_copy_params(xs: [Param]) -> [Param]:
-    n = len(xs)
-    mut out = []
-    for i in 0..<n:
+public define ast_copy_params(xs: [Param]) -> [Param]:
+    n = length(xs)
+    edit out = []
+    loop i in 0 until n:
         p = param_at(xs, i)
-        out = push_mut(out, Param{name: "" + p.name, type_name: "" + p.type_name})
+        out = append(out, Param{name: "" + p.name, type_name: "" + p.type_name})
     out
 
-fn param_at(xs: [Param], i: int) -> Param:
-    at(xs, i)
+define param_at(xs: [Param], i: number) -> Param:
+    xs[i]
 
-pub fn ast_copy_rules(xs: [Rule]) -> [Rule]:
-    n = len(xs)
-    mut out = []
-    for i in 0..<n:
+public define ast_copy_rules(xs: [Rule]) -> [Rule]:
+    n = length(xs)
+    edit out = []
+    loop i in 0 until n:
         r = rule_at(xs, i)
-        out = push_mut(out, Rule{name: "" + r.name, params: ast_copy_params(r.params), body: ast_copy_stmts(r.body), trigger: "" + r.trigger, condition: ast_copy_expr(r.condition)})
+        out = append(out, Rule{name: "" + r.name, params: ast_copy_params(r.params), body: ast_copy_stmts(r.body), trigger: "" + r.trigger, condition: ast_copy_expr(r.condition)})
     out
 
-fn rule_at(xs: [Rule], i: int) -> Rule:
-    at(xs, i)
+define rule_at(xs: [Rule], i: number) -> Rule:
+    xs[i]
 
-pub fn ast_copy_functions(xs: [Function]) -> [Function]:
-    n = len(xs)
-    mut out = []
-    for i in 0..<n:
+public define ast_copy_functions(xs: [Function]) -> [Function]:
+    n = length(xs)
+    edit out = []
+    loop i in 0 until n:
         f = fn_at(xs, i)
-        out = push_mut(out, Function{name: "" + f.name, params: ast_copy_params(f.params), return_type: "" + f.return_type, body: ast_copy_expr(f.body)})
+        out = append(out, Function{name: "" + f.name, params: ast_copy_params(f.params), return_type: "" + f.return_type, body: ast_copy_expr(f.body)})
     out
 
-fn fn_at(xs: [Function], i: int) -> Function:
-    at(xs, i)
+define fn_at(xs: [Function], i: number) -> Function:
+    xs[i]
 
-pub fn ast_copy_tests(xs: [TestCase]) -> [TestCase]:
-    n = len(xs)
-    mut out = []
-    for i in 0..<n:
+public define ast_copy_tests(xs: [TestCase]) -> [TestCase]:
+    n = length(xs)
+    edit out = []
+    loop i in 0 until n:
         t = test_at(xs, i)
-        out = push_mut(out, TestCase{name: "" + t.name, steps: ast_copy_test_steps(t.steps)})
+        out = append(out, TestCase{name: "" + t.name, steps: ast_copy_test_steps(t.steps)})
     out
 
-fn test_at(xs: [TestCase], i: int) -> TestCase:
-    at(xs, i)
+define test_at(xs: [TestCase], i: number) -> TestCase:
+    xs[i]
 
-fn ast_copy_test_steps(xs: [TestStep]) -> [TestStep]:
-    n = len(xs)
-    mut out = []
-    for i in 0..<n:
-        out = push_mut(out, ast_copy_test_step(test_step_at(xs, i)))
+define ast_copy_test_steps(xs: [TestStep]) -> [TestStep]:
+    n = length(xs)
+    edit out = []
+    loop i in 0 until n:
+        out = append(out, ast_copy_test_step(test_step_at(xs, i)))
     out
 
-fn test_step_at(xs: [TestStep], i: int) -> TestStep:
-    at(xs, i)
+define test_step_at(xs: [TestStep], i: number) -> TestStep:
+    xs[i]
 
-fn ast_copy_test_step(s: TestStep) -> TestStep:
+define ast_copy_test_step(s: TestStep) -> TestStep:
     TestStep{kind: "" + s.kind, name: "" + s.name, args: ast_copy_exprs(s.args), cond: ast_copy_expr(s.cond)}
 
-pub fn ast_copy_components(xs: [ComponentDecl]) -> [ComponentDecl]:
-    n = len(xs)
-    mut out = []
-    for i in 0..<n:
+public define ast_copy_components(xs: [ComponentDecl]) -> [ComponentDecl]:
+    n = length(xs)
+    edit out = []
+    loop i in 0 until n:
         c = comp_at(xs, i)
-        out = push_mut(out, ComponentDecl{name: "" + c.name, fields: ast_copy_params(c.fields)})
+        out = append(out, ComponentDecl{name: "" + c.name, fields: ast_copy_params(c.fields)})
     out
 
-fn comp_at(xs: [ComponentDecl], i: int) -> ComponentDecl:
-    at(xs, i)
+define comp_at(xs: [ComponentDecl], i: number) -> ComponentDecl:
+    xs[i]

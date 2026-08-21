@@ -1,7 +1,3 @@
-use astra_run
-use fs
-use io
-use bytes
 
 # Parse-smoke harness for the fireplace game + the new template/tokens
 # syntax (task #43). All bundles must print OK. Run after any
@@ -10,35 +6,35 @@ use bytes
 #   cd astra/test_parse
 #   orbit run src/main.or main
 
-fn test_source(label: Text, src: Text):
-    print("--- ")
-    print(label)
-    print("bytes:")
-    print(len(bytes_from_text(src)))
+define test_source(label: text, src: text):
+    print_line("--- ")
+    print_line(label)
+    print_line("bytes:")
+    print_line(length(bytes_of(src)))
     pr = compile_parse_result(src)
     er = pr.error
     if pr.ok:
-        print("OK")
-        print("rules:")
-        print(len(pr.rules))
-        print("templates:")
-        print(len(pr.templates))
-        print("token_blocks:")
-        print(len(pr.token_blocks))
+        print_line("OK")
+        print_line("rules:")
+        print_line(length(pr.rules))
+        print_line("templates:")
+        print_line(length(pr.templates))
+        print_line("token_blocks:")
+        print_line(length(pr.token_blocks))
     else:
-        print("FAIL line:")
-        print(er.line)
-        print("msg:")
-        print(er.message)
+        print_line("FAIL line:")
+        print_line(er.line)
+        print_line("msg:")
+        print_line(er.message)
 
 
-fn test_file(path: Text):
+define test_file(path: text):
     src = read_file(path)
     test_source(path, src)
 
 
-fn main() -> int:
-    print("=== fireplace bundles ===")
+define main() -> number:
+    print_line("=== fireplace bundles ===")
     test_file("../../fireplace/features/resources/resources.astra")
     test_file("../../fireplace/features/commands/commands.astra")
     test_file("../../fireplace/features/actions/actions.astra")
@@ -46,26 +42,26 @@ fn main() -> int:
     test_file("../../fireplace/features/footer/footer.astra")
     test_file("../../fireplace/features/narrative/narrative.astra")
 
-    print("=== template + tokens parse smoke ===")
+    print_line("=== template + tokens parse smoke ===")
     test_source("template_basic", "template greeting(name) = \"hello, \" + name\n")
     test_source("template_multi_param", "template stat(label, value) = label + \": \" + value\n")
     test_source("tokens_flat", "tokens color:\n  bg: \"#141319\"\n  accent: \"#E8956A\"\n")
     test_source("tokens_ints", "tokens space:\n  xs: 4\n  sm: 8\n  md: 12\n  lg: 16\n")
     test_source("mixed_decls", "tokens color:\n  bg: \"#0d0d0f\"\n\ntemplate pill(text) = text\n\nstate hp: int = 100\n")
 
-    print("=== check design-tokens error line ===")
+    print_line("=== check design-tokens error line ===")
     dt_src = read_file("../../atlas/packages/design-tokens.astra")
     dt_result = compile_parse_result(dt_src)
-    print("design-tokens ok:")
-    print(dt_result.ok)
-    print("design-tokens err line:")
-    print(dt_result.error.line)
-    print("design-tokens err msg:")
-    print(dt_result.error.message)
-    print("design-tokens token_blocks:")
-    print(len(dt_result.token_blocks))
+    print_line("design-tokens ok:")
+    print_line(dt_result.ok)
+    print_line("design-tokens err line:")
+    print_line(dt_result.error.line)
+    print_line("design-tokens err msg:")
+    print_line(dt_result.error.message)
+    print_line("design-tokens token_blocks:")
+    print_line(length(dt_result.token_blocks))
 
-    print("=== atlas design-tokens + editor-templates parse ===")
+    print_line("=== atlas design-tokens + editor-templates parse ===")
     test_file("../../atlas/packages/design-tokens.astra")
     test_file("../../atlas/packages/editor-templates.astra")
     test_file("../../atlas/packages/widgets.astra")
@@ -74,12 +70,12 @@ fn main() -> int:
     # Detail: is on Init parsed as a handler rule?
     src_editor_shell = read_file("../../atlas-editor/features/shell/shell.astra")
     pr_shell = compile_parse_result(src_editor_shell)
-    print("shell rules count:")
-    print(len(pr_shell.rules))
-    for r in pr_shell.rules:
-        print("  rule name / trigger:")
-        print(r.name)
-        print(r.trigger)
+    print_line("shell rules count:")
+    print_line(length(pr_shell.rules))
+    loop r in pr_shell.rules:
+        print_line("  rule name / trigger:")
+        print_line(r.name)
+        print_line(r.trigger)
 
     # Full concatenated bundle (as atlas sees it — packages + shell).
     widgets_src = read_file("../../atlas/packages/widgets.astra")
@@ -87,68 +83,68 @@ fn main() -> int:
     templates_src = read_file("../../atlas/packages/editor-templates.astra")
     # Just widgets + design-tokens (without templates, without shell).
     concat1 = widgets_src + "\n" + dtokens_src
-    print("=== widgets + design-tokens ===")
+    print_line("=== widgets + design-tokens ===")
     pr1 = compile_parse_result(concat1)
-    print("ok:")
-    print(pr1.ok)
-    print("err line:")
-    print(pr1.error.line)
-    print("err msg:")
-    print(pr1.error.message)
+    print_line("ok:")
+    print_line(pr1.ok)
+    print_line("err line:")
+    print_line(pr1.error.line)
+    print_line("err msg:")
+    print_line(pr1.error.message)
 
     # widgets + design-tokens + templates
     concat2 = widgets_src + "\n" + dtokens_src + "\n" + templates_src
-    print("=== + editor-templates ===")
+    print_line("=== + editor-templates ===")
     pr2 = compile_parse_result(concat2)
-    print("ok:")
-    print(pr2.ok)
-    print("err line:")
-    print(pr2.error.line)
-    print("err msg:")
-    print(pr2.error.message)
+    print_line("ok:")
+    print_line(pr2.ok)
+    print_line("err line:")
+    print_line(pr2.error.line)
+    print_line("err msg:")
+    print_line(pr2.error.message)
 
-    print("=== Panel primitive parse smoke ===")
+    print_line("=== Panel primitive parse smoke ===")
     # Panel is defined in atlas/packages/widgets.astra — the parser
     # doesn't know it, but `create Panel ...` uses the universal
     # key:value attribute syntax so it parses like any other type.
     src_panel_text = "on Init():\n    create Panel x: 10, y: 20, text: \"hello\", color: \"#EDEBE4\"\n"
     parse_pt = compile_parse_result(src_panel_text)
-    print("panel text parse ok:")
-    print(parse_pt.ok)
-    print("panel text err msg:")
-    print(parse_pt.error.message)
-    print("panel text rules:")
-    print(len(parse_pt.rules))
+    print_line("panel text parse ok:")
+    print_line(parse_pt.ok)
+    print_line("panel text err msg:")
+    print_line(parse_pt.error.message)
+    print_line("panel text rules:")
+    print_line(length(parse_pt.rules))
     src_panel_button = "on Init():\n    create Panel x: 0, y: 0, w: 120, h: 32, role: \"button\", code: 1, text: \"click\"\n"
     parse_pb = compile_parse_result(src_panel_button)
-    print("panel button parse ok:")
-    print(parse_pb.ok)
-    print("panel button err msg:")
-    print(parse_pb.error.message)
+    print_line("panel button parse ok:")
+    print_line(parse_pb.ok)
+    print_line("panel button err msg:")
+    print_line(parse_pb.error.message)
     src_panel_container = "on Init():\n    create Panel x: 0, y: 0, layout: \"vertical\", gap: 8, name: \"stack\"\n    create Panel parent: \"stack\", text: \"row 1\"\n    create Panel parent: \"stack\", text: \"row 2\"\n"
     parse_pc = compile_parse_result(src_panel_container)
-    print("panel container parse ok:")
-    print(parse_pc.ok)
-    print("panel container err msg:")
-    print(parse_pc.error.message)
-    print("panel container rules:")
-    print(len(parse_pc.rules))
+    print_line("panel container parse ok:")
+    print_line(parse_pc.ok)
+    print_line("panel container err msg:")
+    print_line(parse_pc.error.message)
+    print_line("panel container rules:")
+    print_line(length(parse_pc.rules))
 
-    print("=== template invocation via fn machinery ===")
+    print_line("=== template invocation via fn machinery ===")
     # Templates desugar to functions — `compile` should merge them into
     # `functions`, then eval-call can find them by name. The regression
     # test just confirms the merge happens; deeper eval is exercised by
     # the fireplace bundle set above.
     src_add = "template add_one(n) = n + 1\n"
     parse_add = compile_parse_result(src_add)
-    print("parsed templates:")
-    print(len(parse_add.templates))
+    print_line("parsed templates:")
+    print_line(length(parse_add.templates))
     templates_out = compiled_templates(src_add)
-    print("compiled_templates roundtrip:")
-    print(len(templates_out))
+    print_line("compiled_templates roundtrip:")
+    print_line(length(templates_out))
     # Confirm the template is reachable as a function in the compiled result.
     ok_str = "OK"
-    print(ok_str)
+    print_line(ok_str)
 
-    print("=== done ===")
+    print_line("=== done ===")
     0

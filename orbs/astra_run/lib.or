@@ -2,7 +2,7 @@
 #
 # `run(source, name, args)` finds the plain rule named `name` and
 # evaluates it.  `dispatch(source, event, args)` finds every `on Event`
-# handler and merges their effects — the reactive entry point cubsy
+# handler and merges their effects — the reactive entry point a game
 # uses to wire user input to .astra scripts. `tick(source, ctx, prev)`
 # fires every `when EXPR: body` rule on the false→true edge.
 #
@@ -10,34 +10,26 @@
 # are forwarded to eval transparently — rules call them via expression
 # `Call(name, args)` without any runtime ceremony.
 
-use astra_value
-use astra_outcome
-use astra_ast
-use astra_lexer
-use astra_parser
-use astra_eval
-use astra_check
-use bytes
 use log
 
-pub extern fn orion_arena_active() -> int
-pub extern fn orion_arena_on() -> int
-pub extern fn orion_arena_off() -> int
-pub extern fn orion_arena_reset() -> int
-pub extern fn orion_persist_on() -> int
-pub extern fn orion_persist_off() -> int
+public external define orion_arena_active() -> int
+public external define orion_arena_on() -> int
+public external define orion_arena_off() -> int
+public external define orion_arena_reset() -> int
+public external define orion_persist_on() -> int
+public external define orion_persist_off() -> int
 
 # What `compile` produces — rules, helper functions, evaluated consts
 # and component declarations (the ECS auto-pack schema).
-data Compiled: rules: [Rule], functions: [Function], consts: [Binding], components: [ComponentDecl], tests: [TestCase]
+type Compiled: rules: [Rule], functions: [Function], consts: [Binding], components: [ComponentDecl], tests: [TestCase], enum_states: [EnumState]
 
 # Lex + parse + (MVP: skip check) + evaluate the first rule by NAME.
 # Errors at any stage collapse to an empty Outcome — atlas pipes silent
 # refusals through, exactly how the Rust impl handles failed guards.
-pub fn run(source: Text, rule_name: Text, args: [Value]) -> Outcome:
+public define run(source: text, rule_name: text, args: [Value]) -> Outcome:
     c = compile(source)
     target = find_named_rule(c.rules, rule_name)
-    if len(target.name) == 0:
+    if length(target.name) is 0:
         return empty()
     run_rule_args_ctx(target, args, c.consts, c.functions)
 
@@ -47,90 +39,90 @@ pub fn run(source: Text, rule_name: Text, args: [Value]) -> Outcome:
 # Lets Orion-side hosts call into astra-defined helpers for pixel math,
 # piece catalog lookups, etc. — single source of truth in the .astra
 # file, host stays a thin invoker.
-pub fn eval_fn(source: Text, fn_name: Text, args: [Value]) -> Value:
+public define eval_fn(source: text, fn_name: text, args: [Value]) -> Value:
     c = compile(source)
     f = find_fn(c.functions, fn_name)
-    if f.name == "":
+    if f.name is "":
         NoneV
     else:
         env = bind_call_params(f.params, args, 0, c.consts)
         eval_in_env(f.body, env, c.functions)
 
-fn find_fn(funcs: [Function], name: Text) -> Function:
-    n = len(funcs)
-    mut found = Function{name: "", params: [], return_type: "", body: LitInt(0)}
-    for i in 0..<n:
-        f = at(funcs, i)
-        if f.name == name:
+define find_fn(funcs: [Function], name: text) -> Function:
+    n = length(funcs)
+    edit found = Function{name: "", params: [], return_type: "", body: LitInt(0)}
+    loop i in 0 until n:
+        f = funcs[i]
+        if f.name is name:
             found = f
     found
 
-fn bind_call_params(params: [Param], args: [Value], i: int, acc: [Binding]) -> [Binding]:
-    if i >= len(params):
+define bind_call_params(params: [Param], args: [Value], i: number, acc: [Binding]) -> [Binding]:
+    if i >= length(params):
         acc
     else:
-        p = at(params, i)
-        v = if i < len(args) then at(args, i) else NoneV
-        bind_call_params(params, args, i + 1, push(acc, Binding{name: p.name, value: v}))
+        p = params[i]
+        v = if i < length(args) then args[i] else NoneV
+        bind_call_params(params, args, i + 1, append(acc, Binding{name: p.name, value: v}))
 
-pub fn dispatch(source: Text, event: Text, args: [Value]) -> Outcome:
+public define dispatch(source: text, event: text, args: [Value]) -> Outcome:
     dispatch_ctx(source, event, args, [])
 
 # Dispatch with extra ctx bindings the handler body can reference as
 # free names (e.g. `tray`, `blocks`). atlas_astra::astra_event_ctx
 # auto-injects `tick`.
-pub fn dispatch_ctx(source: Text, event: Text, args: [Value], ctx: [Binding]) -> Outcome:
+public define dispatch_ctx(source: text, event: text, args: [Value], ctx: [Binding]) -> Outcome:
     dispatch_with(compile(source), "", event, args, ctx)
 
 # Short-key twin: dispatch-hot callers pass a stable bundle id so
 # the cache lookup is a ~15-byte compare instead of rebuilding and
 # comparing the whole source per call (6us/hit on a big bundle —
 # a double-digit share of a dirty sims frame across the fixpoint).
-pub fn dispatch_ctx_c(cid: Text, source: Text, event: Text, args: [Value], ctx: [Binding]) -> Outcome:
+public define dispatch_ctx_c(cid: text, source: text, event: text, args: [Value], ctx: [Binding]) -> Outcome:
     dispatch_with(compile_c(cid, source), cid, event, args, ctx)
 
-fn dispatch_with(c: Compiled, cid: Text, event: Text, args: [Value], ctx: [Binding]) -> Outcome:
+define dispatch_with(c: Compiled, cid: text, event: text, args: [Value], ctx: [Binding]) -> Outcome:
     full_ctx = merge_bindings(c.consts, ctx)
     q_on = slot_has("astra:quar_on")
     # effects is owned (fresh []) until returned — in-place merge.
-    mut effects = []
-    mut ri = 0
-    for r in c.rules:
-        if r.trigger == event:
+    edit effects = []
+    edit ri = 0
+    loop r in c.rules:
+        if r.trigger is event:
             rid = rule_id(cid, r.name, event, ri)
             ri = ri + 1
             if not (q_on and slot_has("astra:quar:" + rid)):
                 orion_crumb_rule(rid)
                 outcome = run_rule_args_ctx(r, args, full_ctx, c.functions)
-                for e in outcome.effects:
-                    effects = push_mut(effects, e)
+                loop e in outcome.effects:
+                    effects = append(effects, e)
     Outcome{effects: effects, reads: []}
 
 # A rule's identity for crumbs and quarantine: its own name when it
 # has one, else its position among same-trigger rules (source order —
 # stable per compile; shifts on script edits, which a session-lived
 # quarantine tolerates). The parser stores the trigger AS the name for
-# the `on Event():` form, so name==trigger means anonymous too.
-fn rule_id(cid: Text, name: Text, trig: Text, i: int) -> Text:
-    if name == "" or name == trig then "{cid}/{trig}#{i}" else "{cid}/{name}"
+# the `on Event():` form, so name is trigger means anonymous too.
+define rule_id(cid: text, name: text, trig: text, i: number) -> text:
+    if name is "" or name is trig then "{cid}/{trig}#{i}" else "{cid}/{name}"
 
 # Start from a fresh list — `mut out = a` would alias the cached consts
 # and an in-place push would then append arena-lived ctx bindings INTO
 # the compile cache. That was the wandering dangling-cache crash.
 # push_mut is audited here BECAUSE out starts owned from [].
-fn merge_bindings(a: [Binding], b: [Binding]) -> [Binding]:
-    mut out = []
-    for binding in a:
-        out = push_mut(out, binding)
-    for binding in b:
-        out = push_mut(out, binding)
+define merge_bindings(a: [Binding], b: [Binding]) -> [Binding]:
+    edit out = []
+    loop binding in a:
+        out = append(out, binding)
+    loop binding in b:
+        out = append(out, binding)
     out
 
 # Result of a reactive tick. `truths` is parallel to the `when` rules in
 # source order — true means "condition currently holds". The host stores
 # this between ticks and passes it back as `prev_truths` so we can
 # detect the false→true edge that fires the body.
-pub data TickOutcome: outcome: Outcome, truths: [bool]
+public type TickOutcome: outcome: Outcome, truths: [truth]
 
 # Evaluate every `when EXPR: body` rule in `source` against the supplied
 # context bindings. Fires the body on the false→true edge only —
@@ -140,31 +132,31 @@ pub data TickOutcome: outcome: Outcome, truths: [bool]
 #
 # Out-of-bounds prev_truths entries default to `false` (cold start), so
 # any condition that's true on first tick fires once.
-pub fn tick(source: Text, ctx: [Binding], prev_truths: [bool]) -> TickOutcome:
+public define tick(source: text, ctx: [Binding], prev_truths: [truth]) -> TickOutcome:
     tick_with(compile(source), "", ctx, prev_truths)
 
-pub fn tick_c(cid: Text, source: Text, ctx: [Binding], prev_truths: [bool]) -> TickOutcome:
+public define tick_c(cid: text, source: text, ctx: [Binding], prev_truths: [truth]) -> TickOutcome:
     tick_with(compile_c(cid, source), cid, ctx, prev_truths)
 
-fn tick_with(c: Compiled, cid: Text, ctx: [Binding], prev_truths: [bool]) -> TickOutcome:
+define tick_with(c: Compiled, cid: text, ctx: [Binding], prev_truths: [truth]) -> TickOutcome:
     full_ctx = merge_bindings(c.consts, ctx)
     q_on = slot_has("astra:quar_on")
-    mut effects = []
-    mut truths = []
-    mut idx = 0
-    for r in c.rules:
+    edit effects = []
+    edit truths = []
+    edit idx = 0
+    loop r in c.rules:
         # A view/derive is a standing definition, not an event: recompute
         # it every pass with no edge test and no truths slot (the truths
         # bitmask is indexed by `$when` order — `idx` must not advance).
-        if r.trigger == "$derive":
+        if r.trigger is "$derive":
             outcome = run_rule_env(r, full_ctx, c.functions)
-            for e in outcome.effects:
-                effects = push_mut(effects, e)
-        if r.trigger == "$when":
+            loop e in outcome.effects:
+                effects = append(effects, e)
+        if r.trigger is "$when":
             v = eval_in_env(r.condition, full_ctx, c.functions)
             now = value_is_truthy(v)
             was = prev_truth_at(prev_truths, idx)
-            truths = push_mut(truths, now)
+            truths = append(truths, now)
             if now and not was:
                 rid = rule_id(cid, r.name, "$when", idx)
                 # Cross-bundle patches: if this is a `cmd:X` and any
@@ -174,30 +166,30 @@ fn tick_with(c: Compiled, cid: Text, ctx: [Binding], prev_truths: [bool]) -> Tic
                 if not shadowed and not (q_on and slot_has("astra:quar:" + rid)):
                     orion_crumb_rule(rid)
                     outcome = run_rule_env(r, full_ctx, c.functions)
-                    for e in outcome.effects:
-                        effects = push_mut(effects, e)
+                    loop e in outcome.effects:
+                        effects = append(effects, e)
             idx = idx + 1
     TickOutcome{outcome: Outcome{effects: effects, reads: []}, truths: truths}
 
-fn prev_truth_at(prev: [bool], i: int) -> bool:
-    if i < 0 or i >= len(prev):
+define prev_truth_at(prev: [truth], i: number) -> truth:
+    if i < 0 or i >= length(prev):
         false
     else:
-        at(prev, i)
+        prev[i]
 
 # Expose parse result so hosts can inspect component/entity declarations
 # without depending directly on astra_lexer / astra_parser.
-pub fn compile_parse_result(source: Text) -> ParseResult:
+public define compile_parse_result(source: text) -> ParseResult:
     lex_result = lex(source)
     if not lex_result.ok:
         return ParseResult{rules: [], functions: [], entities: [], consts: [], components: [], uses: [], tests: [], sources: [], ok: false, error: ParseError{message: lex_result.error.message, line: lex_result.error.line}}
     parse(lex_result.tokens)
 
-pub extern fn orion_ledger_tag(name: Text) -> int
-pub extern fn orion_ledger_off() -> int
-pub extern fn orion_crumb_rule(rule: Text)
+public external define orion_ledger_tag(name: text) -> int
+public external define orion_ledger_off() -> int
+public external define orion_crumb_rule(rule: text)
 
-pub fn compile(source: Text) -> Compiled:
+public define compile(source: text) -> Compiled:
     # Memoise on source text — the same script bundle is dispatched
     # every frame (60Hz) so lex+parse dominates without a cache.
     # Slot map keys on source directly; the runtime hashes the String
@@ -211,9 +203,9 @@ pub fn compile(source: Text) -> Compiled:
     # the reset. Only the live tree is evacuated to persist below,
     # with the arena OFF (the arena outranks the persist scope while
     # on). Persisting the whole compile cost 4.4MB of permanent heap
-    # for cubsy's 10KB of scripts; the live tree is a fraction of it.
+    # for a game's 10KB of scripts; the live tree is a fraction of it.
     was_on = orion_arena_active()
-    if was_on == 0:
+    if was_on is 0:
         orion_arena_on()
     fresh = compile_fresh(source)
     orion_arena_off()
@@ -223,246 +215,246 @@ pub fn compile(source: Text) -> Compiled:
     slot_set(cache_key, safe)
     orion_ledger_off()
     orion_persist_off()
-    if was_on == 1:
+    if was_on is 1:
         orion_arena_on()
-    if was_on == 0:
+    if was_on is 0:
         # We owned the epoch: reclaim the garbage now. Arena content is
         # dead whenever the arena is off (epochs reset when they close).
         orion_arena_reset()
     safe
 
-fn compiled_copy(c: Compiled) -> Compiled:
-    Compiled{rules: ast_copy_rules(c.rules), functions: ast_copy_functions(c.functions), consts: copy_bindings(c.consts), components: ast_copy_components(c.components), tests: ast_copy_tests(c.tests)}
+define compiled_copy(c: Compiled) -> Compiled:
+    Compiled{rules: ast_copy_rules(c.rules), functions: ast_copy_functions(c.functions), consts: copy_bindings(c.consts), components: ast_copy_components(c.components), tests: ast_copy_tests(c.tests), enum_states: c.enum_states}
 
-fn copy_bindings(bs: [Binding]) -> [Binding]:
-    n = len(bs)
-    mut out = []
-    for i in 0..<n:
+define copy_bindings(bs: [Binding]) -> [Binding]:
+    n = length(bs)
+    edit out = []
+    loop i in 0 until n:
         b = binding_at(bs, i)
-        out = push_mut(out, Binding{name: "" + b.name, value: value_copy(b.value)})
+        out = append(out, Binding{name: "" + b.name, value: value_copy(b.value)})
     out
 
-fn binding_at(bs: [Binding], i: int) -> Binding:
-    at(bs, i)
+define binding_at(bs: [Binding], i: number) -> Binding:
+    bs[i]
 
 # A bundle that fails to compile becomes an EMPTY program (rules just
 # stop firing) — say WHY on the error channel instead of silently
 # rendering nothing. astra_check gates hot reload the same way.
-fn compile_fresh(source: Text) -> Compiled:
+define compile_fresh(source: text) -> Compiled:
     lex_result = lex(source)
     if not lex_result.ok:
         le = lex_result.error
         lmsg = le.message
         lline = le.line
         error("astra", "lex failed line {lline}: {lmsg}")
-        return Compiled{rules: [], functions: [], consts: [], components: [], tests: []}
+        return Compiled{rules: [], functions: [], consts: [], components: [], tests: [], enum_states: []}
     parse_result = parse(lex_result.tokens)
     if not parse_result.ok:
         pe = parse_result.error
         pmsg = pe.message
         pline = pe.line
         error("astra", "parse failed line {pline}: {pmsg}")
-        return Compiled{rules: [], functions: [], consts: [], components: [], tests: []}
+        return Compiled{rules: [], functions: [], consts: [], components: [], tests: [], enum_states: []}
     # Templates desugar to functions — same shape (name, params, body Expr),
     # only the decl keyword differs. Merging them into `functions` lets
     # `eval_user_call` invoke templates without a separate registry.
     all_functions = template_functions_merged(parse_result.functions, parse_result.templates)
     consts = eval_consts(parse_result.consts, all_functions, 0, [])
-    Compiled{rules: parse_result.rules, functions: all_functions, consts: consts, components: parse_result.components, tests: parse_result.tests}
+    Compiled{rules: parse_result.rules, functions: all_functions, consts: consts, components: parse_result.components, tests: parse_result.tests, enum_states: parse_result.enum_states}
 
-fn template_functions_merged(fns: [Function], tmpls: [TemplateDecl]) -> [Function]:
-    mut out = fns
-    for i in 0..<len(tmpls):
+define template_functions_merged(fns: [Function], tmpls: [TemplateDecl]) -> [Function]:
+    edit out = fns
+    loop i in 0 until length(tmpls):
         t = template_at_local(tmpls, i)
-        out = push_mut(out, Function{name: t.name, params: t.params, return_type: "", body: t.body})
+        out = append(out, Function{name: t.name, params: t.params, return_type: "", body: t.body})
     out
 
-fn template_at_local(xs: [TemplateDecl], i: int) -> TemplateDecl:
-    at(xs, i)
+define template_at_local(xs: [TemplateDecl], i: number) -> TemplateDecl:
+    xs[i]
 
 # Component declarations from the memoized compile — the ECS auto-pack
 # path must not re-parse the bundle per dispatch.
-pub fn compiled_components(source: Text) -> [ComponentDecl]:
+public define compiled_components(source: text) -> [ComponentDecl]:
     c = compile(source)
     c.components
 
 # Source declarations — extracted from a raw parse (bypasses the
 # Compiled cache which drops them). Called once per bundle at boot.
 # Text copies keep names/paths persistent past the arena reset.
-pub fn compiled_sources(source: Text) -> [SourceDecl]:
+public define compiled_sources(source: text) -> [SourceDecl]:
     pr = compile_parse_result(source)
-    n = len(pr.sources)
-    mut out = []
-    for i in 0..<n:
+    n = length(pr.sources)
+    edit out = []
+    loop i in 0 until n:
         s = source_at(pr.sources, i)
-        out = push_mut(out, SourceDecl{name: "" + s.name, kind: "" + s.kind, path: "" + s.path, refresh_ms: s.refresh_ms})
+        out = append(out, SourceDecl{name: "" + s.name, kind: "" + s.kind, path: "" + s.path, refresh_ms: s.refresh_ms})
     out
 
-fn source_at(xs: [SourceDecl], i: int) -> SourceDecl:
-    at(xs, i)
+define source_at(xs: [SourceDecl], i: number) -> SourceDecl:
+    xs[i]
 
 # Animation declarations — same evacuation pattern as sources.
-pub fn compiled_animations(source: Text) -> [AnimationDecl]:
+public define compiled_animations(source: text) -> [AnimationDecl]:
     pr = compile_parse_result(source)
-    n = len(pr.animations)
-    mut out = []
-    for i in 0..<n:
+    n = length(pr.animations)
+    edit out = []
+    loop i in 0 until n:
         a = animation_at(pr.animations, i)
-        out = push_mut(out, AnimationDecl{name: "" + a.name, from_val: a.from_val, to_val: a.to_val, duration_ms: a.duration_ms, trigger_name: "" + a.trigger_name, trigger_value: a.trigger_value, easing: "" + a.easing})
+        out = append(out, AnimationDecl{name: "" + a.name, from_val: a.from_val, to_val: a.to_val, duration_ms: a.duration_ms, trigger_name: "" + a.trigger_name, trigger_value: a.trigger_value, easing: "" + a.easing})
     out
 
-fn animation_at(xs: [AnimationDecl], i: int) -> AnimationDecl:
-    at(xs, i)
+define animation_at(xs: [AnimationDecl], i: number) -> AnimationDecl:
+    xs[i]
 
 # Rule list from the memoized compile — atlas uses this at boot to
 # scan for `patch:X` names and populate the cross-bundle patch index.
-pub fn compiled_rules(source: Text) -> [Rule]:
+public define compiled_rules(source: text) -> [Rule]:
     c = compile(source)
     c.rules
 
 # Asset declarations — same evacuation pattern.
-pub fn compiled_assets(source: Text) -> [AssetDecl]:
+public define compiled_assets(source: text) -> [AssetDecl]:
     pr = compile_parse_result(source)
-    n = len(pr.assets)
-    mut out = []
-    for i in 0..<n:
+    n = length(pr.assets)
+    edit out = []
+    loop i in 0 until n:
         a = asset_at(pr.assets, i)
-        out = push_mut(out, AssetDecl{name: "" + a.name, kind: "" + a.kind, path: "" + a.path})
+        out = append(out, AssetDecl{name: "" + a.name, kind: "" + a.kind, path: "" + a.path})
     out
 
-fn asset_at(xs: [AssetDecl], i: int) -> AssetDecl:
-    at(xs, i)
+define asset_at(xs: [AssetDecl], i: number) -> AssetDecl:
+    xs[i]
 
 # Type→traits mapping: for each `type X uses A, B, C` in this bundle,
 # the (X, [A, B, C]) pair. Atlas aggregates across bundles to answer
 # trait-queries (`each e in Movable`).
-pub fn compiled_type_traits(source: Text) -> [TypeTraits]:
+public define compiled_type_traits(source: text) -> [TypeTraits]:
     pr = compile_parse_result(source)
-    n = len(pr.type_traits)
-    mut out = []
-    for i in 0..<n:
+    n = length(pr.type_traits)
+    edit out = []
+    loop i in 0 until n:
         tt = type_traits_at(pr.type_traits, i)
-        mut copied_traits = []
-        for tname in tt.traits:
-            copied_traits = push_mut(copied_traits, "" + tname)
-        out = push_mut(out, TypeTraits{type_name: "" + tt.type_name, traits: copied_traits})
+        edit copied_traits = []
+        loop tname in tt.traits:
+            copied_traits = append(copied_traits, "" + tname)
+        out = append(out, TypeTraits{type_name: "" + tt.type_name, traits: copied_traits})
     out
 
-fn type_traits_at(xs: [TypeTraits], i: int) -> TypeTraits:
-    at(xs, i)
+define type_traits_at(xs: [TypeTraits], i: number) -> TypeTraits:
+    xs[i]
 
 # Template declarations — parameterised fragments. Atlas registers
 # each by name; runtime callers (`items:` on Panel) invoke by name and
 # bind args positionally. Body Expr is kept live for eval-time expansion.
-pub fn compiled_templates(source: Text) -> [TemplateDecl]:
+public define compiled_templates(source: text) -> [TemplateDecl]:
     pr = compile_parse_result(source)
-    n = len(pr.templates)
-    mut out = []
-    for i in 0..<n:
+    n = length(pr.templates)
+    edit out = []
+    loop i in 0 until n:
         t = template_at(pr.templates, i)
-        mut copied_params = []
-        for param in t.params:
-            copied_params = push_mut(copied_params, Param{name: "" + param.name, type_name: "" + param.type_name})
-        out = push_mut(out, TemplateDecl{name: "" + t.name, params: copied_params, body: t.body})
+        edit copied_params = []
+        loop param in t.params:
+            copied_params = append(copied_params, Param{name: "" + param.name, type_name: "" + param.type_name})
+        out = append(out, TemplateDecl{name: "" + t.name, params: copied_params, body: t.body})
     out
 
-fn template_at(xs: [TemplateDecl], i: int) -> TemplateDecl:
-    at(xs, i)
+define template_at(xs: [TemplateDecl], i: number) -> TemplateDecl:
+    xs[i]
 
 # Design-token blocks — `tokens NS: key: value, ...`. Atlas resolver
 # joins `namespace + key` (e.g. `color.bg`) when a widget consumes
 # `style:` or `layout:` attributes. Values are Expr — resolved lazily
 # by the resolver so token refs can chain (`layout.card.padding: md`).
-pub fn compiled_token_blocks(source: Text) -> [TokensDecl]:
+public define compiled_token_blocks(source: text) -> [TokensDecl]:
     pr = compile_parse_result(source)
-    n = len(pr.token_blocks)
-    mut out = []
-    for i in 0..<n:
+    n = length(pr.token_blocks)
+    edit out = []
+    loop i in 0 until n:
         tb = token_block_at(pr.token_blocks, i)
-        mut copied_entries = []
-        for entry in tb.entries:
-            copied_entries = push_mut(copied_entries, TokenEntry{key: "" + entry.key, value: entry.value})
-        out = push_mut(out, TokensDecl{namespace: "" + tb.namespace, entries: copied_entries})
+        edit copied_entries = []
+        loop entry in tb.entries:
+            copied_entries = append(copied_entries, TokenEntry{key: "" + entry.key, value: entry.value})
+        out = append(out, TokensDecl{namespace: "" + tb.namespace, entries: copied_entries})
     out
 
-fn token_block_at(xs: [TokensDecl], i: int) -> TokensDecl:
-    at(xs, i)
+define token_block_at(xs: [TokensDecl], i: number) -> TokensDecl:
+    xs[i]
 
 # Style prop-bundles — `style NAME:` then indented `key: value`. Atlas
 # loads these globally and merges them into a create's payload at spawn,
 # so a style declared in one bundle styles a widget in another.
-pub fn compiled_styles(source: Text) -> [StyleDecl]:
+public define compiled_styles(source: text) -> [StyleDecl]:
     pr = compile_parse_result(source)
-    n = len(pr.styles)
-    mut out = []
-    for i in 0..<n:
-        s = at(pr.styles, i)
-        out = push_mut(out, StyleDecl{name: "" + s.name, fields: s.fields})
+    n = length(pr.styles)
+    edit out = []
+    loop i in 0 until n:
+        s = pr.styles[i]
+        out = append(out, StyleDecl{name: "" + s.name, fields: s.fields})
     out
 
 # Local byte-comparison helpers — astra_run's Orbit.toml doesn't pull
 # in `text`, and the byte primitives are already reachable through the
 # lexer chain. Kept locally so a later `use text` won't shadow.
-fn rule_name_starts_with_local(name: Text, prefix: Text) -> bool:
-    name_bytes = bytes_from_text(name)
-    prefix_bytes = bytes_from_text(prefix)
-    name_len = len(name_bytes)
-    prefix_len = len(prefix_bytes)
+define rule_name_starts_with_local(name: text, prefix: text) -> truth:
+    name_bytes = bytes_of(name)
+    prefix_bytes = bytes_of(prefix)
+    name_len = length(name_bytes)
+    prefix_len = length(prefix_bytes)
     if prefix_len > name_len:
         false
     else:
-        mut equal_so_far = true
-        for ci in 0..<prefix_len:
-            if at(name_bytes, ci) != at(prefix_bytes, ci):
+        edit equal_so_far = true
+        loop ci in 0 until prefix_len:
+            if name_bytes[ci] is not prefix_bytes[ci]:
                 equal_so_far = false
         equal_so_far
 
-fn rule_name_strip_prefix_local(name: Text, prefix: Text) -> Text:
-    name_bytes = bytes_from_text(name)
-    prefix_bytes = bytes_from_text(prefix)
-    name_len = len(name_bytes)
-    prefix_len = len(prefix_bytes)
+define rule_name_strip_prefix_local(name: text, prefix: text) -> text:
+    name_bytes = bytes_of(name)
+    prefix_bytes = bytes_of(prefix)
+    name_len = length(name_bytes)
+    prefix_len = length(prefix_bytes)
     if prefix_len > name_len:
         name
     else:
-        mut equal_so_far = true
-        for ci in 0..<prefix_len:
-            if at(name_bytes, ci) != at(prefix_bytes, ci):
+        edit equal_so_far = true
+        loop ci in 0 until prefix_len:
+            if name_bytes[ci] is not prefix_bytes[ci]:
                 equal_so_far = false
         if not equal_so_far:
             name
         else:
-            mut suffix = []
-            for ci in prefix_len..<name_len:
-                suffix = push_mut(suffix, at(name_bytes, ci))
-            bytes_to_text(suffix)
+            edit suffix = []
+            loop ci in prefix_len until name_len:
+                suffix = append(suffix, name_bytes[ci])
+            text_of(suffix)
 
-fn eval_consts(decls: [ConstDecl], funcs: [Function], i: int, acc: [Binding]) -> [Binding]:
-    if i >= len(decls):
+define eval_consts(decls: [ConstDecl], funcs: [Function], i: number, acc: [Binding]) -> [Binding]:
+    if i >= length(decls):
         acc
     else:
-        d = at(decls, i)
+        d = decls[i]
         v = eval_in_env(d.value, acc, funcs)
-        eval_consts(decls, funcs, i + 1, push(acc, Binding{name: d.name, value: v}))
+        eval_consts(decls, funcs, i + 1, append(acc, Binding{name: d.name, value: v}))
 
 # Find first plain rule (no trigger) by name. Sentinel: empty Rule.
-fn find_named_rule(rules: [Rule], name: Text) -> Rule:
-    n = len(rules)
-    mut found = empty_sentinel()
-    for i in 0..<n:
-        r = at(rules, i)
-        if r.name == name and len(r.trigger) == 0:
+define find_named_rule(rules: [Rule], name: text) -> Rule:
+    n = length(rules)
+    edit found = empty_sentinel()
+    loop i in 0 until n:
+        r = rules[i]
+        if r.name is name and length(r.trigger) is 0:
             found = r
     found
 
-fn empty_sentinel() -> Rule:
+define empty_sentinel() -> Rule:
     Rule{name: "", params: [], body: [], trigger: "", condition: LitBool(true)}
 
 # Warm the compile cache. compile() owns its epoch/evacuation dance —
 # safe to call from anywhere (load, reload poll, mid-dispatch).
-pub fn astra_warm(source: Text) -> int:
+public define astra_warm(source: text) -> number:
     c = compile(source)
-    len(c.rules)
+    length(c.rules)
 
 # ---- Short-key cache layer ----
 # The content cache stays correct but its key IS the source: every
@@ -470,7 +462,7 @@ pub fn astra_warm(source: Text) -> int:
 # bind bundle -> tree ONCE under a short stable id; (re)load is the
 # invalidation point — astra_warm_c recompiles by CONTENT (an edit
 # misses the content cache) and rebinds the short key.
-pub fn compile_c(cid: Text, source: Text) -> Compiled:
+public define compile_c(cid: text, source: text) -> Compiled:
     tkey = "astra:t:" + cid
     if slot_has(tkey):
         return slot_get(tkey)
@@ -478,25 +470,25 @@ pub fn compile_c(cid: Text, source: Text) -> Compiled:
     store_tree(tkey, c)
     c
 
-pub fn astra_warm_c(cid: Text, source: Text) -> int:
+public define astra_warm_c(cid: text, source: text) -> number:
     c = compile(source)
     store_tree("astra:t:" + cid, c)
-    len(c.rules)
+    length(c.rules)
 
 # The store runs with the arena OFF — the arena outranks persist,
 # and a slot key copied into an open epoch is the wandering
 # dangling-cache crash all over again.
-fn store_tree(tkey: Text, c: Compiled):
+define store_tree(tkey: text, c: Compiled):
     was_on = orion_arena_active()
-    if was_on == 1:
+    if was_on is 1:
         orion_arena_off()
     orion_persist_on()
     slot_set("" + tkey, c)
     orion_persist_off()
-    if was_on == 1:
+    if was_on is 1:
         orion_arena_on()
 
-pub fn compiled_components_c(cid: Text, source: Text) -> [ComponentDecl]:
+public define compiled_components_c(cid: text, source: text) -> [ComponentDecl]:
     c = compile_c(cid, source)
     c.components
 
@@ -507,15 +499,15 @@ pub fn compiled_components_c(cid: Text, source: Text) -> [ComponentDecl]:
 # ("which rules write score?"), and the substrate for field-law
 # linting. Locals (params, let, foreach vars) are subtracted.
 
-pub data RuleFacts: rule_name: Text, trigger: Text, reads: [Text], writes: [Text], emits: [Text], spawns: [Text], calls: [Text]
+public type RuleFacts: rule_name: text, trigger: text, reads: [text], writes: [text], emits: [text], spawns: [text], calls: [text]
 
-data FAcc: reads: [Text], writes: [Text], emits: [Text], spawns: [Text], calls: [Text], bound: [Text]
+type FAcc: reads: [text], writes: [text], emits: [text], spawns: [text], calls: [text], bound: [text]
 
-pub fn astra_facts_c(cid: Text, source: Text) -> [RuleFacts]:
+public define astra_facts_c(cid: text, source: text) -> [RuleFacts]:
     c = compile_c(cid, source)
     # A rule's effect is not just its own body — it inherits everything
     # the helper functions it calls read and write. Without this, a
-    # resource touched only inside a helper (cubsy's tray_x_end, read in
+    # resource touched only inside a helper (a game's tray_x_end, read in
     # pixel_to_tray_slot) looks unread, and the scheduler would call two
     # rules independent when they clash through a shared helper. So:
     # facts each function, close them over the call graph, then fold the
@@ -523,84 +515,84 @@ pub fn astra_facts_c(cid: Text, source: Text) -> [RuleFacts]:
     fnames = fn_names(c.functions)
     fbase = fn_facts_all(c.functions)
     fclosed = close_facts(fnames, fbase)
-    n = len(c.rules)
-    mut out = []
-    for i in 0..<n:
+    n = length(c.rules)
+    edit out = []
+    loop i in 0 until n:
         rf = rule_facts(frule_at(c.rules, i))
-        out = push_mut(out, merge_callees(rf, fnames, fclosed))
+        out = append(out, merge_callees(rf, fnames, fclosed))
     out
 
-fn frule_at(rs: [Rule], i: int) -> Rule:
-    at(rs, i)
+define frule_at(rs: [Rule], i: number) -> Rule:
+    rs[i]
 
-fn ffn_at(fs: [Function], i: int) -> Function:
-    at(fs, i)
+define ffn_at(fs: [Function], i: number) -> Function:
+    fs[i]
 
-fn fn_names(fs: [Function]) -> [Text]:
-    n = len(fs)
-    mut out = []
-    for i in 0..<n:
-        out = push_mut(out, ffn_at(fs, i).name)
+define fn_names(fs: [Function]) -> [text]:
+    n = length(fs)
+    edit out = []
+    loop i in 0 until n:
+        out = append(out, ffn_at(fs, i).name)
     out
 
 # Facts for one function body (params are bound, so not reads).
-fn fn_facts_of(f: Function) -> RuleFacts:
-    mut bound = []
-    np = len(f.params)
-    for i in 0..<np:
-        bound = push_mut(bound, fparam_at(f.params, i).name)
+define fn_facts_of(f: Function) -> RuleFacts:
+    edit bound = []
+    np = length(f.params)
+    loop i in 0 until np:
+        bound = append(bound, fparam_at(f.params, i).name)
     a = expr_facts(f.body, FAcc{reads: [], writes: [], emits: [], spawns: [], calls: [], bound: bound})
     RuleFacts{rule_name: f.name, trigger: "fn", reads: a.reads, writes: a.writes, emits: a.emits, spawns: a.spawns, calls: a.calls}
 
-fn fn_facts_all(fs: [Function]) -> [RuleFacts]:
-    n = len(fs)
-    mut out = []
-    for i in 0..<n:
-        out = push_mut(out, fn_facts_of(ffn_at(fs, i)))
+define fn_facts_all(fs: [Function]) -> [RuleFacts]:
+    n = length(fs)
+    edit out = []
+    loop i in 0 until n:
+        out = append(out, fn_facts_of(ffn_at(fs, i)))
     out
 
-fn facts_idx(names: [Text], name: Text) -> int:
-    n = len(names)
-    for i in 0..<n:
-        if text_item(names, i) == name:
+define facts_idx(names: [text], name: text) -> number:
+    n = length(names)
+    loop i in 0 until n:
+        if text_item(names, i) is name:
             return i
     0 - 1
 
-fn union_into(dst: [Text], src: [Text]) -> [Text]:
-    mut out = dst
-    n = len(src)
-    for i in 0..<n:
+define union_into(dst: [text], src: [text]) -> [text]:
+    edit out = dst
+    n = length(src)
+    loop i in 0 until n:
         out = f_add(out, text_item(src, i))
     out
 
 # Fold b's sets into a (union), keeping a's identity.
-fn merge_facts(a: RuleFacts, b: RuleFacts) -> RuleFacts:
+define merge_facts(a: RuleFacts, b: RuleFacts) -> RuleFacts:
     RuleFacts{rule_name: a.rule_name, trigger: a.trigger, reads: union_into(a.reads, b.reads), writes: union_into(a.writes, b.writes), emits: union_into(a.emits, b.emits), spawns: union_into(a.spawns, b.spawns), calls: union_into(a.calls, b.calls)}
 
 # One propagation step: each fn absorbs its direct callees' facts.
-fn close_once(names: [Text], facts: [RuleFacts]) -> [RuleFacts]:
-    n = len(facts)
-    mut out = []
-    for i in 0..<n:
-        mut f = ffacts_at(facts, i)
-        nc = len(f.calls)
-        for k in 0..<nc:
+define close_once(names: [text], facts: [RuleFacts]) -> [RuleFacts]:
+    n = length(facts)
+    edit out = []
+    loop i in 0 until n:
+        edit f = ffacts_at(facts, i)
+        nc = length(f.calls)
+        loop k in 0 until nc:
             ci = facts_idx(names, text_item(f.calls, k))
             if ci >= 0:
                 f = merge_facts(f, ffacts_at(facts, ci))
-        out = push_mut(out, f)
+        out = append(out, f)
     out
 
-fn ffacts_at(fs: [RuleFacts], i: int) -> RuleFacts:
-    at(fs, i)
+define ffacts_at(fs: [RuleFacts], i: number) -> RuleFacts:
+    fs[i]
 
 # Transitive closure by repeated propagation. Union is monotonic and
-# the name set finite, so len(names) passes reach the fixpoint (cycles
+# the name set finite, so length(names) passes reach the fixpoint (cycles
 # converge — union is idempotent).
-fn close_facts(names: [Text], facts: [RuleFacts]) -> [RuleFacts]:
-    mut cur = facts
-    mut pass = 0
-    limit = len(names)
+define close_facts(names: [text], facts: [RuleFacts]) -> [RuleFacts]:
+    edit cur = facts
+    edit pass = 0
+    limit = length(names)
     loop:
         if pass >= limit:
             break
@@ -609,220 +601,220 @@ fn close_facts(names: [Text], facts: [RuleFacts]) -> [RuleFacts]:
     cur
 
 # Fold every called function's closed facts into a rule.
-fn merge_callees(rf: RuleFacts, names: [Text], fclosed: [RuleFacts]) -> RuleFacts:
-    mut f = rf
-    nc = len(rf.calls)
-    for k in 0..<nc:
+define merge_callees(rf: RuleFacts, names: [text], fclosed: [RuleFacts]) -> RuleFacts:
+    edit f = rf
+    nc = length(rf.calls)
+    loop k in 0 until nc:
         ci = facts_idx(names, text_item(rf.calls, k))
         if ci >= 0:
             f = merge_facts(f, ffacts_at(fclosed, ci))
     f
 
-fn rule_facts(r: Rule) -> RuleFacts:
-    mut bound = []
-    np = len(r.params)
-    for i in 0..<np:
+define rule_facts(r: Rule) -> RuleFacts:
+    edit bound = []
+    np = length(r.params)
+    loop i in 0 until np:
         p = fparam_at(r.params, i)
-        bound = push_mut(bound, p.name)
+        bound = append(bound, p.name)
     a0 = FAcc{reads: [], writes: [], emits: [], spawns: [], calls: [], bound: bound}
     a1 = expr_facts(r.condition, a0)
     a2 = stmts_facts(r.body, a1)
     RuleFacts{rule_name: r.name, trigger: r.trigger, reads: a2.reads, writes: a2.writes, emits: a2.emits, spawns: a2.spawns, calls: a2.calls}
 
-fn fparam_at(ps: [Param], i: int) -> Param:
-    at(ps, i)
+define fparam_at(ps: [Param], i: number) -> Param:
+    ps[i]
 
-fn f_has(xs: [Text], x: Text) -> bool:
-    n = len(xs)
-    for i in 0..<n:
-        if text_item(xs, i) == x:
+define f_has(xs: [text], x: text) -> truth:
+    n = length(xs)
+    loop i in 0 until n:
+        if text_item(xs, i) is x:
             return true
     false
 
-fn text_item(xs: [Text], i: int) -> Text:
-    at(xs, i)
+define text_item(xs: [text], i: number) -> text:
+    xs[i]
 
-fn f_add(xs: [Text], x: Text) -> [Text]:
-    if f_has(xs, x) then xs else push(xs, x)
+define f_add(xs: [text], x: text) -> [text]:
+    if f_has(xs, x) then xs else append(xs, x)
 
-fn f_read(a: FAcc, name: Text) -> FAcc:
-    if name == "_" or f_has(a.bound, name) then a else FAcc{reads: f_add(a.reads, name), writes: a.writes, emits: a.emits, spawns: a.spawns, calls: a.calls, bound: a.bound}
+define f_read(a: FAcc, name: text) -> FAcc:
+    if name is "_" or f_has(a.bound, name) then a else FAcc{reads: f_add(a.reads, name), writes: a.writes, emits: a.emits, spawns: a.spawns, calls: a.calls, bound: a.bound}
 
-fn f_callee(a: FAcc, callee: Text) -> FAcc:
+define f_callee(a: FAcc, callee: text) -> FAcc:
     FAcc{reads: a.reads, writes: a.writes, emits: a.emits, spawns: a.spawns, calls: f_add(a.calls, callee), bound: a.bound}
 
-fn f_bind(a: FAcc, name: Text) -> FAcc:
-    FAcc{reads: a.reads, writes: a.writes, emits: a.emits, spawns: a.spawns, calls: a.calls, bound: push(a.bound, name)}
+define f_bind(a: FAcc, name: text) -> FAcc:
+    FAcc{reads: a.reads, writes: a.writes, emits: a.emits, spawns: a.spawns, calls: a.calls, bound: append(a.bound, name)}
 
-fn cq_facts(binder: Text, src: Expr, pred: Expr, a: FAcc) -> FAcc:
+define cq_facts(binder: text, src: Expr, pred: Expr, a: FAcc) -> FAcc:
     expr_facts(pred, f_bind(expr_facts(src, a), binder))
 
-fn letin_facts(name: Text, v: Expr, body: Expr, a: FAcc) -> FAcc:
+define letin_facts(name: text, v: Expr, body: Expr, a: FAcc) -> FAcc:
     expr_facts(body, f_bind(expr_facts(v, a), name))
 
-fn expr_facts(e: Expr, a: FAcc) -> FAcc:
-    match e:
-        VarRef(name) -> f_read(a, name)
-        Binop(_, l, r) -> expr_facts(r, expr_facts(l, a))
-        Unop(_, x) -> expr_facts(x, a)
-        IfExpr(c, t, f) -> expr_facts(f, expr_facts(t, expr_facts(c, a)))
-        Call(callee, args) -> exprs_facts(args, f_callee(a, callee))
-        Field(base, _) -> expr_facts(base, a)
-        CountQuery(binder, src, pred) -> cq_facts(binder, src, pred, a)
-        LetIn(name, v, body) -> letin_facts(name, v, body, a)
-        LitList(xs) -> exprs_facts(xs, a)
-        MapLit(fs) -> fields_facts(fs, a)
-        RangeExpr(lo, hi) -> expr_facts(hi, expr_facts(lo, a))
-        MatchExpr(scrut, arms) -> arms_facts(arms, expr_facts(scrut, a))
-        _ -> a
+define expr_facts(e: Expr, a: FAcc) -> FAcc:
+    choose e:
+        VarRef(name) then f_read(a, name)
+        Binop(_, l, r) then expr_facts(r, expr_facts(l, a))
+        Unop(_, x) then expr_facts(x, a)
+        IfExpr(c, t, f) then expr_facts(f, expr_facts(t, expr_facts(c, a)))
+        Call(callee, args) then exprs_facts(args, f_callee(a, callee))
+        Field(base, _) then expr_facts(base, a)
+        CountQuery(binder, src, pred) then cq_facts(binder, src, pred, a)
+        LetIn(name, v, body) then letin_facts(name, v, body, a)
+        LitList(xs) then exprs_facts(xs, a)
+        MapLit(fs) then fields_facts(fs, a)
+        RangeExpr(lo, hi) then expr_facts(hi, expr_facts(lo, a))
+        MatchExpr(scrut, arms) then arms_facts(arms, expr_facts(scrut, a))
+        _ then a
 
-fn exprs_facts(xs: [Expr], a: FAcc) -> FAcc:
-    n = len(xs)
-    mut acc = a
-    for i in 0..<n:
+define exprs_facts(xs: [Expr], a: FAcc) -> FAcc:
+    n = length(xs)
+    edit acc = a
+    loop i in 0 until n:
         acc = expr_facts(expr_item(xs, i), acc)
     acc
 
-fn expr_item(xs: [Expr], i: int) -> Expr:
-    at(xs, i)
+define expr_item(xs: [Expr], i: number) -> Expr:
+    xs[i]
 
-fn fields_facts(fs: [FieldExpr], a: FAcc) -> FAcc:
-    n = len(fs)
-    mut acc = a
-    for i in 0..<n:
+define fields_facts(fs: [FieldExpr], a: FAcc) -> FAcc:
+    n = length(fs)
+    edit acc = a
+    loop i in 0 until n:
         fe = field_item(fs, i)
         acc = expr_facts(fe.value, acc)
     acc
 
-fn field_item(fs: [FieldExpr], i: int) -> FieldExpr:
-    at(fs, i)
+define field_item(fs: [FieldExpr], i: number) -> FieldExpr:
+    fs[i]
 
-fn arms_facts(arms: [MatchArm], a: FAcc) -> FAcc:
-    n = len(arms)
-    mut acc = a
-    for i in 0..<n:
+define arms_facts(arms: [MatchArm], a: FAcc) -> FAcc:
+    n = length(arms)
+    edit acc = a
+    loop i in 0 until n:
         arm = arm_item(arms, i)
         acc = expr_facts(arm.body, expr_facts(arm.pattern, acc))
     acc
 
-fn arm_item(xs: [MatchArm], i: int) -> MatchArm:
-    at(xs, i)
+define arm_item(xs: [MatchArm], i: number) -> MatchArm:
+    xs[i]
 
-fn stmts_facts(ss: [Stmt], a: FAcc) -> FAcc:
-    n = len(ss)
-    mut acc = a
-    for i in 0..<n:
+define stmts_facts(ss: [Stmt], a: FAcc) -> FAcc:
+    n = length(ss)
+    edit acc = a
+    loop i in 0 until n:
         acc = stmt_facts(stmt_item(ss, i), acc)
     acc
 
-fn stmt_item(ss: [Stmt], i: int) -> Stmt:
-    at(ss, i)
+define stmt_item(ss: [Stmt], i: number) -> Stmt:
+    ss[i]
 
-fn f_emit(a: FAcc, name: Text) -> FAcc:
+define f_emit(a: FAcc, name: text) -> FAcc:
     FAcc{reads: a.reads, writes: a.writes, emits: f_add(a.emits, name), spawns: a.spawns, calls: a.calls, bound: a.bound}
 
-fn f_spawn(a: FAcc, kind: Text) -> FAcc:
+define f_spawn(a: FAcc, kind: text) -> FAcc:
     FAcc{reads: a.reads, writes: a.writes, emits: a.emits, spawns: f_add(a.spawns, kind), calls: a.calls, bound: a.bound}
 
-fn f_write(a: FAcc, name: Text) -> FAcc:
+define f_write(a: FAcc, name: text) -> FAcc:
     FAcc{reads: a.reads, writes: f_add(a.writes, name), emits: a.emits, spawns: a.spawns, calls: a.calls, bound: a.bound}
 
-fn let_facts(name: Text, v: Expr, a: FAcc) -> FAcc:
+define let_facts(name: text, v: Expr, a: FAcc) -> FAcc:
     f_bind(expr_facts(v, a), name)
 
-fn letd_facts(names: [Text], v: Expr, a: FAcc) -> FAcc:
-    mut acc = expr_facts(v, a)
-    nn = len(names)
-    for i in 0..<nn:
+define letd_facts(names: [text], v: Expr, a: FAcc) -> FAcc:
+    edit acc = expr_facts(v, a)
+    nn = length(names)
+    loop i in 0 until nn:
         acc = f_bind(acc, text_item(names, i))
     acc
 
-fn setvar_facts(name: Text, v: Expr, a: FAcc) -> FAcc:
+define setvar_facts(name: text, v: Expr, a: FAcc) -> FAcc:
     f_write(expr_facts(v, a), name)
 
-fn foreach_facts(var: Text, src: Expr, pred: Expr, body: [Stmt], a: FAcc) -> FAcc:
+define foreach_facts(var: text, src: Expr, pred: Expr, body: [Stmt], a: FAcc) -> FAcc:
     stmts_facts(body, expr_facts(pred, f_bind(expr_facts(src, a), var)))
 
-fn stmt_facts(s: Stmt, a: FAcc) -> FAcc:
-    match s:
-        EmitEffect(name, fs) -> fields_facts(fs, f_emit(a, name))
-        Require(e) -> expr_facts(e, a)
-        Let(name, v) -> let_facts(name, v, a)
-        LetDestructure(names, v) -> letd_facts(names, v, a)
-        SpawnEntity(kind, fs) -> fields_facts(fs, f_spawn(a, kind))
-        DestroyEntity(e) -> expr_facts(e, a)
-        SetField(base, _, v) -> expr_facts(v, expr_facts(base, a))
-        SetVar(name, v) -> setvar_facts(name, v, a)
-        ForEach(var, src, pred, body) -> foreach_facts(var, src, pred, body, a)
-        IfStmt(c, body) -> stmts_facts(body, expr_facts(c, a))
-        RelateStmt(src, k, tgt) -> expr_facts(tgt, expr_facts(src, a))
-        _ -> a
+define stmt_facts(s: Stmt, a: FAcc) -> FAcc:
+    choose s:
+        EmitEffect(name, fs) then fields_facts(fs, f_emit(a, name))
+        Require(e) then expr_facts(e, a)
+        Let(name, v) then let_facts(name, v, a)
+        LetDestructure(names, v) then letd_facts(names, v, a)
+        SpawnEntity(kind, fs) then fields_facts(fs, f_spawn(a, kind))
+        DestroyEntity(e) then expr_facts(e, a)
+        SetField(base, _, v) then expr_facts(v, expr_facts(base, a))
+        SetVar(name, v) then setvar_facts(name, v, a)
+        ForEach(var, src, pred, body) then foreach_facts(var, src, pred, body, a)
+        IfStmt(c, body) then stmts_facts(body, expr_facts(c, a))
+        RelateStmt(src, k, tgt) then expr_facts(tgt, expr_facts(src, a))
+        _ then a
 
 # Unknown helper calls: valid = bundle fns + the three eval
 # builtins. Live eval stays graceful (NoneV — hot-reload mid-edit
 # must not crash the game); CHECK and TRY fail loud instead.
-pub fn astra_unknown_calls_c(cid: Text, source: Text) -> Text:
+public define astra_unknown_calls_c(cid: text, source: text) -> text:
     c = compile_c(cid, source)
     facts = astra_facts_c(cid, source)
-    n = len(facts)
-    mut bad = []
-    for i in 0..<n:
+    n = length(facts)
+    edit bad = []
+    loop i in 0 until n:
         f = facts_at(facts, i)
-        nc = len(f.calls)
-        for j in 0..<nc:
+        nc = length(f.calls)
+        loop j in 0 until nc:
             callee = text_item(f.calls, j)
             if not call_is_known(c.functions, callee):
                 bad = f_add(bad, callee)
-    nb = len(bad)
-    mut out = ""
-    for i in 0..<nb:
-        out = if out == "" then "" + text_item(bad, i) else out + "," + text_item(bad, i)
+    nb = length(bad)
+    edit out = ""
+    loop i in 0 until nb:
+        out = if out is "" then "" + text_item(bad, i) else out + "," + text_item(bad, i)
     out
 
-pub fn facts_at(xs: [RuleFacts], i: int) -> RuleFacts:
-    at(xs, i)
+public define facts_at(xs: [RuleFacts], i: number) -> RuleFacts:
+    xs[i]
 
-fn call_is_known(funcs: [Function], name: Text) -> bool:
-    if name == "size" or name == "at" or name == "concat" or name == "related":
+define call_is_known(funcs: [Function], name: text) -> truth:
+    if name is "size" or name is "at" or name is "concat" or name is "related":
         return true
-    n = len(funcs)
-    for i in 0..<n:
+    n = length(funcs)
+    loop i in 0 until n:
         f = fn_item(funcs, i)
-        if f.name == name:
+        if f.name is name:
             return true
     false
 
-fn fn_item(fs: [Function], i: int) -> Function:
-    at(fs, i)
+define fn_item(fs: [Function], i: number) -> Function:
+    fs[i]
 
 # ---- Check pass (astra_check surface) ----
 # The loud well-formedness pass, off the hot path. Live dispatch stays
 # graceful (unknown calls -> NoneV); this is what a tool/host runs to catch
 # authoring mistakes before they silently no-op. Compiles by content, so an
 # edit re-checks the new tree.
-pub fn astra_check_source(source: Text) -> [CheckError]:
+public define astra_check_source(source: text) -> [CheckError]:
     c = compile(source)
-    check_program(c.rules, c.functions)
+    check_program(c.rules, c.functions, c.enum_states)
 
-pub fn astra_check_c(cid: Text, source: Text) -> [CheckError]:
+public define astra_check_c(cid: text, source: text) -> [CheckError]:
     c = compile_c(cid, source)
-    check_program(c.rules, c.functions)
+    check_program(c.rules, c.functions, c.enum_states)
 
 # One-line summary of the check pass — "" when the bundle is clean, else the
 # errors joined "owner: message; owner: message". Mirrors the Text shape of
 # astra_unknown_calls_c for CLI/log surfaces.
-pub fn astra_check_text_c(cid: Text, source: Text) -> Text:
+public define astra_check_text_c(cid: text, source: text) -> text:
     errs = astra_check_c(cid, source)
-    n = len(errs)
-    mut out = ""
-    for i in 0..<n:
+    n = length(errs)
+    edit out = ""
+    loop i in 0 until n:
         e = check_err_at(errs, i)
         line = "{e.rule}: {e.message}"
-        out = if out == "" then line else out + "; " + line
+        out = if out is "" then line else out + "; " + line
     out
 
-fn check_err_at(errs: [CheckError], i: int) -> CheckError:
-    at(errs, i)
+define check_err_at(errs: [CheckError], i: number) -> CheckError:
+    errs[i]
 
 # ---- Test runner (pillar 5: tests as syntax) ----
 # Executes each `test NAME:` block from the parse (tests live in ParseResult,
@@ -832,67 +824,67 @@ fn check_err_at(errs: [CheckError], i: int) -> CheckError:
 #   tick N       — advance the tick counter (readable as `tick`)
 #   expect COND  — assert (with `effects` bound to the running effect count)
 # The first failing step stops the test. Returns one TestResult per test.
-pub data TestResult: name: Text, passed: bool, message: Text
+public type TestResult: name: text, passed: truth, message: text
 
-data TState: effects: [AstraEffect], tickc: int, passed: bool, msg: Text
+type TState: effects: [AstraEffect], tickc: number, passed: truth, msg: text
 
-pub fn run_tests(source: Text) -> [TestResult]:
+public define run_tests(source: text) -> [TestResult]:
     # Use the evacuated Compiled (not raw compile_parse_result) so every rule,
     # helper, and test step is deep-copied into the persist heap — raw parse
     # output carries arena-lived Text that dangles once any epoch resets.
     c = compile(source)
-    n = len(c.tests)
-    mut out = []
-    for i in 0..<n:
-        out = push_mut(out, rt_run_one(rt_test_at(c.tests, i), c.rules, c.functions, c.consts))
+    n = length(c.tests)
+    edit out = []
+    loop i in 0 until n:
+        out = append(out, rt_run_one(rt_test_at(c.tests, i), c.rules, c.functions, c.consts))
     out
 
 # One-line pass/fail summary — "" when every test passes, else the failing
 # tests joined "name: message; ...".
-pub fn run_tests_text(source: Text) -> Text:
+public define run_tests_text(source: text) -> text:
     results = run_tests(source)
-    n = len(results)
-    mut out = ""
-    for i in 0..<n:
+    n = length(results)
+    edit out = ""
+    loop i in 0 until n:
         r = rt_result_at(results, i)
         if not r.passed:
             line = "{r.name}: {r.message}"
-            out = if out == "" then line else out + "; " + line
+            out = if out is "" then line else out + "; " + line
     out
 
-fn rt_test_at(ts: [TestCase], i: int) -> TestCase:
-    at(ts, i)
+define rt_test_at(ts: [TestCase], i: number) -> TestCase:
+    ts[i]
 
-fn rt_result_at(rs: [TestResult], i: int) -> TestResult:
-    at(rs, i)
+define rt_result_at(rs: [TestResult], i: number) -> TestResult:
+    rs[i]
 
-fn rt_step_at(ss: [TestStep], i: int) -> TestStep:
-    at(ss, i)
+define rt_step_at(ss: [TestStep], i: number) -> TestStep:
+    ss[i]
 
-fn rt_run_one(tc: TestCase, rules: [Rule], funcs: [Function], consts: [Binding]) -> TestResult:
+define rt_run_one(tc: TestCase, rules: [Rule], funcs: [Function], consts: [Binding]) -> TestResult:
     st0 = TState{effects: [], tickc: 0, passed: true, msg: ""}
     stf = rt_fold(tc.steps, 0, st0, rules, funcs, consts)
     TestResult{name: tc.name, passed: stf.passed, message: stf.msg}
 
 # Fold steps left-to-right, stopping at the first failure.
-fn rt_fold(steps: [TestStep], i: int, st: TState, rules: [Rule], funcs: [Function], consts: [Binding]) -> TState:
-    if i >= len(steps) or not st.passed:
+define rt_fold(steps: [TestStep], i: number, st: TState, rules: [Rule], funcs: [Function], consts: [Binding]) -> TState:
+    if i >= length(steps) or not st.passed:
         st
     else:
         rt_fold(steps, i + 1, rt_step(rt_step_at(steps, i), st, rules, funcs, consts), rules, funcs, consts)
 
-fn rt_step(s: TestStep, st: TState, rules: [Rule], funcs: [Function], consts: [Binding]) -> TState:
-    if s.kind == "apply":
+define rt_step(s: TestStep, st: TState, rules: [Rule], funcs: [Function], consts: [Binding]) -> TState:
+    if s.kind is "apply":
         rt_apply(s.name, s.args, st, rules, funcs, consts)
     else:
-        if s.kind == "tick":
+        if s.kind is "tick":
             rt_tick(s.cond, st, funcs, consts)
         else:
             rt_expect(s.cond, st, funcs, consts)
 
-fn rt_apply(name: Text, args: [Expr], st: TState, rules: [Rule], funcs: [Function], consts: [Binding]) -> TState:
+define rt_apply(name: text, args: [Expr], st: TState, rules: [Rule], funcs: [Function], consts: [Binding]) -> TState:
     r = find_named_rule(rules, name)
-    if len(r.name) == 0:
+    if length(r.name) is 0:
         TState{effects: st.effects, tickc: st.tickc, passed: false, msg: "apply: unknown rule `{name}`"}
     else:
         ctx = rt_base_ctx(consts, st.tickc)
@@ -900,56 +892,56 @@ fn rt_apply(name: Text, args: [Expr], st: TState, rules: [Rule], funcs: [Functio
         oc = run_rule_args_ctx(r, argvals, ctx, funcs)
         TState{effects: rt_append(st.effects, oc.effects), tickc: st.tickc, passed: st.passed, msg: st.msg}
 
-fn rt_tick(nexpr: Expr, st: TState, funcs: [Function], consts: [Binding]) -> TState:
+define rt_tick(nexpr: Expr, st: TState, funcs: [Function], consts: [Binding]) -> TState:
     ctx = rt_base_ctx(consts, st.tickc)
     delta = rt_int_of(eval_in_env(nexpr, ctx, funcs))
     TState{effects: st.effects, tickc: st.tickc + delta, passed: st.passed, msg: st.msg}
 
-fn rt_expect(cond: Expr, st: TState, funcs: [Function], consts: [Binding]) -> TState:
-    env = rt_expect_env(consts, st.tickc, len(st.effects))
+define rt_expect(cond: Expr, st: TState, funcs: [Function], consts: [Binding]) -> TState:
+    env = rt_expect_env(consts, st.tickc, length(st.effects))
     if value_is_truthy(eval_in_env(cond, env, funcs)):
         st
     else:
         # Interpolation takes bare identifiers only (Orion codegen), so
         # precompute the effect count and tick into locals.
-        ec = len(st.effects)
+        ec = length(st.effects)
         tc = st.tickc
         TState{effects: st.effects, tickc: st.tickc, passed: false, msg: "expect failed (effects={ec}, tick={tc})"}
 
 # ctx a rule body / tick expr sees: consts + the current `tick`.
-fn rt_base_ctx(consts: [Binding], tickc: int) -> [Binding]:
-    mut out = []
-    for b in consts:
-        out = push_mut(out, b)
-    out = push_mut(out, Binding{name: "tick", value: IntV(tickc)})
+define rt_base_ctx(consts: [Binding], tickc: number) -> [Binding]:
+    edit out = []
+    loop b in consts:
+        out = append(out, b)
+    out = append(out, Binding{name: "tick", value: IntV(tickc)})
     out
 
 # ctx an `expect` sees: base + `effects` (the running effect count).
-fn rt_expect_env(consts: [Binding], tickc: int, effcount: int) -> [Binding]:
-    mut out = rt_base_ctx(consts, tickc)
-    out = push_mut(out, Binding{name: "effects", value: IntV(effcount)})
+define rt_expect_env(consts: [Binding], tickc: number, effcount: number) -> [Binding]:
+    edit out = rt_base_ctx(consts, tickc)
+    out = append(out, Binding{name: "effects", value: IntV(effcount)})
     out
 
-fn rt_eval_args(args: [Expr], env: [Binding], funcs: [Function], i: int, acc: [Value]) -> [Value]:
-    if i >= len(args):
+define rt_eval_args(args: [Expr], env: [Binding], funcs: [Function], i: number, acc: [Value]) -> [Value]:
+    if i >= length(args):
         acc
     else:
-        rt_eval_args(args, env, funcs, i + 1, push(acc, eval_in_env(rt_arg_at(args, i), env, funcs)))
+        rt_eval_args(args, env, funcs, i + 1, append(acc, eval_in_env(rt_arg_at(args, i), env, funcs)))
 
-fn rt_arg_at(args: [Expr], i: int) -> Expr:
-    at(args, i)
+define rt_arg_at(args: [Expr], i: number) -> Expr:
+    args[i]
 
-fn rt_append(a: [AstraEffect], b: [AstraEffect]) -> [AstraEffect]:
-    mut out = []
-    for e in a:
-        out = push_mut(out, e)
-    for e in b:
-        out = push_mut(out, e)
+define rt_append(a: [AstraEffect], b: [AstraEffect]) -> [AstraEffect]:
+    edit out = []
+    loop e in a:
+        out = append(out, e)
+    loop e in b:
+        out = append(out, e)
     out
 
-fn rt_int_of(v: Value) -> int:
-    match v:
-        IntV(k) -> k
-        BoolV(b) -> if b then 1 else 0
-        RefV(k) -> k
-        _ -> 0
+define rt_int_of(v: Value) -> number:
+    choose v:
+        IntV(k) then k
+        BoolV(b) then if b then 1 else 0
+        RefV(k) then k
+        _ then 0

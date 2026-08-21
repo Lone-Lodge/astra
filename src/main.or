@@ -1,11 +1,6 @@
-use astra_run
-use astra_value
-use astra_outcome
-use astra_eval
-use os
-use bytes
 
-fn main() -> int:
+
+define main() -> number:
     t_begin()
 
     section("dispatch & effects")
@@ -34,12 +29,12 @@ fn main() -> int:
     t3 = tick(src_when, ctx_hit, t2.truths)
     check("when score=100 again is level, silent", 0, eff_count(t3.outcome))
 
-    # M2.3: `every N` periodic — sugar for when(tick % N == 0)
+    # M2.3: `every N` periodic — sugar for when(tick % N is 0)
     src_every = "every 3: emit Pulse()"
     # Walk ticks 0..6 and count fires per tick. Expected fire ticks: 0, 3, 6.
-    mut prev = []
-    mut total = 0
-    for t in 0..<7:
+    edit prev = []
+    edit total = 0
+    loop t in 0 until 7:
         ctx_t = [Binding{name: "tick", value: IntV(t)}]
         r = tick(src_every, ctx_t, prev)
         total = total + eff_count(r.outcome)
@@ -61,7 +56,7 @@ fn main() -> int:
     check("pixel_to_col(220) via fn helper", 2, first_field_int(run(src_fn, "click", [IntV(220)])))
 
     # M3 queries: bind a ListV of entity-record MapVs into ctx, run
-    # `count(x in items where x.field == value)` over it.
+    # `count(x in items where x.field is value)` over it.
     src_q = read_file("fixtures/count_query.astra")
     ctx_q = [Binding{name: "items", value: ListV(build_items())}]
     check("count reds", 2, first_field_int(run_rule_in_ctx(src_q, "reds", ctx_q)))
@@ -70,7 +65,7 @@ fn main() -> int:
     section("loops & spawn")
     # M3 bounded `for` — expands at parse time to N copies of the body
     # with iter var substituted. Verify only r=2 fires (the matching
-    # `when r == 2:` rule).
+    # `when r is 2:` rule).
     src_for = read_file("fixtures/for_loop.astra")
     fr1 = tick(src_for, [], [])
     check("for-loop cold tick fires only r=2", 1, eff_count(fr1.outcome))
@@ -115,9 +110,21 @@ fn main() -> int:
     # astra_check pass: well-formed bundle has 0 errors; a bundle with a
     # duplicate fn + an arity mismatch + an unknown call has 3.
     src_ok = "fn dbl(n): n * 2\nrule go(x): require dbl(x) > 0\nrule go2(x): require size([1, 2]) > 0"
-    check("checker: clean bundle has 0 errors", 0, len(astra_check_source(src_ok)))
+    check("checker: clean bundle has 0 errors", 0, length(astra_check_source(src_ok)))
     src_bad = "fn dbl(n): n * 2\nfn dbl(n): n * 3\nrule go(x): require dbl(x, x) > 0\nrule bad(x): require missing(x) > 0"
-    check("checker: bad bundle has 3 errors", 3, len(astra_check_source(src_bad)))
+    check("checker: bad bundle has 3 errors", 3, length(astra_check_source(src_bad)))
+
+    # NEXTGEN #5a — exhaustive `when` over an enum state. A partial
+    # equality-switch (a variant with no branch) is flagged; full coverage,
+    # any non-` is ` reference, and an unswitched enum are all clean.
+    src_when_partial = "state door: enum(Shut, Open, Locked) = Shut\nwhen door == Shut: emit A n: 1\nwhen door == Locked: emit B n: 1"
+    check("when: partial enum switch warns (Open missing)", 1, length(astra_check_source(src_when_partial)))
+    src_when_full = "state door: enum(Shut, Open, Locked) = Shut\nwhen door == Shut: emit A n: 1\nwhen door == Open: emit B n: 1\nwhen door == Locked: emit C n: 1"
+    check("when: full enum switch is clean", 0, length(astra_check_source(src_when_full)))
+    src_when_dyn = "state door: enum(Shut, Open, Locked) = Shut\nwhen door == Shut: emit A n: 1\nwhen door != Open: emit B n: 1"
+    check("when: any non-== reference suppresses", 0, length(astra_check_source(src_when_dyn)))
+    src_when_none = "state door: enum(Shut, Open, Locked) = Shut\nwhen ready: emit A n: 1"
+    check("when: enum nobody switches on is clean", 0, length(astra_check_source(src_when_none)))
 
     # `all` universal quantifier: true only when every element satisfies COND.
     src_all = "fn allpos(): if all x in [2, 4, 6] where x > 0 then 1 else 0\nfn allneg(): if all x in [2, 0, 6] where x > 0 then 1 else 0"
@@ -131,7 +138,7 @@ fn main() -> int:
     # tests-as-syntax: `apply` a rule, read `effects`/`tick` in `expect`.
     src_tests = "rule scale(x): require x > 0 emit Scaled()\ntest a:\n    apply scale(5)\n    expect effects == 1\ntest b:\n    apply scale(0)\n    expect effects == 0\ntest c:\n    tick 3\n    expect tick == 3"
     tr = run_tests(src_tests)
-    check("inline tests parsed", 3, len(tr))
+    check("inline tests parsed", 3, length(tr))
     check("inline tests passed", 3, count_passed(tr))
     src_tfail = "rule scale(x): require x > 0 emit Scaled()\ntest bad:\n    apply scale(5)\n    expect effects == 2"
     check("failing inline test caught", 0, count_passed(run_tests(src_tfail)))
@@ -148,7 +155,7 @@ fn main() -> int:
     # `.empty` field access — `empty` must lex as an identifier, not a keyword
     # (VISION: `require cell.empty`). A reserved `empty` breaks the `.` access.
     src_empty = "rule check(cell): require cell.empty emit Ok()"
-    cell_rec = MapV(push([], ValueField{name: "empty", value: IntV(1)}))
+    cell_rec = MapV(append([], ValueField{name: "empty", value: IntV(1)}))
     check("cell.empty field access", 1, eff_count(run(src_empty, "check", [cell_rec])))
 
     # In-body `if cond: body` statement — a single-branch conditional inside
@@ -181,36 +188,36 @@ fn main() -> int:
 # own LLVM-backend runner. Counters live in slots so each check() is a
 # one-liner (no mut state threaded through main). Exit code = fail count.
 
-fn ansi(code: Text) -> Text:
-    "{bytes_to_text([27])}[{code}m"
+define ansi(code: text) -> text:
+    "{text_of([27])}[{code}m"
 
-fn t_begin():
+define t_begin():
     slot_set("t:n", 0)
     slot_set("t:pass", 0)
     print_line("")
     print_line("  {ansi("1")}{ansi("36")}◆ astra{ansi("0")} {ansi("2")}test runner · eval + parse, native{ansi("0")}")
     print_line("  {ansi("2")}────────────────────────────────────────────────{ansi("0")}")
 
-fn section(title: Text):
+define section(title: text):
     print_line("")
     print_line("  {ansi("2")}{title}{ansi("0")}")
 
-fn check(label: Text, expected: int, actual: int):
-    n = slot_get_int("t:n") + 1
+define check(label: text, expected: number, actual: number):
+    n = slot_get_number("t:n") + 1
     slot_set("t:n", n)
-    if actual == expected:
-        slot_set("t:pass", slot_get_int("t:pass") + 1)
+    if actual is expected:
+        slot_set("t:pass", slot_get_number("t:pass") + 1)
         print_line("    {ansi("32")}✓{ansi("0")} {label}")
     else:
         print_line("    {ansi("31")}✗ {label}{ansi("0")}  {ansi("2")}→ expected {expected}, got {actual}{ansi("0")}")
 
-fn t_summary() -> int:
-    n = slot_get_int("t:n")
-    p = slot_get_int("t:pass")
+define t_summary() -> number:
+    n = slot_get_number("t:n")
+    p = slot_get_number("t:pass")
     f = n - p
     print_line("")
     print_line("  {ansi("2")}────────────────────────────────────────────────{ansi("0")}")
-    if f == 0:
+    if f is 0:
         print_line("  {ansi("1")}{ansi("32")}✓ all {p}/{n} passed{ansi("0")}")
     else:
         print_line("  {ansi("1")}{ansi("31")}✗ {f} failed{ansi("0")} {ansi("2")}({p}/{n} passed){ansi("0")}")
@@ -218,50 +225,50 @@ fn t_summary() -> int:
     f
 
 # 1 when eval_fn(src, "f", args) yields exactly TextV(expected).
-fn text_is(src: Text, args: [Value], expected: Text) -> int:
-    match eval_fn(src, "f", args):
-        TextV(s) -> if s == expected then 1 else 0
-        _ -> 0
+define text_is(src: text, args: [Value], expected: text) -> number:
+    choose eval_fn(src, "f", args):
+        TextV(s) then if s is expected then 1 else 0
+        _ then 0
 
-fn setvar_of(o: Outcome, name: Text) -> int:
-    mut found = 0 - 1
-    for e in o.effects:
+define setvar_of(o: Outcome, name: text) -> number:
+    edit found = 0 - 1
+    loop e in o.effects:
         found = setvar_match(e, name, found)
     found
 
-fn setvar_match(e: AstraEffect, name: Text, cur: int) -> int:
-    match e:
-        AstraSetVar(nm, v) -> if nm == name then int_of_value(v) else cur
-        _ -> cur
+define setvar_match(e: AstraEffect, name: text, cur: number) -> number:
+    choose e:
+        AstraSetVar(nm, v) then if nm is name then int_of_value(v) else cur
+        _ then cur
 
-fn count_passed(results: [TestResult]) -> int:
-    mut c = 0
-    for r in results:
+define count_passed(results: [TestResult]) -> number:
+    edit c = 0
+    loop r in results:
         if r.passed:
             c = c + 1
     c
 
 # 2x2 square piece, encoded as MapV records {dc, dr}.
-fn build_square_cells() -> [Value]:
+define build_square_cells() -> [Value]:
     a = cell_map(0, 0)
     b = cell_map(1, 0)
     c = cell_map(0, 1)
     d = cell_map(1, 1)
-    push(push(push(push([], a), b), c), d)
+    append(append(append(append([], a), b), c), d)
 
-fn cell_map(dc: int, dr: int) -> Value:
-    fields = push(push([], ValueField{name: "dc", value: IntV(dc)}), ValueField{name: "dr", value: IntV(dr)})
+define cell_map(dc: number, dr: number) -> Value:
+    fields = append(append([], ValueField{name: "dc", value: IntV(dc)}), ValueField{name: "dr", value: IntV(dr)})
     MapV(fields)
 
 # Pull the first effect, assert it's AstraSpawnKind, return field count.
-fn spawn_field_count(o: Outcome) -> int:
-    if len(o.effects) == 0:
+define spawn_field_count(o: Outcome) -> number:
+    if length(o.effects) is 0:
         0
     else:
-        e = at(o.effects, 0)
-        match e:
-            AstraSpawnKind(_kind, fields) -> len(fields)
-            _ -> 0
+        e = o.effects[0]
+        choose e:
+            AstraSpawnKind(_kind, fields) then length(fields)
+            _ then 0
 
 # Small helper: run a parameterless rule with a pre-built env. The
 # regular `run` binds args to rule params; here we want free names
@@ -273,7 +280,7 @@ fn spawn_field_count(o: Outcome) -> int:
 #
 # Approach: write the fixtures so the rule takes `items` as a param,
 # then pass [items] to run().
-fn run_rule_in_ctx(src: Text, rule_name: Text, ctx: [Binding]) -> Outcome:
+define run_rule_in_ctx(src: text, rule_name: text, ctx: [Binding]) -> Outcome:
     # Re-use the public `tick` machinery: dummy-source a `when true: emit ...`
     # would over-fire. Instead: call run() with the ctx bindings flattened
     # to positional args matching the rule's params, by name order. The
@@ -281,76 +288,76 @@ fn run_rule_in_ctx(src: Text, rule_name: Text, ctx: [Binding]) -> Outcome:
     args = ctx_values_in_order(ctx)
     run(src, rule_name, args)
 
-fn ctx_values_in_order(ctx: [Binding]) -> [Value]:
-    n = len(ctx)
-    mut out = []
-    for i in 0..<n:
-        out = push(out, at(ctx, i).value)
+define ctx_values_in_order(ctx: [Binding]) -> [Value]:
+    n = length(ctx)
+    edit out = []
+    loop i in 0 until n:
+        out = append(out, ctx[i].value)
     out
 
 # Three synthetic entity records: two red (rows 3 and 5), one blue (row 3).
-fn build_items() -> [Value]:
+define build_items() -> [Value]:
     a = make_record("red", 3)
     b = make_record("red", 5)
     c = make_record("blue", 3)
-    push(push(push([], a), b), c)
+    append(append(append([], a), b), c)
 
-fn make_record(color: Text, row: int) -> Value:
-    fields = push(push([], ValueField{name: "color", value: TextV(color)}), ValueField{name: "row", value: IntV(row)})
+define make_record(color: text, row: number) -> Value:
+    fields = append(append([], ValueField{name: "color", value: TextV(color)}), ValueField{name: "row", value: IntV(row)})
     MapV(fields)
 
-fn first_effect_field_count(o: Outcome) -> int:
-    if len(o.effects) == 0:
+define first_effect_field_count(o: Outcome) -> number:
+    if length(o.effects) is 0:
         0
     else:
-        e = at(o.effects, 0)
-        match e:
-            AstraEmit(_event, v) -> map_value_size(v)
-            _ -> 0
+        e = o.effects[0]
+        choose e:
+            AstraEmit(_event, v) then map_value_size(v)
+            _ then 0
 
-fn map_value_size(v: Value) -> int:
-    match v:
-        MapV(entries) -> len(entries)
-        _ -> 0
+define map_value_size(v: Value) -> number:
+    choose v:
+        MapV(entries) then length(entries)
+        _ then 0
 
 # Pull the first MapV entry's IntV out — used by fn-helper tests to
 # assert the emitted payload value.
-fn first_field_int(o: Outcome) -> int:
-    if len(o.effects) == 0:
+define first_field_int(o: Outcome) -> number:
+    if length(o.effects) is 0:
         0 - 1
     else:
-        e = at(o.effects, 0)
-        match e:
-            AstraEmit(_event, v) -> first_map_int(v)
-            _ -> 0 - 1
+        e = o.effects[0]
+        choose e:
+            AstraEmit(_event, v) then first_map_int(v)
+            _ then 0 - 1
 
-fn first_map_int(v: Value) -> int:
-    match v:
-        MapV(entries) -> if len(entries) == 0 then 0 - 1 else int_of_value(at(entries, 0).value)
-        _ -> 0 - 1
+define first_map_int(v: Value) -> number:
+    choose v:
+        MapV(entries) then if length(entries) is 0 then 0 - 1 else int_of_value(entries[0].value)
+        _ then 0 - 1
 
-fn int_of_value(v: Value) -> int:
-    match v:
-        IntV(n) -> n
-        _ -> 0 - 1
+define int_of_value(v: Value) -> number:
+    choose v:
+        IntV(n) then n
+        _ then 0 - 1
 
-fn eff_count(o: Outcome) -> int:
-    mut c = 0
-    for _e in o.effects:
+define eff_count(o: Outcome) -> number:
+    edit c = 0
+    loop _e in o.effects:
         c = c + 1
     c
 
-fn show_int(value: int) -> Text:
-    if value == 0:
+define show_int(value: number) -> text:
+    if value is 0:
         "0"
     else:
         digits(value)
 
-fn digits(value: int) -> Text:
-    if value == 0:
+define digits(value: number) -> text:
+    if value is 0:
         ""
     else:
-        digits(value / 10) + glyph(value - (value / 10) * 10)
+        digits(value // 10) + glyph(value - (value // 10) * 10)
 
-fn glyph(d: int) -> Text:
-    if d == 0 then "0" else if d == 1 then "1" else if d == 2 then "2" else if d == 3 then "3" else if d == 4 then "4" else if d == 5 then "5" else if d == 6 then "6" else if d == 7 then "7" else if d == 8 then "8" else "9"
+define glyph(d: number) -> text:
+    if d is 0 then "0" else if d is 1 then "1" else if d is 2 then "2" else if d is 3 then "3" else if d is 4 then "4" else if d is 5 then "5" else if d is 6 then "6" else if d is 7 then "7" else if d is 8 then "8" else "9"

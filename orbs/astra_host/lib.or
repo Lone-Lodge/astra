@@ -4,11 +4,10 @@
 # imported module. Hosts implement these so the language stays
 # host-agnostic. Atlas plugs in via atlas_astra.
 
-use astra_value
 
 # Trait-shaped — the host implements `lookup` against its store and
 # `resolve` against its module map.
-pub data HostQuery: kind: Text, entity: int, field: Text
+public type HostQuery: kind: text, entity: number, field: text
 
-pub fn empty_query() -> HostQuery:
+public define empty_query() -> HostQuery:
     HostQuery{kind: "lookup", entity: 0, field: ""}

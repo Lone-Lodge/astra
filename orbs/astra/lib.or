@@ -7,14 +7,14 @@
 #
 # Atlas embeds this as `atlas_astra`, mapping Value ↔ atlas_wire.
 
-use astra_value
-use astra_outcome
-use astra_lexer
-use astra_ast
-use astra_parser
-use astra_check
-use astra_eval
-use astra_host
-use astra_run
+public use astra_value
+public use astra_outcome
+public use astra_lexer
+public use astra_ast
+public use astra_parser
+public use astra_check
+public use astra_eval
+public use astra_host
+public use astra_run
 
-pub fn version() -> Text = comptime "0.0.1"
+public define version() -> text = "0.0.1"

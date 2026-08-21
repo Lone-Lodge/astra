@@ -1,0 +1,9 @@
+# LF overallt - CRLF-konvertering vid checkout smittade editorn en gang
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.exe binary
+*.dll binary
+*.wasm binary

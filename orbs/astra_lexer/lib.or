@@ -7,16 +7,15 @@
 # Pure Orion — kompileras nativt av `orion` (LLVM-backend). Kördes tidigare
 # på lodge-orion-interpretern; den är arkiverad.
 
-use bytes
 
 # Token-vocab — paritet med Rust astra::Tok.
 # Comments interspersed in enum body confuse Orion's indent-tracking parser,
 # so all variant names live in one contiguous block, sections noted in trailing
 # comments rather than indented headers.
-pub enum Tok:
-    Int(int)
-    Str(Text)
-    Ident(Text)
+public type Tok:
+    Int(number)
+    Str(text)
+    Ident(text)
     Rule
     Record
     RequireKw
@@ -52,6 +51,7 @@ pub enum Tok:
     Fn
     Const
     Derive
+    Fact
     Law
     RelateKw
     After
@@ -111,53 +111,53 @@ pub enum Tok:
 # A token + its source line and start column (1-based). The column of
 # a statement's first token is what block parsers compare to detect
 # dedent — Astra has no INDENT/DEDENT tokens.
-pub data Token: tok: Tok, line: int, col: int
+public type Token: tok: Tok, line: number, col: number
 
 # Lex error with the offending line.
-pub data LexError: message: Text, line: int
+public type LexError: message: text, line: number
 
 # A lex result — empty `error` means tokens are good. Sum types with payload
 # in Orion are still rough, so we return both fields and a flag.
-pub data LexResult: tokens: [Token], ok: bool, error: LexError
+public type LexResult: tokens: [Token], ok: truth, error: LexError
 
 # ---- Entry point ----
 
-pub fn lex(source: Text) -> LexResult:
-    bs = bytes_from_text(source)
-    n = len(bs)
-    mut tokens = []
-    mut i = 0
-    mut line = 1
-    mut line_start = 0
-    mut failed = false
-    mut err_msg = ""
-    mut err_line = 0
+public define lex(source: text) -> LexResult:
+    bs = bytes_of(source)
+    n = length(bs)
+    edit tokens = []
+    edit i = 0
+    edit line = 1
+    edit line_start = 0
+    edit failed = false
+    edit err_msg = ""
+    edit err_line = 0
     loop:
         if i >= n:
             break
         if failed:
             break
-        c = at(bs, i)
+        c = bs[i]
         # newline
-        if c == 10:
+        if c is 10:
             tokens = push_newline(tokens, line)
             line = line + 1
             line_start = i + 1
             i = i + 1
         else:
             # whitespace
-            if c == 32 or c == 9 or c == 13:
+            if c is 32 or c is 9 or c is 13:
                 i = i + 1
             else:
                 # comment to EOL
-                if c == 35:
+                if c is 35:
                     i = skip_to_eol(bs, i, n)
                 else:
                     # string literal
-                    if c == 34:
+                    if c is 34:
                         res = scan_string(bs, i + 1, n, line)
                         if res.ok:
-                            tokens = push_mut(tokens, Token{tok: Str(res.text), line: line, col: i - line_start + 1})
+                            tokens = append(tokens, Token{tok: Str(res.text), line: line, col: i - line_start + 1})
                             i = res.next
                         else:
                             failed = true
@@ -168,7 +168,7 @@ pub fn lex(source: Text) -> LexResult:
                         if alx_is_digit(c):
                             res = scan_int(bs, i, n, line)
                             if res.ok:
-                                tokens = push_mut(tokens, Token{tok: Int(res.value), line: line, col: i - line_start + 1})
+                                tokens = append(tokens, Token{tok: Int(res.value), line: line, col: i - line_start + 1})
                                 i = res.next
                             else:
                                 failed = true
@@ -178,13 +178,13 @@ pub fn lex(source: Text) -> LexResult:
                             # alpha → ident or keyword
                             if is_alpha(c):
                                 step = scan_ident(bs, i, n)
-                                tokens = push_mut(tokens, Token{tok: keyword_of(step.text), line: line, col: i - line_start + 1})
+                                tokens = append(tokens, Token{tok: keyword_of(step.text), line: line, col: i - line_start + 1})
                                 i = step.next
                             else:
                                 # punct/symbol
                                 step = scan_symbol(bs, i, n, line)
                                 if step.ok:
-                                    tokens = push_mut(tokens, Token{tok: step.tok, line: line, col: i - line_start + 1})
+                                    tokens = append(tokens, Token{tok: step.tok, line: line, col: i - line_start + 1})
                                     i = step.next
                                 else:
                                     failed = true
@@ -199,45 +199,45 @@ pub fn lex(source: Text) -> LexResult:
 
 # ---- char predicates ----
 
-fn alx_is_digit(c: int) -> bool:
+define alx_is_digit(c: number) -> truth:
     c >= 48 and c <= 57
 
-fn is_alpha(c: int) -> bool:
-    (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or c == 95
+define is_alpha(c: number) -> truth:
+    (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or c is 95
 
-fn is_alnum(c: int) -> bool:
+define is_alnum(c: number) -> truth:
     is_alpha(c) or alx_is_digit(c)
 
 # ---- scanners ----
 
-fn skip_to_eol(bs: [int], start: int, n: int) -> int:
-    mut i = start
+define skip_to_eol(bs: [number], start: number, n: number) -> number:
+    edit i = start
     loop:
         if i >= n:
             break
-        if at(bs, i) == 10:
+        if bs[i] is 10:
             break
         i = i + 1
     i
 
-data StrStep: text: Text, next: int, ok: bool, error: Text
+type StrStep: text: text, next: number, ok: truth, error: text
 
-fn scan_string(bs: [int], start: int, n: int, line: int) -> StrStep:
-    mut i = start
-    mut chars = []
-    mut closed = false
-    mut bad = false
+define scan_string(bs: [number], start: number, n: number, line: number) -> StrStep:
+    edit i = start
+    edit chars = []
+    edit closed = false
+    edit bad = false
     loop:
         if i >= n:
             break
-        c = at(bs, i)
-        if c == 34:
+        c = bs[i]
+        if c is 34:
             closed = true
             break
-        if c == 10:
+        if c is 10:
             bad = true
             break
-        chars = push_mut(chars, c)
+        chars = append(chars, c)
         i = i + 1
     if bad:
         StrStep{text: "", next: i, ok: false, error: "unterminated string"}
@@ -245,117 +245,117 @@ fn scan_string(bs: [int], start: int, n: int, line: int) -> StrStep:
         if not closed:
             StrStep{text: "", next: i, ok: false, error: "unterminated string"}
         else:
-            StrStep{text: bytes_to_text(chars), next: i + 1, ok: true, error: ""}
+            StrStep{text: text_of(chars), next: i + 1, ok: true, error: ""}
 
-data IntStep: value: int, next: int, ok: bool, error: Text
+type IntStep: value: number, next: number, ok: truth, error: text
 
-fn scan_int(bs: [int], start: int, n: int, line: int) -> IntStep:
-    mut i = start
-    mut value = 0
+define scan_int(bs: [number], start: number, n: number, line: number) -> IntStep:
+    edit i = start
+    edit value = 0
     loop:
         if i >= n:
             break
-        c = at(bs, i)
+        c = bs[i]
         if not alx_is_digit(c):
             break
         value = value * 10 + (c - 48)
         i = i + 1
     IntStep{value: value, next: i, ok: true, error: ""}
 
-data IdentStep: text: Text, next: int
+type IdentStep: text: text, next: number
 
-fn scan_ident(bs: [int], start: int, n: int) -> IdentStep:
-    mut i = start
-    mut chars = []
+define scan_ident(bs: [number], start: number, n: number) -> IdentStep:
+    edit i = start
+    edit chars = []
     loop:
         if i >= n:
             break
-        c = at(bs, i)
+        c = bs[i]
         if not is_alnum(c):
             break
-        chars = push_mut(chars, c)
+        chars = append(chars, c)
         i = i + 1
-    IdentStep{text: bytes_to_text(chars), next: i}
+    IdentStep{text: text_of(chars), next: i}
 
-data SymStep: tok: Tok, next: int, ok: bool, error: Text
+type SymStep: tok: Tok, next: number, ok: truth, error: text
 
-fn scan_symbol(bs: [int], start: int, n: int, line: int) -> SymStep:
-    c = at(bs, start)
-    next_c = if start + 1 < n then at(bs, start + 1) else 0
+define scan_symbol(bs: [number], start: number, n: number, line: number) -> SymStep:
+    c = bs[start]
+    next_c = if start + 1 < n then bs[start + 1] else 0
     # 2-char ops first
-    if c == 61 and next_c == 61:
+    if c is 61 and next_c is 61:
         SymStep{tok: Eq, next: start + 2, ok: true, error: ""}
     else:
-        if c == 33 and next_c == 61:
+        if c is 33 and next_c is 61:
             SymStep{tok: Ne, next: start + 2, ok: true, error: ""}
         else:
-            if c == 62 and next_c == 61:
+            if c is 62 and next_c is 61:
                 SymStep{tok: Ge, next: start + 2, ok: true, error: ""}
             else:
-                if c == 60 and next_c == 61:
+                if c is 60 and next_c is 61:
                     SymStep{tok: Le, next: start + 2, ok: true, error: ""}
                 else:
-                    if c == 45 and next_c == 62:
+                    if c is 45 and next_c is 62:
                         SymStep{tok: Arrow, next: start + 2, ok: true, error: ""}
                     else:
                         one_char_symbol(c, start)
 
-fn one_char_symbol(c: int, start: int) -> SymStep:
-    if c == 40:
+define one_char_symbol(c: number, start: number) -> SymStep:
+    if c is 40:
         SymStep{tok: LParen, next: start + 1, ok: true, error: ""}
     else:
-        if c == 41:
+        if c is 41:
             SymStep{tok: RParen, next: start + 1, ok: true, error: ""}
         else:
-            if c == 123:
+            if c is 123:
                 SymStep{tok: LBrace, next: start + 1, ok: true, error: ""}
             else:
-                if c == 125:
+                if c is 125:
                     SymStep{tok: RBrace, next: start + 1, ok: true, error: ""}
                 else:
-                    if c == 91:
+                    if c is 91:
                         SymStep{tok: LBracket, next: start + 1, ok: true, error: ""}
                     else:
-                        if c == 93:
+                        if c is 93:
                             SymStep{tok: RBracket, next: start + 1, ok: true, error: ""}
                         else:
                             one_char_symbol_rest(c, start)
 
-fn one_char_symbol_rest(c: int, start: int) -> SymStep:
-    if c == 44:
+define one_char_symbol_rest(c: number, start: number) -> SymStep:
+    if c is 44:
         SymStep{tok: Comma, next: start + 1, ok: true, error: ""}
     else:
-        if c == 46:
+        if c is 46:
             SymStep{tok: Dot, next: start + 1, ok: true, error: ""}
         else:
-            if c == 58:
+            if c is 58:
                 SymStep{tok: Colon, next: start + 1, ok: true, error: ""}
             else:
-                if c == 61:
+                if c is 61:
                     SymStep{tok: Assign, next: start + 1, ok: true, error: ""}
                 else:
                     one_char_symbol_math(c, start)
 
-fn one_char_symbol_math(c: int, start: int) -> SymStep:
-    if c == 60:
+define one_char_symbol_math(c: number, start: number) -> SymStep:
+    if c is 60:
         SymStep{tok: Lt, next: start + 1, ok: true, error: ""}
     else:
-        if c == 62:
+        if c is 62:
             SymStep{tok: Gt, next: start + 1, ok: true, error: ""}
         else:
-            if c == 43:
+            if c is 43:
                 SymStep{tok: Plus, next: start + 1, ok: true, error: ""}
             else:
-                if c == 45:
+                if c is 45:
                     SymStep{tok: Minus, next: start + 1, ok: true, error: ""}
                 else:
-                    if c == 42:
+                    if c is 42:
                         SymStep{tok: Star, next: start + 1, ok: true, error: ""}
                     else:
-                        if c == 47:
+                        if c is 47:
                             SymStep{tok: Slash, next: start + 1, ok: true, error: ""}
                         else:
-                            if c == 37:
+                            if c is 37:
                                 SymStep{tok: Percent, next: start + 1, ok: true, error: ""}
                             else:
                                 SymStep{tok: Comma, next: start + 1, ok: false, error: "unexpected character"}
@@ -363,93 +363,95 @@ fn one_char_symbol_math(c: int, start: int) -> SymStep:
 # ---- helpers ----
 
 # Append a Newline, dedup runs (matching Rust push_newline contract).
-fn push_newline(tokens: [Token], line: int) -> [Token]:
-    n = len(tokens)
-    if n == 0:
+define push_newline(tokens: [Token], line: number) -> [Token]:
+    n = length(tokens)
+    if n is 0:
         tokens
     else:
-        last = at(tokens, n - 1)
+        last = tokens[n - 1]
         if is_newline_token(last):
             tokens
         else:
             # In-place append is audited here: every caller rebinds
             # `tokens = push_newline(tokens, line)` immediately.
-            push_mut(tokens, Token{tok: Newline, line: line, col: 0})
+            append(tokens, Token{tok: Newline, line: line, col: 0})
 
-fn is_newline_token(t: Token) -> bool:
+define is_newline_token(t: Token) -> truth:
     # Pattern-match-via-fold — Orion's enum match should handle this.
-    match t.tok:
-        Newline -> true
-        _ -> false
+    choose t.tok:
+        Newline then true
+        _ then false
 
 # Map an identifier text to its keyword token, or Ident if not reserved.
-fn keyword_of(text: Text) -> Tok:
-    if text == "rule" then Rule
-    else if text == "record" then Record
-    else if text == "require" then RequireKw
-    else if text == "let" then LetKw
-    else if text == "set" then Set
-    else if text == "spawn" then SpawnKw
-    else if text == "destroy" then Destroy
-    else if text == "emit" then Emit
-    else if text == "effect" then Effect
-    else if text == "on" then On
-    else if text == "view" then View
-    else if text == "entity" then Entity
-    else if text == "test" then Test
-    else if text == "apply" then Apply
-    else if text == "expect" then Expect
+define keyword_of(text: text) -> Tok:
+    if text is "rule" then Rule
+    else if text is "record" then Record
+    else if text is "require" then RequireKw
+    else if text is "let" then LetKw
+    else if text is "set" then Set
+    else if text is "spawn" then SpawnKw
+    else if text is "destroy" then Destroy
+    else if text is "emit" then Emit
+    else if text is "effect" then Effect
+    else if text is "on" then On
+    else if text is "view" then View
+    else if text is "entity" then Entity
+    else if text is "test" then Test
+    else if text is "apply" then Apply
+    else if text is "expect" then Expect
     # `tick` intentionally not reserved — atlas_astra auto-injects it
     # as a ctx binding so scripts use it as a regular identifier.
-    else if text == "if" then If
-    else if text == "then" then Then
-    else if text == "else" then Else
-    else if text == "match" then Match
-    else if text == "for" then For
-    else if text == "count" then Count
-    else if text == "all" then All
-    else if text == "in" then In
-    else if text == "where" then Where
-    else if text == "true" then True
-    else if text == "false" then False
-    else if text == "not" then Not
-    else if text == "and" then And
-    else if text == "or" then Or
-    else if text == "when" then When
-    else if text == "every" then Every
-    else if text == "fn" then Fn
-    else if text == "const" then Const
-    else if text == "derive" then Derive
-    else if text == "law" then Law
-    else if text == "relate" then RelateKw
-    else if text == "after" then After
-    else if text == "belief" then Belief
-    else if text == "confidence" then Confidence
-    else if text == "goal" then Goal
-    else if text == "constraint" then Constraint
-    else if text == "intent" then Intent
-    else if text == "each" then Each
-    else if text == "to" then To
-    else if text == "from" then From
-    else if text == "through" then Through
-    else if text == "use" then UseKw
-    else if text == "exists" then Exists
-    else if text == "none" then None
-    else if text == "becomes" then Becomes
-    else if text == "spawned" then Spawned
-    else if text == "destroyed" then Destroyed
-    else if text == "component" then Component
-    else if text == "state" then State
-    else if text == "command" then Command
-    else if text == "needs" then Needs
-    else if text == "signal" then Signal
-    else if text == "type" then Type
-    else if text == "create" then Create
-    else if text == "source" then Source
-    else if text == "animate" then Animate
-    else if text == "asset" then Asset
-    else if text == "trait" then Trait
-    else if text == "patch" then Patch
-    else if text == "template" then Template
-    else if text == "tokens" then Tokens
+    else if text is "if" then If
+    else if text is "then" then Then
+    else if text is "else" then Else
+    else if text is "match" then Match
+    else if text is "for" then For
+    else if text is "count" then Count
+    else if text is "all" then All
+    else if text is "in" then In
+    else if text is "where" then Where
+    else if text is "true" then True
+    else if text is "false" then False
+    else if text is "not" then Not
+    else if text is "and" then And
+    else if text is "or" then Or
+    else if text is "when" then When
+    else if text is "every" then Every
+    else if text is "fn" then Fn
+    else if text is "const" then Const
+    else if text is "derive" then Derive
+    else if text is "fact" then Fact
+    else if text is "conf" then Confidence
+    else if text is "law" then Law
+    else if text is "relate" then RelateKw
+    else if text is "after" then After
+    else if text is "belief" then Belief
+    else if text is "confidence" then Confidence
+    else if text is "goal" then Goal
+    else if text is "constraint" then Constraint
+    else if text is "intent" then Intent
+    else if text is "each" then Each
+    else if text is "to" then To
+    else if text is "from" then From
+    else if text is "through" then Through
+    else if text is "use" then UseKw
+    else if text is "exists" then Exists
+    else if text is "none" then None
+    else if text is "becomes" then Becomes
+    else if text is "spawned" then Spawned
+    else if text is "destroyed" then Destroyed
+    else if text is "component" then Component
+    else if text is "state" then State
+    else if text is "command" then Command
+    else if text is "needs" then Needs
+    else if text is "signal" then Signal
+    else if text is "type" then Type
+    else if text is "create" then Create
+    else if text is "source" then Source
+    else if text is "animate" then Animate
+    else if text is "asset" then Asset
+    else if text is "trait" then Trait
+    else if text is "patch" then Patch
+    else if text is "template" then Template
+    else if text is "tokens" then Tokens
     else Ident(text)
