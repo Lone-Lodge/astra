@@ -1,5 +1,5 @@
 name = "astra_host"
-version = "0.0.1"
+version = "0.1.0"
 description = "Astra - the seam a host implements"
 
 [orbs]

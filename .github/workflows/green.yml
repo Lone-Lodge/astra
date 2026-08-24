@@ -1,0 +1,44 @@
+# The suite, on a machine that is not the author's laptop.
+#
+# Manual only: run it from the Actions tab, or `gh workflow run green`. A push
+# does not need a runner to tell it what `orbit run` already said locally.
+#
+# Astra is written in Orion, so the job builds Orion first, from its committed
+# seed. Nothing else is installed: astra's only dependency is the toolchain.
+
+name: green
+
+on: workflow_dispatch
+
+jobs:
+  suite:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false   # one red platform must not hide the other's result
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    defaults:
+      run:
+        shell: bash   # Windows runners have Git Bash; bootstrap is a bash script
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: astra
+
+      - uses: actions/checkout@v5
+        with:
+          repository: Lone-Lodge/orion
+          path: orion
+
+      - name: bootstrap orion
+        run: cd orion && bash tools/bootstrap.sh
+
+      - name: language suite
+        run: cd astra && ../orion/dist/orbit.exe run
+
+      - name: whole bundles parse
+        run: cd astra/test_parse && ../../orion/dist/orbit.exe run

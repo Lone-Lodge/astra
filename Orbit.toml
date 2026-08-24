@@ -1,10 +1,9 @@
 [package]
 name = "astra"
-version = "0.0.1"
+version = "0.1.0"
 description = "Astra - a small typed host-agnostic scripting language. Pure Orion."
 
 [orbs]
 astra = "path:orbs/astra"
-log = "path:../orion/orbs/log"
 os = "*"
 bytes = "*"

@@ -1,6 +1,6 @@
 # astra_ast - AST for rules.
 #
-# M1 grammar: rule + params + body of (emit | require | let) stmts,
+# The grammar: rule + params + body of (emit | require | let) stmts,
 # expressions support literals/varref/binop/unop/if/call/field access.
 
 
@@ -46,7 +46,7 @@ public type Stmt:
     SetVar(text, Expr)             # set name = value - host applies resource/var write
     ForEach(text, Expr, Expr, [Stmt])  # for x in list [where pred]: stmts - runtime list iteration with optional filter
     IfStmt(Expr, [Stmt])               # if cond: body-stmt (single-branch conditional)
-    RelateStmt(Expr, text, Expr)       # `relate A kind B` - create relation A -kind-> B (A3)
+    RelateStmt(Expr, text, Expr)       # `relate A kind B` - create relation A -kind-> B
 
 # A rule's parameter.
 public type Param: name: text, type_name: text

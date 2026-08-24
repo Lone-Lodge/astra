@@ -1,12 +1,13 @@
 # astra_host - the boundary.
 #
-# Two things the core can't do itself: read the world, resolve an
-# imported module. Hosts implement these so the language stays
-# host-agnostic. Atlas plugs in via atlas_astra.
+# The shape a host answers questions in. The core never reads the world
+# itself: it hands out a HostQuery and the host looks the answer up. That
+# is the whole seam today - atlas bridges the rest by hand in atlas_astra -
+# so this orb is a type, not yet a protocol.
 
 
-# Trait-shaped - the host implements `lookup` against its store and
-# `resolve` against its module map.
+# `kind` is "lookup" against the host's store or "resolve" against its
+# bundle map.
 public type HostQuery: kind: text, entity: number, field: text
 
 public define empty_query() -> HostQuery:

@@ -1,14 +1,12 @@
 # astra_lexer - tokenise `.astra` source.
 #
-# Port av Rust-implementationen (LodgeEngine/astra/src/lexer.rs).
-# Indent är kosmetisk - Newline separerar statements, brackets/keywords
-# delimar resten. Inga INDENT/DEDENT tokens behövs.
-#
-# Pure Orion - kompileras nativt av `orion` (LLVM-backend). Kördes tidigare
-# på lodge-orion-interpretern; den är arkiverad.
+# Indentation is cosmetic at this level: a Newline separates statements and
+# the brackets and keywords delimit the rest, so there are no INDENT/DEDENT
+# tokens. Every token carries its column, and the parser reads the tree
+# structure back out of those where it needs to.
 
 
-# Token-vocab - paritet med Rust astra::Tok.
+# The token vocabulary.
 # Comments interspersed in enum body confuse Orion's indent-tracking parser,
 # so all variant names live in one contiguous block, sections noted in trailing
 # comments rather than indented headers.
@@ -359,7 +357,7 @@ define one_char_symbol_math(c: number, start: number) -> SymStep:
 
 # ---- helpers ----
 
-# Append a Newline, dedup runs (matching Rust push_newline contract).
+# Append a Newline, and never two in a row.
 define push_newline(tokens: [Token], line: number) -> [Token]:
     n = length(tokens)
     if n is 0:

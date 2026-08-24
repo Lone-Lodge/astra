@@ -91,9 +91,9 @@ Atlas embeds Astra as `atlas_astra`, mapping `Value` to its own wire format.
 
 ## Build and check
 
-Astra is written in Orion and builds with Orion's `orbit`. Clone it beside
-[orion](https://github.com/Lone-Lodge/orion) in the same workspace; the
-toolchain finds the standard orbs by sweeping from the workspace root.
+Astra is written in Orion and builds with Orion's `orbit`. Install the
+[orion](https://github.com/Lone-Lodge/orion) toolchain and the standard orbs
+come with it; astra depends on nothing else.
 
 ```sh
 orbit run                    # the language suite, 76 checks

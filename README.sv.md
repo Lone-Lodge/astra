@@ -93,9 +93,9 @@ trådformat.
 
 ## Bygg och kontrollera
 
-Astra är skriven i Orion och byggs med Orions `orbit`. Klona den bredvid
-[orion](https://github.com/Lone-Lodge/orion) i samma arbetsyta; verktygskedjan
-hittar standardorbarna genom att svepa från arbetsytans rot.
+Astra är skriven i Orion och byggs med Orions `orbit`. Installera
+[orion](https://github.com/Lone-Lodge/orion) så följer standardorbarna med;
+astra beror på ingenting annat.
 
 ```sh
 orbit run                    # språksviten, 76 kontroller

@@ -18,4 +18,4 @@ public use astra_eval
 public use astra_host
 public use astra_run
 
-public define version() -> text = "0.0.1"
+public define version() -> text = "0.1.0"

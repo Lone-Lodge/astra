@@ -1,5 +1,5 @@
 name = "astra_run"
-version = "0.0.1"
+version = "0.1.0"
 description = "Astra - top-level run: source -> Outcome"
 
 [orbs]
@@ -11,4 +11,3 @@ astra_parser = "path:../astra_parser"
 astra_check = "path:../astra_check"
 astra_eval = "path:../astra_eval"
 bytes = "*"
-log = "path:../../../orion/orbs/log"

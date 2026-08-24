@@ -1,6 +1,6 @@
 # astra_eval - walk a Rule's body, produce an Outcome.
 #
-# M1+M2 features: require / let / emit statements; expressions with
+# Statements: require / let / emit. Expressions with
 # binops / unops / if-then-else / field access / function calls.
 # Helper `fn` definitions are resolved via the `funcs` table threaded
 # through every evaluator entry point.
@@ -185,7 +185,7 @@ define step_stmt(s: Stmt, state: EvalState, funcs: [Function]) -> EvalState:
 
 # `relate A kind B` -> an AstraRelate effect (source/target eval to
 # entity ids). The host maps it to atlas Relate; the relation is then
-# queryable via related_to/from (A3 create side).
+# queryable via related_to/from.
 define apply_relate(a: Expr, kind: text, b: Expr, state: EvalState, funcs: [Function]) -> EvalState:
     av = as_int(eval_expr(a, state.env, funcs))
     bv = as_int(eval_expr(b, state.env, funcs))
@@ -417,7 +417,7 @@ define eval_builtin_at(args: [Expr], env: [Binding], funcs: [Function]) -> Value
             ListV(items) then if i >= 0 and i < length(items) then items[i] else NoneV
             _ then NoneV
 
-# `related(source, kind)` -> [targets] - the relation query (A3). eval
+# `related(source, kind)` -> [targets] - the relation query. eval
 # stays host-agnostic: the host injects the relation index as a `__rel`
 # MapV ctx binding (keys "src:kind"), and this looks up the target list.
 # Missing -> empty list, so `count(x in related(npc, "hates"))` works

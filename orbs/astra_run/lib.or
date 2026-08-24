@@ -25,7 +25,7 @@ type Compiled: rules: [Rule], functions: [Function], consts: [Binding], componen
 
 # Lex + parse + (MVP: skip check) + evaluate the first rule by NAME.
 # Errors at any stage collapse to an empty Outcome - atlas pipes silent
-# refusals through, exactly how the Rust impl handles failed guards.
+# refusals through: a failed guard is a no-op, not an error.
 public define run(source: text, rule_name: text, args: [Value]) -> Outcome:
     c = compile(source)
     target = find_named_rule(c.rules, rule_name)

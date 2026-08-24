@@ -4,11 +4,11 @@ define main() -> number:
     t_begin()
 
     section("dispatch & effects")
-    # M1 regression
+    # A rule with a guard, a binding and an emit.
     src_rule = "rule scale(x): require x > 0 let d = x*2 emit Scaled()"
     check("rule scale(5) fires one effect", 1, eff_count(run(src_rule, "scale", [IntV(5)])))
 
-    # M2: on-event dispatch
+    # on-event dispatch
     src_handler = "on Click(x, y): require x > 0 emit Confirmed()"
     check("dispatch Click(10,20)", 1, eff_count(dispatch(src_handler, "Click", [IntV(10), IntV(20)])))
     check("dispatch Click(-1,20) refused", 0, eff_count(dispatch(src_handler, "Click", [IntV(0 - 1), IntV(20)])))
@@ -18,7 +18,7 @@ define main() -> number:
     check("two Tick handlers both fire", 2, eff_count(dispatch(src_multi, "Tick", [])))
 
     section("reactive when / every")
-    # M2.2: reactive `when` - edge-triggered milestones
+    # reactive `when` - edge-triggered milestones
     src_when = "when score >= 100: emit Milestone()"
     ctx_low = [Binding{name: "score", value: IntV(50)}]
     ctx_hit = [Binding{name: "score", value: IntV(100)}]
@@ -29,7 +29,7 @@ define main() -> number:
     t3 = tick(src_when, ctx_hit, t2.truths)
     check("when score=100 again is level, silent", 0, eff_count(t3.outcome))
 
-    # M2.3: `every N` periodic - sugar for when(tick % N is 0)
+    # `every N` periodic - sugar for when(tick % N is 0)
     src_every = "every 3: emit Pulse()"
     # Walk ticks 0..6 and count fires per tick. Expected fire ticks: 0, 3, 6.
     edit prev = []
@@ -42,7 +42,7 @@ define main() -> number:
     check("every 3 over ticks 0..6 fires 3x", 3, total)
 
     section("fields, fn helpers, queries")
-    # M2 multi-field: emit Place {col, row, color} carries all 3 fields.
+    # multi-field: emit Place {col, row, color} carries all 3 fields.
     # Loaded from disk because Orion interpolates `{...}` inside string
     # literals, which would clobber the astra field-block syntax.
     src_mf = read_file("fixtures/multi_field.astra")
@@ -50,12 +50,12 @@ define main() -> number:
     check("multi-field emit fires", 1, eff_count(out_mf))
     check("multi-field carries 3 fields", 3, first_effect_field_count(out_mf))
 
-    # M2 fn helpers: rule body calls pure functions defined in same file
+    # fn helpers: a rule body calls pure functions from the same file
     src_fn = read_file("fixtures/fn_call.astra")
     check("double(7) via fn helper", 14, first_field_int(run(src_fn, "scaled", [IntV(7)])))
     check("pixel_to_col(220) via fn helper", 2, first_field_int(run(src_fn, "click", [IntV(220)])))
 
-    # M3 queries: bind a ListV of entity-record MapVs into ctx, run
+    # queries: bind a ListV of entity-record MapVs into ctx, run
     # `count(x in items where x.field is value)` over it.
     src_q = read_file("fixtures/count_query.astra")
     ctx_q = [Binding{name: "items", value: ListV(build_items())}]
@@ -63,7 +63,7 @@ define main() -> number:
     check("count row==3", 2, first_field_int(run_rule_in_ctx(src_q, "row3", ctx_q)))
 
     section("loops & spawn")
-    # M3 bounded `for` - expands at parse time to N copies of the body
+    # bounded `for` - expands at parse time to N copies of the body
     # with iter var substituted. Verify only r=2 fires (the matching
     # `when r is 2:` rule).
     src_for = read_file("fixtures/for_loop.astra")

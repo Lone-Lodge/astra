@@ -2,8 +2,8 @@
 #
 # Four scalar types (Int / Text / Bool / Ref) so the typechecker is a
 # table lookup, not Hindley-Milner. MapV gives us multi-field payloads
-# (emit X { a: 1, b: 2 }) and is the shape M3 queries will return for
-# entity records. Absence is Option, modeled here with an explicit
+# (emit X { a: 1, b: 2 }) and is the shape a query returns for an
+# entity record. Absence is Option, modeled here with an explicit
 # `None` variant per type since Orion enums don't carry generics yet.
 
 public type Value:
