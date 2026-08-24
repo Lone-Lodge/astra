@@ -13,12 +13,12 @@ define main() -> number:
     check("dispatch Click(10,20)", 1, eff_count(dispatch(src_handler, "Click", [IntV(10), IntV(20)])))
     check("dispatch Click(-1,20) refused", 0, eff_count(dispatch(src_handler, "Click", [IntV(0 - 1), IntV(20)])))
 
-    # Multiple handlers for same event — both fire
+    # Multiple handlers for same event - both fire
     src_multi = "on Tick(): emit A()\non Tick(): emit B()"
     check("two Tick handlers both fire", 2, eff_count(dispatch(src_multi, "Tick", [])))
 
     section("reactive when / every")
-    # M2.2: reactive `when` — edge-triggered milestones
+    # M2.2: reactive `when` - edge-triggered milestones
     src_when = "when score >= 100: emit Milestone()"
     ctx_low = [Binding{name: "score", value: IntV(50)}]
     ctx_hit = [Binding{name: "score", value: IntV(100)}]
@@ -29,7 +29,7 @@ define main() -> number:
     t3 = tick(src_when, ctx_hit, t2.truths)
     check("when score=100 again is level, silent", 0, eff_count(t3.outcome))
 
-    # M2.3: `every N` periodic — sugar for when(tick % N is 0)
+    # M2.3: `every N` periodic - sugar for when(tick % N is 0)
     src_every = "every 3: emit Pulse()"
     # Walk ticks 0..6 and count fires per tick. Expected fire ticks: 0, 3, 6.
     edit prev = []
@@ -63,7 +63,7 @@ define main() -> number:
     check("count row==3", 2, first_field_int(run_rule_in_ctx(src_q, "row3", ctx_q)))
 
     section("loops & spawn")
-    # M3 bounded `for` — expands at parse time to N copies of the body
+    # M3 bounded `for` - expands at parse time to N copies of the body
     # with iter var substituted. Verify only r=2 fires (the matching
     # `when r is 2:` rule).
     src_for = read_file("fixtures/for_loop.astra")
@@ -114,7 +114,7 @@ define main() -> number:
     src_bad = "fn dbl(n): n * 2\nfn dbl(n): n * 3\nrule go(x): require dbl(x, x) > 0\nrule bad(x): require missing(x) > 0"
     check("checker: bad bundle has 3 errors", 3, length(astra_check_source(src_bad)))
 
-    # NEXTGEN #5a — exhaustive `when` over an enum state. A partial
+    # Exhaustive `when` over an enum state. A partial
     # equality-switch (a variant with no branch) is flagged; full coverage,
     # any non-` is ` reference, and an unswitched enum are all clean.
     src_when_partial = "state door: enum(Shut, Open, Locked) = Shut\nwhen door == Shut: emit A n: 1\nwhen door == Locked: emit B n: 1"
@@ -131,7 +131,7 @@ define main() -> number:
     check("all x>0 over [2,4,6]", 1, int_of_value(eval_fn(src_all, "allpos", [])))
     check("all x>0 over [2,0,6]", 0, int_of_value(eval_fn(src_all, "allneg", [])))
 
-    # `for` as an alias for `each` — same loop macro, both spellings.
+    # `for` as an alias for `each` - same loop macro, both spellings.
     src_fora = read_file("fixtures/for_alias.astra")
     check("for-alias cold tick fires only r=2", 1, eff_count(tick(src_fora, [], []).outcome))
 
@@ -144,7 +144,7 @@ define main() -> number:
     check("failing inline test caught", 0, count_passed(run_tests(src_tfail)))
 
     section("intent, field access, if-stmt")
-    # intent (AI-native, pillar 1): utility scored into a resource per tick.
+    # intent: utility scored into a resource per tick.
     src_intent = "intent FeedSelf for Worker:\n    require hunger > 50\n    utility hunger"
     out_hi = dispatch_ctx(src_intent, "Tick", [], [Binding{name: "hunger", value: IntV(60)}])
     check("intent applicable at hunger=60", 1, setvar_of(out_hi, "intent:FeedSelf:applicable"))
@@ -152,13 +152,13 @@ define main() -> number:
     out_lo = dispatch_ctx(src_intent, "Tick", [], [Binding{name: "hunger", value: IntV(40)}])
     check("intent score at hunger=40", 0, setvar_of(out_lo, "intent:FeedSelf:score"))
 
-    # `.empty` field access — `empty` must lex as an identifier, not a keyword
-    # (VISION: `require cell.empty`). A reserved `empty` breaks the `.` access.
+    # `.empty` field access - `empty` must lex as an identifier, not a keyword
+    # A reserved `empty` would break the `.` access.
     src_empty = "rule check(cell): require cell.empty emit Ok()"
     cell_rec = MapV(append([], ValueField{name: "empty", value: IntV(1)}))
     check("cell.empty field access", 1, eff_count(run(src_empty, "check", [cell_rec])))
 
-    # In-body `if cond: body` statement — a single-branch conditional inside
+    # In-body `if cond: body` statement - a single-branch conditional inside
     # a rule body. Dispatched on the `if` keyword (not `when`, which delimits
     # top-level rules); the guarded emit fires only when the condition holds.
     src_ifstmt = "rule big(x): if x > 5: emit Big()"
@@ -167,7 +167,7 @@ define main() -> number:
 
     section("text: concat, interpolation, empty")
     # Text `+` concatenates when either side is text (was integer add,
-    # which silently produced IntV(0) — every dynamic string in a
+    # which silently produced IntV(0) - every dynamic string in a
     # text-first game came out blank).
     check("text \"a\" + \"b\" == ab", 1, text_is("fn f() -> text:\n    \"a\" + \"b\"\n", [], "ab"))
     check("text \"n=\" + 7 == n=7", 1, text_is("fn f(n: int) -> text:\n    \"n=\" + n\n", [IntV(7)], "n=7"))
@@ -272,11 +272,11 @@ define spawn_field_count(o: Outcome) -> number:
 
 # Small helper: run a parameterless rule with a pre-built env. The
 # regular `run` binds args to rule params; here we want free names
-# (`items`) bound directly. We use `tick` semantics? No — that's `when`-
+# (`items`) bound directly. We use `tick` semantics? No - that's `when`-
 # only. Instead use the dispatch path with a synthetic event handler.
 # Simpler: inject by re-using run() but with a paren-form rule that
 # has no params; the rule body references the ctx names which are
-# absent — fails. We have to plumb env into a named-rule call.
+# absent - fails. We have to plumb env into a named-rule call.
 #
 # Approach: write the fixtures so the rule takes `items` as a param,
 # then pass [items] to run().
@@ -320,7 +320,7 @@ define map_value_size(v: Value) -> number:
         MapV(entries) then length(entries)
         _ then 0
 
-# Pull the first MapV entry's IntV out — used by fn-helper tests to
+# Pull the first MapV entry's IntV out - used by fn-helper tests to
 # assert the emitted payload value.
 define first_field_int(o: Outcome) -> number:
     if length(o.effects) is 0:

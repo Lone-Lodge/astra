@@ -1,14 +1,14 @@
-# astra_lexer — tokenise `.astra` source.
+# astra_lexer - tokenise `.astra` source.
 #
 # Port av Rust-implementationen (LodgeEngine/astra/src/lexer.rs).
-# Indent är kosmetisk — Newline separerar statements, brackets/keywords
+# Indent är kosmetisk - Newline separerar statements, brackets/keywords
 # delimar resten. Inga INDENT/DEDENT tokens behövs.
 #
-# Pure Orion — kompileras nativt av `orion` (LLVM-backend). Kördes tidigare
+# Pure Orion - kompileras nativt av `orion` (LLVM-backend). Kördes tidigare
 # på lodge-orion-interpretern; den är arkiverad.
 
 
-# Token-vocab — paritet med Rust astra::Tok.
+# Token-vocab - paritet med Rust astra::Tok.
 # Comments interspersed in enum body confuse Orion's indent-tracking parser,
 # so all variant names live in one contiguous block, sections noted in trailing
 # comments rather than indented headers.
@@ -110,13 +110,13 @@ public type Tok:
 
 # A token + its source line and start column (1-based). The column of
 # a statement's first token is what block parsers compare to detect
-# dedent — Astra has no INDENT/DEDENT tokens.
+# dedent - Astra has no INDENT/DEDENT tokens.
 public type Token: tok: Tok, line: number, col: number
 
 # Lex error with the offending line.
 public type LexError: message: text, line: number
 
-# A lex result — empty `error` means tokens are good. Sum types with payload
+# A lex result - empty `error` means tokens are good. Sum types with payload
 # in Orion are still rough, so we return both fields and a flag.
 public type LexResult: tokens: [Token], ok: truth, error: LexError
 
@@ -164,7 +164,7 @@ public define lex(source: text) -> LexResult:
                             err_msg = res.error
                             err_line = line
                     else:
-                        # digit → int
+                        # digit -> int
                         if alx_is_digit(c):
                             res = scan_int(bs, i, n, line)
                             if res.ok:
@@ -175,7 +175,7 @@ public define lex(source: text) -> LexResult:
                                 err_msg = res.error
                                 err_line = line
                         else:
-                            # alpha → ident or keyword
+                            # alpha -> ident or keyword
                             if is_alpha(c):
                                 step = scan_ident(bs, i, n)
                                 tokens = append(tokens, Token{tok: keyword_of(step.text), line: line, col: i - line_start + 1})
@@ -377,7 +377,7 @@ define push_newline(tokens: [Token], line: number) -> [Token]:
             append(tokens, Token{tok: Newline, line: line, col: 0})
 
 define is_newline_token(t: Token) -> truth:
-    # Pattern-match-via-fold — Orion's enum match should handle this.
+    # Pattern-match-via-fold - Orion's enum match should handle this.
     choose t.tok:
         Newline then true
         _ then false
@@ -399,7 +399,7 @@ define keyword_of(text: text) -> Tok:
     else if text is "test" then Test
     else if text is "apply" then Apply
     else if text is "expect" then Expect
-    # `tick` intentionally not reserved — atlas_astra auto-injects it
+    # `tick` intentionally not reserved - atlas_astra auto-injects it
     # as a ctx binding so scripts use it as a regular identifier.
     else if text is "if" then If
     else if text is "then" then Then

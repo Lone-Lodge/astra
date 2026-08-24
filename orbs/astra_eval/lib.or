@@ -1,4 +1,4 @@
-# astra_eval — walk a Rule's body, produce an Outcome.
+# astra_eval - walk a Rule's body, produce an Outcome.
 #
 # M1+M2 features: require / let / emit statements; expressions with
 # binops / unops / if-then-else / field access / function calls.
@@ -16,14 +16,14 @@ public external define orion_persist_on() -> int
 public external define orion_persist_off() -> int
 
 
-# Helper data — name+value pair for the environment.
+# Helper data - name+value pair for the environment.
 public type Binding: name: text, value: Value
 
 # A failed `require` aborts the rule with an empty outcome.
 public type EvalState: env: [Binding], effects: [AstraEffect], refused: truth
 
 # Run a rule body against positional args. `funcs` is the table of pure
-# helpers `Call(name, args)` expressions can dispatch to — pass [] when
+# helpers `Call(name, args)` expressions can dispatch to - pass [] when
 # none are defined.
 public define run_rule(r: Rule, args: [Value], funcs: [Function]) -> Outcome:
     env = bind_params(r.params, args, 0, [])
@@ -38,7 +38,7 @@ public define run_rule_args_ctx(r: Rule, args: [Value], ctx: [Binding], funcs: [
 
 # Observer run condition: `on X(...) when EXPR:` stores EXPR in
 # r.condition. Parser defaults condition to LitBool(true) for guardless
-# handlers — the equality check below short-circuits the eval so the
+# handlers - the equality check below short-circuits the eval so the
 # common (no-guard) path pays nothing.
 define rule_gate_open(r: Rule, env: [Binding], funcs: [Function]) -> truth:
     choose r.condition:
@@ -88,9 +88,9 @@ public define run_rule_env(r: Rule, env: [Binding], funcs: [Function]) -> Outcom
 public define eval_in_env(e: Expr, env: [Binding], funcs: [Function]) -> Value:
     eval_expr(e, env, funcs)
 
-# Truthiness check exposed for the runtime — same semantics as the
-# internal `is_truthy` (BoolV → b, IntV → is not 0, TextV → non-empty,
-# RefV → true, NoneV → false).
+# Truthiness check exposed for the runtime - same semantics as the
+# internal `is_truthy` (BoolV -> b, IntV -> is not 0, TextV -> non-empty,
+# RefV -> true, NoneV -> false).
 public define value_is_truthy(v: Value) -> truth:
     is_truthy(v)
 
@@ -139,7 +139,7 @@ define rewound_ref(x: number, mark: number) -> Value:
 public external define octr_add(i: int, n: int)
 
 # Backward scan: params/lets sit at the end, so shadowing is "last
-# wins" — first hit from the back, usually within a couple of probes.
+# wins" - first hit from the back, usually within a couple of probes.
 define lookup(env: [Binding], name: text) -> Value:
     edit found = NoneV
     edit i = length(env) - 1
@@ -262,7 +262,7 @@ define spawn_to_effect(kind: text, fields: [FieldExpr], env: [Binding], funcs: [
     loop f in fields:
         v = eval_expr(f.value, env, funcs)
         # A field that evaluates to NOTHING (e.g. `hint: cmd.hint` where the
-        # data row has no hint) is simply left unset — the component takes
+        # data row has no hint) is simply left unset - the component takes
         # its type default. Skipping it keeps optional data-driven fields
         # crash-proof: without this, NoneV reached spawn_effect's text concat
         # as a bad pointer and faulted.
@@ -335,7 +335,7 @@ define values_equal(a: Value, b: Value) -> truth:
 
 # Look up `name` in the function table, bind evaluated args to its
 # params, evaluate its body in the resulting env. Unknown names return
-# NoneV — keeps the language graceful when a rule references a helper
+# NoneV - keeps the language graceful when a rule references a helper
 # that hasn't been defined yet (e.g. during hot-reload mid-edit).
 define eval_call(name: text, args: [Expr], env: [Binding], funcs: [Function]) -> Value:
     if name is "size":
@@ -377,9 +377,9 @@ define eval_hole(args: [Expr], env: [Binding], funcs: [Function]) -> Value:
             NoneV then if length(args) > 1 then eval_expr(args[1], env, funcs) else TextV("")
             _ then TextV(text_coerce(v))
 
-# Helper fn call — extracted so the builtin ladder above stays flat.
+# Helper fn call - extracted so the builtin ladder above stays flat.
 # Helper fns are pure: everything a call allocates is garbage except
-# its result. Calls run in the frame arena as an obstack — each call
+# its result. Calls run in the frame arena as an obstack - each call
 # saves a watermark, scalar results are re-boxed after rewinding to it.
 # The top-level call evacuates by deep copy and resets.
 define eval_user_call(name: text, args: [Expr], env: [Binding], funcs: [Function]) -> Value:
@@ -417,7 +417,7 @@ define eval_builtin_at(args: [Expr], env: [Binding], funcs: [Function]) -> Value
             ListV(items) then if i >= 0 and i < length(items) then items[i] else NoneV
             _ then NoneV
 
-# `related(source, kind)` -> [targets] — the relation query (A3). eval
+# `related(source, kind)` -> [targets] - the relation query (A3). eval
 # stays host-agnostic: the host injects the relation index as a `__rel`
 # MapV ctx binding (keys "src:kind"), and this looks up the target list.
 # Missing -> empty list, so `count(x in related(npc, "hates"))` works
@@ -430,7 +430,7 @@ define eval_builtin_related(args: [Expr], env: [Binding], funcs: [Function]) -> 
         kind = text_of_value(eval_expr(args[1], env, funcs))
         related_lookup(lookup(env, "__rel"), "{src}:{kind}")
 
-# `entities_of_trait(name)` -> [int] — all entity ids of every type
+# `entities_of_trait(name)` -> [int] - all entity ids of every type
 # that `uses NAME` as a trait. Reads the __trait_index ctx binding
 # populated by the host (atlas). Empty when the index isn't wired or
 # no matching entities exist.
@@ -441,7 +441,7 @@ define eval_builtin_entities_of_trait(args: [Expr], env: [Binding], funcs: [Func
         trait_name = text_of_value(eval_expr(args[0], env, funcs))
         related_lookup(lookup(env, "__trait_index"), trait_name)
 
-# `entity_field(eid, field_name)` -> Value — read one field off an
+# `entity_field(eid, field_name)` -> Value - read one field off an
 # entity regardless of its component type. The host resolves via the
 # __ent_fields ctx binding: MapV keyed by "{eid}:{field}". Missing =
 # NoneV. Used with entities_of_trait to iterate cross-type queries.
@@ -458,10 +458,10 @@ define entity_field_lookup(idx: Value, key: text) -> Value:
         MapV(entries) then lookup_field(entries, key)
         _ then NoneV
 
-# `related_from(target, kind)` -> [sources] — the reverse relation query.
+# `related_from(target, kind)` -> [sources] - the reverse relation query.
 # Reads the __rel_rev ctx binding (keys "target:kind"), symmetric to
 # `related()`. Bevy's #9 idea: an auto-mirrored index maintained by
-# atlas (do_relate/do_unrelate write both fwd and rev) — a graph
+# atlas (do_relate/do_unrelate write both fwd and rev) - a graph
 # integrity guarantee no user code has to enforce.
 define eval_builtin_related_from(args: [Expr], env: [Binding], funcs: [Function]) -> Value:
     if length(args) < 2:
@@ -532,9 +532,9 @@ define eval_map_fields(fields: [FieldExpr], env: [Binding], funcs: [Function], i
         f = fields[i]
         eval_map_fields(fields, env, funcs, i + 1, append(acc, ValueField{name: f.name, value: eval_expr(f.value, env, funcs)}))
 
-# Field access — `b.col` against a MapV walks its entries for a matching
+# Field access - `b.col` against a MapV walks its entries for a matching
 # name. Non-MapV bases are NoneV (silent miss, consistent with VarRef on
-# unknown names — the language stays graceful under hot-reload).
+# unknown names - the language stays graceful under hot-reload).
 define eval_field(base: Value, name: text) -> Value:
     choose base:
         MapV(entries) then lookup_field(entries, name)
@@ -551,14 +551,14 @@ define lookup_field(entries: [ValueField], name: text) -> Value:
 
 # Iterate a ListV, bind each element to `iter_name` in env, evaluate
 # `cond_expr`, count truthy results. Returns IntV(count). Non-list source
-# evaluates as 0 — same gracefulness as Field on a non-MapV.
+# evaluates as 0 - same gracefulness as Field on a non-MapV.
 define eval_count(iter_name: text, list_expr: Expr, cond_expr: Expr, env: [Binding], funcs: [Function]) -> Value:
     src = eval_expr(list_expr, env, funcs)
     choose src:
         ListV(items) then IntV(count_matching(iter_name, items, cond_expr, env, funcs, 0, 0))
         _ then IntV(0)
 
-# Hot path — one env slot is reused across elements (set, not push).
+# Hot path - one env slot is reused across elements (set, not push).
 # A fresh env copy per element made count-heavy scripts allocate tens
 # of MB per tick (gamestate: 58MB -> negligible).
 define count_matching(iter_name: text, items: [Value], cond_expr: Expr, env: [Binding], funcs: [Function], i: number, acc: number) -> number:
@@ -578,7 +578,7 @@ define count_matching(iter_name: text, items: [Value], cond_expr: Expr, env: [Bi
 
 # and/or SHORT-CIRCUIT: a false guard means the heavy right side is
 # never evaluated. `when board_dirty is 1 and expensive(...)` costs
-# one int compare on quiet passes — without this every when-rule
+# one int compare on quiet passes - without this every when-rule
 # paid its full worst case every sims pass.
 define eval_binop_lazy(op: text, a: Expr, b: Expr, env: [Binding], funcs: [Function]) -> Value:
     if op is "and":
@@ -626,7 +626,7 @@ define text_of_value(v: Value) -> text:
         _ then ""
 
 # Printed form of any scalar for text concatenation. Int/Ref render as
-# digits, Bool as true/false, absence as empty — the same shapes an
+# digits, Bool as true/false, absence as empty - the same shapes an
 # interpolation would produce.
 define text_coerce(v: Value) -> text:
     choose v:

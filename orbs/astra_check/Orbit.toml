@@ -1,6 +1,6 @@
 name = "astra_check"
 version = "0.0.1"
-description = "Astra — table-lookup typechecker"
+description = "Astra - the loud pass: unknown call, wrong arity, duplicate name"
 
 [orbs]
 astra_ast = "path:../astra_ast"

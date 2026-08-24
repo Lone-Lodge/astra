@@ -1,13 +1,14 @@
-# astra_parser — tokens → AST. MVP scope: `rule name(): emit X {f: lit}`.
+# astra_parser - tokens -> AST, and every piece of sugar.
 #
-# Pure-Orion recursive descent. Cursor + helpers follow the Rust
-# LodgeEngine/astra/src/parser/mod.rs structure 1:1, but the grammar
-# subset is intentionally tiny for the first iteration.
+# Pure-Orion recursive descent over a cursor. Most of the language's
+# surface is desugared here rather than carried into eval: a form that
+# can become an existing node shape does, so the evaluator stays small
+# and a new keyword costs no exhaustive-match churn downstream.
 #
 # push_mut audit (applies to every accumulator in this file): each is
 # a fresh `mut xs = []` local, appended in one loop, stored once into
 # the result record, never aliased before that store. Value-semantic
-# push here cost a spine copy per node — the parse of a game's 10KB of
+# push here cost a spine copy per node - the parse of a game's 10KB of
 # scripts allocated 6.4MB of permanent heap (compile runs under the
 # persist guard). The recursive subst_* helpers keep plain push: their
 # accumulator threads through call arguments.
@@ -15,18 +16,18 @@
 
 public type ParseError: message: text, line: number
 
-# A parse result — `ok: false` means consult `error`. `functions` are
+# A parse result - `ok: false` means consult `error`. `functions` are
 # pure helpers callable from rule expressions; `rules` are the regular
 # `rule`/`on`/`when`/`every` bodies; `entities` are typed authoring
 # declarations the host uses to register constructors for `spawn Kind`;
 # `components` are ECS component type declarations (`component Kind: f:t`).
-# External reactive data sources — declared as `source NAME from file
+# External reactive data sources - declared as `source NAME from file
 # "path" [refresh Ns]`. Atlas reads the file at boot and (later) on a
 # refresh cadence, writing contents to the prefixed resource `NAME`.
 # Only file kind in v1; http/websocket/mmo come in follow-up slices.
 public type SourceDecl: name: text, kind: text, path: text, refresh_ms: number
 
-# Declarative tween — `animate NAME from A to B over N unit
+# Declarative tween - `animate NAME from A to B over N unit
 # [when TRIGGER becomes VALUE]`. Without a trigger, the tween runs
 # once at boot. With a trigger, it waits for the trigger resource to
 # transition to VALUE (edge-fire), then runs. Every subsequent edge
@@ -34,14 +35,14 @@ public type SourceDecl: name: text, kind: text, path: text, refresh_ms: number
 # trigger_name is "" means no trigger (boot-once).
 public type AnimationDecl: name: text, from_val: number, to_val: number, duration_ms: number, trigger_name: text, trigger_value: number, easing: text
 
-# Typed asset reference — `asset X: sprite/audio/text "path"`. Atlas
-# verifies the file exists at boot and registers name→path so widgets
+# Typed asset reference - `asset X: sprite/audio/text "path"`. Atlas
+# verifies the file exists at boot and registers name->path so widgets
 # can reference the asset by name (`sprite: my_wolf`) instead of raw
-# string paths. Fails hard at boot when a file is missing — the shift
+# string paths. Fails hard at boot when a file is missing - the shift
 # from silent-at-runtime to loud-at-load-time.
 public type AssetDecl: name: text, kind: text, path: text
 
-# Trait declaration — `trait X { field: type }`. A reusable field
+# Trait declaration - `trait X { field: type }`. A reusable field
 # bundle. When a `type Y uses A, B { extra }` composes it, the parser
 # inlines A's and B's fields into Y's ComponentDecl. Pure parse-time
 # sugar; the ECS sees one merged component per Y, no multi-component
@@ -55,8 +56,8 @@ public type TraitDecl: name: text, fields: [Param]
 # Movable) without any storage-level multi-component ECS rewrite.
 public type TypeTraits: type_name: text, traits: [text]
 
-# `template NAME(params) = EXPR` — parameterised fragment. Replaces
-# per-shape widget types (List/Grid/Card/Pill…). At runtime a template
+# `template NAME(params) = EXPR` - parameterised fragment. Replaces
+# per-shape widget types (List/Grid/Card/Pill...). At runtime a template
 # is invoked with concrete arguments and expands its body expression
 # with the params bound. Body is a normal Astra expression in v1;
 # extension to widget-tree literals lands with Veil's Panel primitive.
@@ -64,11 +65,11 @@ public type TemplateDecl: name: text, params: [Param], body: Expr
 # A reusable widget prop bundle: `style NAME:` then indented `key: value`.
 public type StyleDecl: name: text, fields: [FieldExpr]
 
-# One entry in a `tokens NS:` block — `key: value`. Value is any
+# One entry in a `tokens NS:` block - `key: value`. Value is any
 # expression (int/text/ident) resolved at consume-time.
 public type TokenEntry: key: text, value: Expr
 
-# `tokens NAMESPACE:` — design-system token block. Atlas registers
+# `tokens NAMESPACE:` - design-system token block. Atlas registers
 # each namespace so widgets can consume `style: card` via a runtime
 # resolver. Namespace + key together form the resolved token id
 # (e.g. `color.bg`, `layout.card`).
@@ -89,7 +90,7 @@ public define parse(tokens: [Token]) -> ParseResult:
     # State decls (`state NAME: TYPE = INIT`) accumulate here; at
     # end-of-parse we synthesise one on Init() rule from the inits and
     # clamp every SetVar in every rule whose name has bounds. Pure
-    # parser sugar — no downstream consumer changes.
+    # parser sugar - no downstream consumer changes.
     edit state_inits = []
     edit state_bounds = []
     # Enum-typed states, retained so the checker can flag non-exhaustive
@@ -106,7 +107,7 @@ public define parse(tokens: [Token]) -> ParseResult:
     edit styles = []
     # Top-level widget tree: `Panel ...` / `for x in [..]:` written at the
     # bundle's top level (no `on Init()` wrapper) collect here and fold into
-    # the synthesised Init. The tree IS the declaration — declare the scene
+    # the synthesised Init. The tree IS the declaration - declare the scene
     # like state/tokens, not inside a lifecycle callback.
     edit tree_stmts = []
     edit failed = false
@@ -146,11 +147,11 @@ public define parse(tokens: [Token]) -> ParseResult:
         else:
             # Flat keyword dispatch: one self-contained block per top-level
             # construct, each guarded by `handled`, so adding a construct is
-            # one block — not another pyramid level. Order is irrelevant (the
+            # one block - not another pyramid level. Order is irrelevant (the
             # leading keyword is unambiguous) except the implicit-fn and
             # belief/goal/rule fallthroughs, which must stay last.
             handled = false
-            # `type X ...` — the only shape. `component` was from an earlier design
+            # `type X ...` - the only shape. `component` was from an earlier design
             # jargon; databases (SurrealDB/EdgeDB) use `type`. First-
             # version cleanup: one-way syntax, no aliases.
             if match_tok(tokens, i, n, "Type"):
@@ -166,7 +167,7 @@ public define parse(tokens: [Token]) -> ParseResult:
                     err_msg = cstep.error
                     err_line = t.line
             if not handled and match_tok(tokens, i, n, "Trait"):
-                # `trait X { fields }` — reusable field bundle. Types
+                # `trait X { fields }` - reusable field bundle. Types
                 # declare `uses X` to inline the fields.
                 handled = true
                 tstep = parse_trait_decl(tokens, i + 1, n)
@@ -212,7 +213,7 @@ public define parse(tokens: [Token]) -> ParseResult:
                 # Two top-level `for`s: `for x in INT..INT:` is the compile-
                 # time range macro (unrolls to rules); `for x in [list]:` (or
                 # any non-int source) is a runtime foreach that spawns into
-                # the tree — it folds into the synthesised Init.
+                # the tree - it folds into the synthesised Init.
                 if is_range_for(tokens, i, n):
                     floop = parse_for_loop(tokens, i + 1, n)
                     if floop.ok:
@@ -232,7 +233,7 @@ public define parse(tokens: [Token]) -> ParseResult:
                         failed = true
                         err_msg = festep.error
                         err_line = t.line
-            # `view X = EXPR` — a value that is ALWAYS its expression.
+            # `view X = EXPR` - a value that is ALWAYS its expression.
             # Matches SQL materialized-view. `derive` (early Astra) is
             # gone in v1.
             if not handled and match_tok(tokens, i, n, "View"):
@@ -248,8 +249,8 @@ public define parse(tokens: [Token]) -> ParseResult:
                     err_msg = dstep.error
                     err_line = t.line
             if not handled and match_tok(tokens, i, n, "Fact"):
-                # `fact NAME = EXPR [in ...] [conf N]` — consolidates
-                # view/goal/constraint/belief into one keyword (NEXTGEN #3).
+                # `fact NAME = EXPR [in ...] [conf N]` - consolidates
+                # view/goal/constraint/belief into one keyword.
                 handled = true
                 fstep = parse_fact_decl(tokens, i + 1, n)
                 if fstep.ok:
@@ -276,7 +277,7 @@ public define parse(tokens: [Token]) -> ParseResult:
                 # emit consts (one per value, ints 0-indexed) SO `dead`
                 # in `game_over = dead` resolves to IntV(1) within THIS
                 # bundle. They also emit SetVars into Init so the values
-                # become world resources — auto-ctx then makes them
+                # become world resources - auto-ctx then makes them
                 # readable in every other bundle (`if game_over is dead`
                 # in narrative.astra resolves via world state, not
                 # bundle-local consts).
@@ -313,7 +314,7 @@ public define parse(tokens: [Token]) -> ParseResult:
                     err_line = t.line
             if not handled and match_tok(tokens, i, n, "Asset"):
                 # `asset NAME: kind "path"` -> AssetDecl. Atlas verifies
-                # + registers name→path at boot.
+                # + registers name->path at boot.
                 handled = true
                 aset_step = parse_asset_decl(tokens, i + 1, n)
                 if aset_step.ok:
@@ -336,10 +337,10 @@ public define parse(tokens: [Token]) -> ParseResult:
                     err_msg = srcstep.error
                     err_line = t.line
             if not handled and match_tok(tokens, i, n, "Patch"):
-                # `patch command NAME CODE [needs...]: body` — bundle-
+                # `patch command NAME CODE [needs...]: body` - bundle-
                 # local override: post-parse step removes the earlier
                 # `cmd:NAME` rule so only the patch runs. Cross-bundle
-                # patches (mods/) need atlas-level layering — future.
+                # patches (mods/) need atlas-level layering - future.
                 handled = true
                 if match_tok(tokens, i + 1, n, "Command"):
                     cmdstep = parse_command_decl(tokens, i + 2, n)
@@ -373,7 +374,7 @@ public define parse(tokens: [Token]) -> ParseResult:
                     err_msg = tmplstep.error
                     err_line = t.line
             if not handled and match_tok(tokens, i, n, "Component"):
-                # `component NAME(params):` + an indented widget subtree — a
+                # `component NAME(params):` + an indented widget subtree - a
                 # parameterised, reusable component. Instantiations NAME(args)
                 # in the tree are expanded (subst + splice) after parsing.
                 handled = true
@@ -413,7 +414,7 @@ public define parse(tokens: [Token]) -> ParseResult:
                     err_msg = cmdstep.error
                     err_line = t.line
             if not handled and match_tok(tokens, i, n, "Test"):
-                # `test NAME:` — inline test block (dev surface).
+                # `test NAME:` - inline test block (dev surface).
                 handled = true
                 tstep = parse_test_decl(tokens, i + 1, n)
                 if tstep.ok:
@@ -424,7 +425,7 @@ public define parse(tokens: [Token]) -> ParseResult:
                     err_msg = tstep.error
                     err_line = t.line
             if not handled and looks_like_style_decl(tokens, i, n):
-                # `style NAME:` then indented `key: value` — a reusable prop
+                # `style NAME:` then indented `key: value` - a reusable prop
                 # bundle. "style" is a bare ident (no keyword/enum surgery).
                 handled = true
                 stystep = parse_style_decl(tokens, i + 1, n)
@@ -436,7 +437,7 @@ public define parse(tokens: [Token]) -> ParseResult:
                     err_msg = stystep.error
                     err_line = t.line
             if not handled and looks_like_implicit_fn(tokens, i, n):
-                # `NAME(params): body` with no `fn` keyword — a top-level pure
+                # `NAME(params): body` with no `fn` keyword - a top-level pure
                 # helper. parse_function takes the name as its start token, so
                 # pass `i` (not i+1 like the explicit `fn` path).
                 handled = true
@@ -448,7 +449,7 @@ public define parse(tokens: [Token]) -> ParseResult:
                     failed = true
                     err_msg = ifstep.error
                     err_line = t.line
-            # `data NAME(cols):` + indented rows — a schema'd data table → const list.
+            # `data NAME(cols):` + indented rows - a schema'd data table -> const list.
             if not handled and looks_like_data_decl(tokens, i, n):
                 handled = true
                 dbstep = parse_data_decl(tokens, i, n)
@@ -459,7 +460,7 @@ public define parse(tokens: [Token]) -> ParseResult:
                     failed = true
                     err_msg = dbstep.error
                     err_line = t.line
-            # `Panel ...` / `Text ...` at top level — a widget-tree node with
+            # `Panel ...` / `Text ...` at top level - a widget-tree node with
             # no `on Init()` wrapper. Parse it (+ its indented props) as a
             # spawn and collect into the tree; parent-inference nests the
             # whole run by column at end-of-parse.
@@ -487,12 +488,12 @@ public define parse(tokens: [Token]) -> ParseResult:
         ParseResult{rules: [], functions: [], entities: [], consts: [], components: [], uses: [], tests: [], sources: [], animations: [], assets: [], type_traits: [], templates: [], token_blocks: [], styles: [], enum_states: [], ok: false, error: ParseError{message: err_msg, line: err_line}}
     else:
         # State post-processing: synthesise Init from collected inits;
-        # clamp SetVars whose name has bounds. Order matters — synthetic
+        # clamp SetVars whose name has bounds. Order matters - synthetic
         # Init is prepended so user rules run after (letting user Init
         # writes override defaults if both exist for the same name).
         # Patch resolution: `patch:X` rules override `cmd:X` rules
         # (bundle-local). Filter out patched base rules, then rename
-        # `patch:X` → `cmd:X` so dispatch treats them uniformly.
+        # `patch:X` -> `cmd:X` so dispatch treats them uniformly.
         # Hoist show-expressions: a `show:` whose value is an EXPRESSION
         # (not a lone resource name / bareword) is lifted into a synthesised
         # `view __show_N = <expr>` rule (recomputed each tick) and the field
@@ -518,7 +519,7 @@ public define parse(tokens: [Token]) -> ParseResult:
         final_rules = if length(init_body) > 0 then push_front(patched, Rule{name: "$state_init", params: [], body: init_body, trigger: "Init", condition: LitBool(true)}) else patched
         final_rules_clamped = if length(state_bounds) > 0 then rewrite_setvars_rules(final_rules, state_bounds) else final_rules
         # Infer parent from indentation + strip __col. Styles are NOT
-        # applied here — they ride on the create's `style:` field and atlas
+        # applied here - they ride on the create's `style:` field and atlas
         # merges them at spawn from a global registry (cross-bundle).
         final_rules_parented = infer_parents_rules(final_rules_clamped)
         ParseResult{rules: final_rules_parented, functions: functions, entities: entities, consts: consts, components: components, uses: uses, tests: tests, sources: sources, animations: animations, assets: assets, type_traits: type_traits, templates: templates, token_blocks: token_blocks, styles: styles, enum_states: enum_states, ok: true, error: ParseError{message: "", line: 0}}
@@ -611,7 +612,7 @@ define patch_contains_text(xs: [text], target: text) -> truth:
 define patch_text_at(xs: [text], i: number) -> text:
     xs[i]
 
-# Local byte-comparison helpers — parser can't reach the text orb from
+# Local byte-comparison helpers - parser can't reach the text orb from
 # its Orbit.toml dep set and the byte primitives are already in scope.
 # Kept name-scoped so a later `use text` won't shadow.
 define rule_name_starts_with(name: text, prefix: text) -> truth:
@@ -674,23 +675,23 @@ define parse_use_decl(tokens: [Token], start: number, n: number) -> UseStep:
 type RuleStep: rule: Rule, next: number, ok: truth, error: text
 
 define parse_rule(tokens: [Token], start: number, n: number) -> RuleStep:
-    # `when EXPR: body` short-circuits — it has no name/paren list.
+    # `when EXPR: body` short-circuits - it has no name/paren list.
     if match_tok(tokens, start, n, "When"):
         return parse_when_rule(tokens, start + 1, n)
-    # `every N: body` desugars to when (tick % N is 0): body — same
+    # `every N: body` desugars to when (tick % N is 0): body - same
     # runtime path, host just has to bind `tick` in ctx (atlas_astra does).
     if match_tok(tokens, start, n, "Every"):
         return parse_every_rule(tokens, start + 1, n)
     edit i = start
     # Accept either `rule NAME(...)` or `on EVENT(...)`. The latter is
-    # a handler — same shape, but `trigger` is set so dispatch can find it.
+    # a handler - same shape, but `trigger` is set so dispatch can find it.
     edit is_handler = false
     if match_tok(tokens, i, n, "On"):
         is_handler = true
         i = i + 1
         # Transition sugar: `on NAME becomes EXPR: body` desugars to a
         # `when NAME is EXPR: body` rule. Astra's edge semantics fire
-        # exactly when NAME transitions to EXPR — cleaner than manual
+        # exactly when NAME transitions to EXPR - cleaner than manual
         # `when X is Y and prev_X is not Y` guards.
         if i + 1 < n:
             after_name = ident_of(tokens[i].tok)
@@ -760,7 +761,7 @@ define parse_rule(tokens: [Token], start: number, n: number) -> RuleStep:
         return RuleStep{rule: empty_rule(), next: i, ok: false, error: "expected `)`"}
     i = i + 1
     # Optional guard: `on Click(x,y,b) when EXPR:` gates the handler at
-    # dispatch — no body eval when EXPR is false. Cleaner than a leading
+    # dispatch - no body eval when EXPR is false. Cleaner than a leading
     # `require EXPR` inside the body: no crumb, no rule-id sink, and
     # facts/why-engine can read the guard directly off the rule.
     edit gate = LitBool(true)
@@ -771,7 +772,7 @@ define parse_rule(tokens: [Token], start: number, n: number) -> RuleStep:
         gate = gate_step.value
         i = gate_step.next
     # Optional cadence suffix: `on income() every 2s:` schedules this
-    # handler on a wall-clock interval — same real-time scheduler as the
+    # handler on a wall-clock interval - same real-time scheduler as the
     # anonymous `every <dur>:` form. The trigger becomes "$every:<ms>" so
     # the engine's timer sweep dispatches it (the name is kept for facts).
     if match_tok(tokens, i, n, "Every"):
@@ -822,11 +823,11 @@ define parse_rule(tokens: [Token], start: number, n: number) -> RuleStep:
                 return RuleStep{rule: empty_rule(), next: i, ok: false, error: step.error}
     RuleStep{rule: Rule{name: name, params: params, body: body, trigger: trigger, condition: gate}, next: i, ok: true, error: ""}
 
-# `when EXPR : NEWLINE body` — produces a Rule with trigger="$when"
+# `when EXPR : NEWLINE body` - produces a Rule with trigger="$when"
 # and `condition` set to the watch expression. Body re-uses the same
 # stmt grammar as `rule`/`on`.
 define parse_when_rule(tokens: [Token], start: number, n: number) -> RuleStep:
-    # `when spawned(Kind):` / `when destroyed(Kind):` — lifecycle triggers.
+    # `when spawned(Kind):` / `when destroyed(Kind):` - lifecycle triggers.
     if match_tok(tokens, start, n, "Spawned") or match_tok(tokens, start, n, "Destroyed"):
         is_spawned = match_tok(tokens, start, n, "Spawned")
         trigger_prefix = if is_spawned then "$spawned:" else "$destroyed:"
@@ -841,7 +842,7 @@ define parse_when_rule(tokens: [Token], start: number, n: number) -> RuleStep:
         if not match_tok(tokens, i, n, "RParen"):
             return RuleStep{rule: empty_rule(), next: i, ok: false, error: "expected `)` after component type in spawned(T)"}
         i = i + 1
-        # Optional binding — `when spawned(Chair) c: body-uses-c`.
+        # Optional binding - `when spawned(Chair) c: body-uses-c`.
         # `c` binds to a MapV of the spawned entity's fields; body can
         # reference `c.at`, `c.tint` etc. Unifies the prefab pattern
         # (spawn an X, spawn its children using X's fields).
@@ -877,12 +878,12 @@ define parse_when_rule(tokens: [Token], start: number, n: number) -> RuleStep:
                 else:
                     return RuleStep{rule: empty_rule(), next: i, ok: false, error: step.error}
         # If a binding name was given, expose it as the rule's first
-        # param — dispatch passes the spawned entity's fields as args[0]
+        # param - dispatch passes the spawned entity's fields as args[0]
         # and eval binds them under the name. Empty name = no param =
         # a spawn trigger with no field binding.
         lifecycle_params = if length(bind_name) > 0 then append([], Param{name: bind_name, type_name: kind_name}) else []
         return RuleStep{rule: Rule{name: "", params: lifecycle_params, body: body, trigger: trigger_prefix + kind_name, condition: LitBool(true)}, next: i, ok: true, error: ""}
-    # Regular `when COND:` — edge-triggered conditional.
+    # Regular `when COND:` - edge-triggered conditional.
     cond = parse_expr(tokens, start, n)
     if not cond.ok:
         return RuleStep{rule: empty_rule(), next: cond.next, ok: false, error: cond.error}
@@ -918,7 +919,7 @@ define parse_when_rule(tokens: [Token], start: number, n: number) -> RuleStep:
 define at_rule_starter(tokens: [Token], i: number, n: number) -> truth:
     match_tok(tokens, i, n, "Rule") or match_tok(tokens, i, n, "On") or match_tok(tokens, i, n, "Every") or match_tok(tokens, i, n, "Fn") or match_tok(tokens, i, n, "When") or match_tok(tokens, i, n, "Component") or match_tok(tokens, i, n, "Type") or match_tok(tokens, i, n, "Entity") or match_tok(tokens, i, n, "Const") or match_tok(tokens, i, n, "Test") or match_tok(tokens, i, n, "Intent") or match_tok(tokens, i, n, "State") or match_tok(tokens, i, n, "Command") or match_tok(tokens, i, n, "View") or match_tok(tokens, i, n, "Source") or match_tok(tokens, i, n, "Animate") or match_tok(tokens, i, n, "Asset") or match_tok(tokens, i, n, "Trait") or match_tok(tokens, i, n, "Template") or match_tok(tokens, i, n, "Tokens")
 
-# `fn NAME(params) -> TYPE: body-expr` — pure helper. Params may include
+# `fn NAME(params) -> TYPE: body-expr` - pure helper. Params may include
 # optional `: type` annotations; we accept and discard them for now.
 # Body is a single expression (parens/if-else compose naturally).
 type FuncStep: func: Function, next: number, ok: truth, error: text
@@ -988,7 +989,7 @@ define looks_like_implicit_fn(tokens: [Token], i: number, n: number) -> truth:
         return false
     match_tok(tokens, i + 1, n, "LParen")
 
-# `entity Kind { f: type, f: type, ... }` — typed component declaration.
+# `entity Kind { f: type, f: type, ... }` - typed component declaration.
 # Field types are accepted and stored for future checks but unenforced.
 type EntityStep: entity: EntityDecl, next: number, ok: truth, error: text
 
@@ -1032,7 +1033,7 @@ define parse_entity_decl(tokens: [Token], start: number, n: number) -> EntitySte
 define empty_entity_decl() -> EntityDecl:
     EntityDecl{name: "", fields: []}
 
-# `component Kind { f: type, f: type, ... }` — ECS component declaration.
+# `component Kind { f: type, f: type, ... }` - ECS component declaration.
 # Identical structure to entity but signals that atlas_astra should
 # register the type directly in world storage (no manual pack_* glue).
 type ComponentStep: component: ComponentDecl, uses_traits: [text], next: number, ok: truth, error: text
@@ -1044,7 +1045,7 @@ define parse_component_decl(tokens: [Token], start: number, n: number, traits: [
     if name is "":
         return ComponentStep{component: empty_component_decl(), uses_traits: [], next: start, ok: false, error: "expected component name"}
     edit i = start + 1
-    # Optional `uses A, B, C` — inline each named trait's fields into
+    # Optional `uses A, B, C` - inline each named trait's fields into
     # this type. Bundle-local; traits declared later in the same file
     # aren't visible here (parse-order-dependent). Trait names also
     # recorded for cross-type queries (`each e in Movable`).
@@ -1070,7 +1071,7 @@ define parse_component_decl(tokens: [Token], start: number, n: number, traits: [
                 break
     # v1: brace-less only. Fields comma-separated, terminated by newline.
     if match_tok(tokens, i, n, "LBrace"):
-        return ComponentStep{component: empty_component_decl(), uses_traits: [], next: i, ok: false, error: "braces not allowed for type — use `type X f: t, f: t`"}
+        return ComponentStep{component: empty_component_decl(), uses_traits: [], next: i, ok: false, error: "braces not allowed for type - use `type X f: t, f: t`"}
     loop:
         if i >= n:
             break
@@ -1093,7 +1094,7 @@ define parse_component_decl(tokens: [Token], start: number, n: number, traits: [
             i = i + 1
     ComponentStep{component: ComponentDecl{name: name, fields: fields}, uses_traits: used_traits, next: i, ok: true, error: ""}
 
-# Look up a trait by name and return its fields (empty if unknown —
+# Look up a trait by name and return its fields (empty if unknown -
 # unknown trait fires no fields; the user's own decl still lands).
 define trait_fields(traits: [TraitDecl], name: text) -> [Param]:
     n = length(traits)
@@ -1112,7 +1113,7 @@ define trait_fields(traits: [TraitDecl], name: text) -> [Param]:
 define trait_at(xs: [TraitDecl], i: number) -> TraitDecl:
     xs[i]
 
-# `trait X { field: type }` — reuses the component field-parsing but
+# `trait X { field: type }` - reuses the component field-parsing but
 # stores as a TraitDecl. No composition allowed on traits themselves
 # in v1 (a trait can't `uses` another trait).
 type TraitStep: trait_decl: TraitDecl, next: number, ok: truth, error: text
@@ -1144,15 +1145,15 @@ define parse_const_decl(tokens: [Token], start: number, n: number) -> ConstStep:
         return ConstStep{cnst: ConstDecl{name: name, value: LitInt(0)}, next: val_step.next, ok: false, error: val_step.error}
     ConstStep{cnst: ConstDecl{name: name, value: val_step.value}, next: val_step.next, ok: true, error: ""}
 
-# `data NAME(col, col, …):` NEWLINE (indent) row* — a data TABLE with a
+# `data NAME(col, col, ...):` NEWLINE (indent) row* - a data TABLE with a
 # NAMED schema. Each row's positional values fill the columns IN ORDER
 # (bareword = symbol, "quoted" = text, 123 = int), then optional
 # `key: value` pairs override/extend. So
 #   data commands(id, label):
 #       menu      "Open Menu"
 #       minimize  "Minimize window"  hint: "Ctrl M"
-# desugars to `const commands = [ {id: menu, label: "Open Menu"}, … ]`.
-# The header is what makes `.id`/`.label` DERIVABLE, not a special case —
+# desugars to `const commands = [ {id: menu, label: "Open Menu"}, ... ]`.
+# The header is what makes `.id`/`.label` DERIVABLE, not a special case -
 # only real text is quoted. It's a const list, so `for`/`each` iterates it.
 define looks_like_data_decl(tokens: [Token], i: number, n: number) -> truth:
     if i + 2 >= n:
@@ -1207,7 +1208,7 @@ define parse_data_decl(tokens: [Token], start: number, n: number) -> ConstStep:
             i = row.next
     ConstStep{cnst: ConstDecl{name: name, value: LitList(rows)}, next: i, ok: true, error: ""}
 
-# One table row → a MapLit. Positional values (bareword / string / int)
+# One table row -> a MapLit. Positional values (bareword / string / int)
 # fill `cols` in order until a `key:` pair begins; then explicit fields.
 define parse_data_row(tokens: [Token], start: number, n: number, cols: [text]) -> ExprStep:
     edit fields = []
@@ -1247,7 +1248,7 @@ define parse_data_row(tokens: [Token], start: number, n: number, cols: [text]) -
             i = fstep.next
     ExprStep{value: MapLit(fields), next: i, ok: true, error: ""}
 
-# `test NAME:` NEWLINE step* — an inline test (pillar 5). Steps are
+# `test NAME:` NEWLINE step* - an inline test. Steps are
 # `apply CALL`, `tick N`, `expect COND`, one per line, more indented than the
 # `test` keyword. The body ends on a dedent (a token at or left of the `test`
 # column) or a top-level starter. The runner (astra_run::run_tests) executes
@@ -1265,7 +1266,7 @@ define parse_test_decl(tokens: [Token], start: number, n: number) -> TestDeclSte
     if not match_tok(tokens, i, n, "Colon"):
         return TestDeclStep{test: empty, next: i, ok: false, error: "expected `:` after test name"}
     i = i + 1
-    # Column of the `test` keyword — a step at or left of it is a dedent.
+    # Column of the `test` keyword - a step at or left of it is a dedent.
     test_col = if start >= 1 then tokens[start - 1].col else 0
     i = skip_newlines(tokens, i, n)
     edit steps = []
@@ -1300,7 +1301,7 @@ define parse_test_step(tokens: [Token], start: number, n: number) -> TestStepSte
         if not estep.ok:
             return TestStepStep{step: empty_test_step(), next: estep.next, ok: false, error: estep.error}
         return TestStepStep{step: TestStep{kind: "expect", name: "", args: [], cond: estep.value}, next: estep.next, ok: true, error: ""}
-    # `tick N` — `tick` is an unreserved identifier by design (hosts inject it
+    # `tick N` - `tick` is an unreserved identifier by design (hosts inject it
     # as a ctx binding), so match it textually here in the test sub-grammar.
     if ident_of(tokens[start].tok) is "tick":
         vstep = parse_expr(tokens, start + 1, n)
@@ -1309,7 +1310,7 @@ define parse_test_step(tokens: [Token], start: number, n: number) -> TestStepSte
         return TestStepStep{step: TestStep{kind: "tick", name: "", args: [], cond: vstep.value}, next: vstep.next, ok: true, error: ""}
     TestStepStep{step: empty_test_step(), next: start, ok: false, error: "expected `apply`, `tick`, or `expect` in test body"}
 
-# `apply NAME(args)` — start points at the rule NAME. Args are optional.
+# `apply NAME(args)` - start points at the rule NAME. Args are optional.
 define parse_apply_step(tokens: [Token], start: number, n: number) -> TestStepStep:
     if start >= n:
         return TestStepStep{step: empty_test_step(), next: start, ok: false, error: "expected rule name after `apply`"}
@@ -1338,7 +1339,7 @@ define parse_apply_step(tokens: [Token], start: number, n: number) -> TestStepSt
             i = i + 1
     TestStepStep{step: TestStep{kind: "apply", name: name, args: args, cond: LitBool(false)}, next: i, ok: true, error: ""}
 
-# `derive NAME = EXPR` — a resource that is ALWAYS its expression. It
+# `derive NAME = EXPR` - a resource that is ALWAYS its expression. It
 # desugars to a rule that recomputes NAME from EXPR every tick, so it
 # reuses the whole rule -> dispatch -> set pipeline with no new AST
 # node. The program describes what is TRUE (`derive alive = health > 0`)
@@ -1361,13 +1362,13 @@ define parse_derive_decl(tokens: [Token], start: number, n: number) -> RuleStep:
         return RuleStep{rule: empty, next: val_step.next, ok: false, error: val_step.error}
     body = append([], SetVar(name, val_step.value))
     # `$derive`, not "Tick": a view is a definition that is ALWAYS its
-    # expression, so it recomputes every sims pass — including the boot
+    # expression, so it recomputes every sims pass - including the boot
     # pass, before any Tick event exists. Binding it to Tick left every
     # view unset on the first frame (`{view}` empty, `show:` gates 0).
     r = Rule{name: "derive:" + name, params: [], body: body, trigger: "$derive", condition: LitBool(true)}
     RuleStep{rule: r, next: val_step.next, ok: true, error: ""}
 
-# `law NAME:` then a rule — names the rule after the law. Pure sugar
+# `law NAME:` then a rule - names the rule after the law. Pure sugar
 # over the following when/on rule (A2, idea #7): `law Gravity: when ...`
 # reads as a world law and gives an otherwise-anonymous rule a name, so
 # facts, the why-engine, and quarantine all identify it as `Gravity`.
@@ -1390,7 +1391,7 @@ define parse_law_decl(tokens: [Token], start: number, n: number) -> RuleStep:
     named = Rule{name: name, params: src.params, body: src.body, trigger: src.trigger, condition: src.condition}
     RuleStep{rule: named, next: rstep.next, ok: true, error: ""}
 
-# `state NAME: TYPE [in A to B | in A through B] = INIT` — typed world
+# `state NAME: TYPE [in A to B | in A through B] = INIT` - typed world
 # resource declaration. PURE PARSER SUGAR: desugars to (a) a SetVar in a
 # synthetic on Init() rule so the resource is seeded on boot/restart,
 # and (b) a bounds record consulted at end-of-parse to clamp every
@@ -1405,7 +1406,7 @@ define parse_law_decl(tokens: [Token], start: number, n: number) -> RuleStep:
 type StateBound: name: text, has_min: truth, min_val: number, has_max: truth, max_val: number
 type StateStep: init: Stmt, bound: StateBound, enum_consts: [ConstDecl], next: number, ok: truth, error: text
 
-# The resource name a state's synthesised init writes — its `SetVar` target.
+# The resource name a state's synthesised init writes - its `SetVar` target.
 define state_name_of(st: Stmt) -> text:
     choose st:
         SetVar(nm, _) then nm
@@ -1427,7 +1428,7 @@ define parse_state_decl(tokens: [Token], start: number, n: number) -> StateStep:
     if type_name is "":
         return StateStep{init: empty_stmt, bound: empty_bound, enum_consts: [], next: i, ok: false, error: "expected type name after `:`"}
     i = i + 1
-    # Apply type preset first — explicit `in ...` below overrides.
+    # Apply type preset first - explicit `in ...` below overrides.
     edit has_min = false
     edit min_v = 0
     edit has_max = false
@@ -1441,7 +1442,7 @@ define parse_state_decl(tokens: [Token], start: number, n: number) -> StateStep:
         min_v = 0
         has_max = true
         max_v = 100
-    # `enum(a, b, c)` — named integer states. Each value binds as a
+    # `enum(a, b, c)` - named integer states. Each value binds as a
     # top-level const (a=0, b=1, c=2) so rules can write `game_over = dead`
     # and `when game_over is survived: ...` instead of magic-number 0/1/2.
     # Bounds are auto-set from the value count.
@@ -1468,8 +1469,8 @@ define parse_state_decl(tokens: [Token], start: number, n: number) -> StateStep:
         min_v = 0
         has_max = true
         max_v = idx - 1
-    # `text` and `bool` skip the numeric branch — no bounds, no clamp.
-    # A `bool` reads/writes as int 0/1 (apply_set coerces BoolV → 1/0), so
+    # `text` and `bool` skip the numeric branch - no bounds, no clamp.
+    # A `bool` reads/writes as int 0/1 (apply_set coerces BoolV -> 1/0), so
     # `= true`/`= false`, `needs not X`, and `show: X` all work uniformly.
     if type_name is not "int" and type_name is not "nat" and type_name is not "percent" and type_name is not "text" and type_name is not "bool" and type_name is not "enum":
         return StateStep{init: empty_stmt, bound: empty_bound, enum_consts: [], next: i, ok: false, error: "unknown state type `{type_name}` (expected int, nat, percent, text, bool, or enum)"}
@@ -1564,7 +1565,7 @@ define rewrite_setvars_rules(rules: [Rule], bounds: [StateBound]) -> [Rule]:
 define state_rule_at(rules: [Rule], i: number) -> Rule:
     rules[i]
 
-# `command NAME [needs EXPR]: body` — a player-facing action.
+# `command NAME [needs EXPR]: body` - a player-facing action.
 # PURE PARSER SUGAR: desugars to a `when` rule watching `ui_action is 
 # "NAME"`; the body consumes the intent (writes ui_action = "") and then
 # runs the effect, optionally gated by `needs`. Same shape as the
@@ -1583,11 +1584,11 @@ define state_rule_at(rules: [Rule], i: number) -> Rule:
 #           wood = wood - 1
 #           heat = heat + 10
 #
-# The intent bus is a shared text resource `ui_action` — callers
+# The intent bus is a shared text resource `ui_action` - callers
 # (click handlers, network layer, AI planner) all write the command
 # name to it. Text lets facts/why/log identify commands by name
 # without a manual code-number table.
-# Stable name→code hash for NAMED actions (djb2 — orion has no `^`, so
+# Stable name->code hash for NAMED actions (djb2 - orion has no `^`, so
 # not FNV). Folded into [1000, 1_001_000) to stay clear of hand-written
 # small codes (< 1000). PUBLIC and single-source: atlas_project's
 # route_widget_clicks calls THIS (names are global in the flattened
@@ -1618,7 +1619,7 @@ define parse_command_decl(tokens: [Token], start: number, n: number) -> RuleStep
     # The dispatch code is DERIVED from the name (action_code); a widget's
     # `do: close` maps to the same value, so there is never a magic number.
     code = action_code(name)
-    # Optional `needs EXPR` — precondition wrapping the effect body.
+    # Optional `needs EXPR` - precondition wrapping the effect body.
     edit gate = LitBool(true)
     if match_tok(tokens, i, n, "Needs"):
         gate_step = parse_expr(tokens, i + 1, n)
@@ -1655,7 +1656,7 @@ define parse_command_decl(tokens: [Token], start: number, n: number) -> RuleStep
             else:
                 return RuleStep{rule: empty, next: i, ok: false, error: step.error}
     # Build the desugared rule body: consume the intent first (so the
-    # trigger condition falls false immediately), then run the effect —
+    # trigger condition falls false immediately), then run the effect -
     # gated by `if needs` when a precondition was given. IfStmt (not
     # require) so the consume survives even when the effect is skipped;
     # require's abort discards ALL prior effects including the consume.
@@ -1681,14 +1682,14 @@ define push_front_stmt(head: Stmt, rest: [Stmt]) -> [Stmt]:
 define stmt_at(xs: [Stmt], i: number) -> Stmt:
     xs[i]
 
-# `animate NAME from A to B over N unit` — one-shot tween at boot.
+# `animate NAME from A to B over N unit` - one-shot tween at boot.
 # Atlas records start time, per-frame writes the interpolated value
 # to the prefixed resource `NAME`. Linear easing, int endpoints in v1.
 type AnimStep: anim: AnimationDecl, next: number, ok: truth, error: text
 
-# `asset NAME: kind "path"` — typed asset ref. Kind is an ident
+# `asset NAME: kind "path"` - typed asset ref. Kind is an ident
 # (sprite/audio/text/shader/font). Atlas verifies file at boot, wires
-# name→path so widgets can say `sprite: NAME` instead of raw strings.
+# name->path so widgets can say `sprite: NAME` instead of raw strings.
 type AssetStep: asset: AssetDecl, next: number, ok: truth, error: text
 
 define parse_asset_decl(tokens: [Token], start: number, n: number) -> AssetStep:
@@ -1747,7 +1748,7 @@ define parse_animate_decl(tokens: [Token], start: number, n: number) -> AnimStep
     if dur_ms is 0:
         return AnimStep{anim: empty, next: i, ok: false, error: "expected `s` or `ms` after duration"}
     i = i + 1
-    # Optional easing: `ease FUNC` — linear/out-cubic/in-cubic/
+    # Optional easing: `ease FUNC` - linear/out-cubic/in-cubic/
     # in-out-cubic/out-bounce. Default is linear.
     edit easing_fn = "linear"
     if ident_of(tokens[i].tok) is "ease":
@@ -1773,10 +1774,10 @@ define parse_animate_decl(tokens: [Token], start: number, n: number) -> AnimStep
         i = i + 1
         tv = int_of(tokens[i].tok)
         if tv < 0:
-            # Also accept an ident (enum name) — resolved at runtime via
+            # Also accept an ident (enum name) - resolved at runtime via
             # world resource lookup. For MVP we require int literal
             # (enum values also compile to int world resources so this
-            # works after enum → const propagation).
+            # works after enum -> const propagation).
             id_name = ident_of(tokens[i].tok)
             if id_name is "":
                 return AnimStep{anim: empty, next: i, ok: false, error: "expected int or ident for `becomes` target"}
@@ -1790,7 +1791,7 @@ define parse_animate_decl(tokens: [Token], start: number, n: number) -> AnimStep
         i = i + 1
     AnimStep{anim: AnimationDecl{name: name, from_val: from_v, to_val: to_v, duration_ms: dur_ms, trigger_name: trig_name, trigger_value: trig_val, easing: easing_fn}, next: i, ok: true, error: ""}
 
-# `source NAME from file "path" [refresh N s]` — declares an external
+# `source NAME from file "path" [refresh N s]` - declares an external
 # data feed. Atlas reads the file at boot and (later) on a refresh
 # cadence, exposing the contents as the world resource `NAME`.
 # `from` and unit keywords (`s`/`ms`) reuse existing lexer tokens.
@@ -1838,7 +1839,7 @@ define parse_source_decl(tokens: [Token], start: number, n: number) -> SourceSte
                 return SourceStep{source: empty, next: i, ok: false, error: "expected `s` or `ms` after refresh interval"}
     SourceStep{source: SourceDecl{name: name, kind: kind_name, path: path_text, refresh_ms: refresh_ms}, next: i, ok: true, error: ""}
 
-# `template NAME(params) = EXPR` — parameterised fragment. Shape is
+# `template NAME(params) = EXPR` - parameterised fragment. Shape is
 # fn-like (name + paren-params + body) but signalled with `=` instead
 # of `:` because the body is a single expression, not a statement
 # block. Runtime callers (`items:` on a Panel) invoke by name and bind
@@ -1892,7 +1893,7 @@ define parse_template_decl(tokens: [Token], start: number, n: number) -> Templat
 # `tokens NAMESPACE:` NEWLINE (indented) `key: value` lines. The
 # namespace + key together form the resolved token id (`color.bg`,
 # `layout.card`). Block ends on dedent-or-below the `tokens` column,
-# or on any top-level starter. Values are arbitrary expressions —
+# or on any top-level starter. Values are arbitrary expressions -
 # strings for colors, ints for spacing, idents for token refs.
 type TokensStep: block: TokensDecl, next: number, ok: truth, error: text
 
@@ -1907,7 +1908,7 @@ define parse_tokens_decl(tokens: [Token], start: number, n: number) -> TokensSte
     if not match_tok(tokens, i, n, "Colon"):
         return TokensStep{block: empty, next: i, ok: false, error: "expected `:` after tokens namespace"}
     i = i + 1
-    # Column of the `tokens` keyword — entries at or left of it dedent out.
+    # Column of the `tokens` keyword - entries at or left of it dedent out.
     tokens_col = if start >= 1 then tokens[start - 1].col else 0
     i = skip_newlines(tokens, i, n)
     edit entries = []
@@ -1936,13 +1937,13 @@ define parse_tokens_decl(tokens: [Token], start: number, n: number) -> TokensSte
             i = val_step.next
     TokensStep{block: TokensDecl{namespace: namespace, entries: entries}, next: i, ok: true, error: ""}
 
-# `belief NAME:` then a body of `fact = value` lines — declares an
+# `belief NAME:` then a body of `fact = value` lines - declares an
 # agent's believed facts as a resource namespace `belief:NAME:fact`
 # that can diverge from reality (B1, idea belief-1). PURE PARSER SUGAR
 # (like derive/after): each fact line desugars to a Tick SetVar of the
 # prefixed resource, so the belief is re-asserted each tick and the
 # divergence from the real `fact` is a resource-prefix comparison
-# (atlas belief_wrong). A belief is not a separate world here — it is a
+# (atlas belief_wrong). A belief is not a separate world here - it is a
 # namespace of facts an agent holds; the fork-based simulatable belief
 # (foresee-on-belief) is a distinct future slice. `becomes` accepted.
 define parse_belief_decl(tokens: [Token], start: number, n: number) -> RuleStep:
@@ -1981,9 +1982,9 @@ define parse_belief_decl(tokens: [Token], start: number, n: number) -> RuleStep:
     r = Rule{name: "belief:" + name, params: [], body: body, trigger: "Tick", condition: LitBool(true)}
     RuleStep{rule: r, next: i, ok: true, error: ""}
 
-# `fact NAME = EXPR [in goal|broken|belief:SUB] [conf N]` — ONE keyword that
+# `fact NAME = EXPR [in goal|broken|belief:SUB] [conf N]` - ONE keyword that
 # consolidates view / goal / constraint / belief (+ confidence). PURE PARSER
-# SUGAR (NEXTGEN Punkt 3): every form desugars to the SAME rule shape the
+# SUGAR: every form desugars to the SAME rule shape the
 # individual keywords already emit, so nothing new reaches the runtime. The old
 # keywords stay as aliases; `fact` is the recommended spelling.
 #   fact N = E              -> SetVar(N, E)              every $derive pass (view)
@@ -2006,7 +2007,7 @@ define parse_fact_decl(tokens: [Token], start: number, n: number) -> RuleStep:
     if not val.ok:
         return RuleStep{rule: empty, next: val.next, ok: false, error: val.error}
     i = val.next
-    # Default (no namespace): a view — recompute NAME from EXPR every $derive
+    # Default (no namespace): a view - recompute NAME from EXPR every $derive
     # pass. Identical to parse_derive_decl.
     edit target = name
     edit value = val.value
@@ -2068,8 +2069,8 @@ define parse_belief_goal_or_rule(tokens: [Token], start: number, n: number) -> R
         return parse_intent_decl(tokens, start + 1, n)
     parse_rule(tokens, start, n)
 
-# `intent NAME [for KIND]:` then `require COND` / `utility EXPR` lines — an
-# AI-native declaration (pillar 1). PURE PARSER SUGAR, like goal/constraint:
+# `intent NAME [for KIND]:` then `require COND` / `utility EXPR` lines - an
+# AI-native declaration. PURE PARSER SUGAR, like goal/constraint:
 # it desugars to a Tick rule that keeps two resources current so a utility-AI
 # can pick actions by reading them, no planner in the language:
 #   intent:NAME:applicable = COND ? 1 : 0    (is this intent viable now?)
@@ -2084,7 +2085,7 @@ define parse_intent_decl(tokens: [Token], start: number, n: number) -> RuleStep:
     if name is "":
         return RuleStep{rule: empty, next: start, ok: false, error: "expected name after `intent`"}
     edit i = start + 1
-    # Optional `for KIND` — `for` lexes to the For token; consume it and the
+    # Optional `for KIND` - `for` lexes to the For token; consume it and the
     # kind name purely as documentation.
     if match_tok(tokens, i, n, "For"):
         i = i + 1
@@ -2093,7 +2094,7 @@ define parse_intent_decl(tokens: [Token], start: number, n: number) -> RuleStep:
     if not match_tok(tokens, i, n, "Colon"):
         return RuleStep{rule: empty, next: i, ok: false, error: "expected `:` after intent header"}
     i = i + 1
-    # Column of the `intent` keyword — a body line at or left of it is a dedent.
+    # Column of the `intent` keyword - a body line at or left of it is a dedent.
     intent_col = if start >= 1 then tokens[start - 1].col else 0
     i = skip_newlines(tokens, i, n)
     edit cond = LitBool(true)
@@ -2129,12 +2130,12 @@ define parse_intent_decl(tokens: [Token], start: number, n: number) -> RuleStep:
     r = Rule{name: prefix, params: [], body: body, trigger: "Tick", condition: LitBool(true)}
     RuleStep{rule: r, next: i, ok: true, error: ""}
 
-# `goal NAME = COND` / `constraint NAME = COND` — the world describes its
+# `goal NAME = COND` / `constraint NAME = COND` - the world describes its
 # intent, not the behavior (B3). Both desugar (like derive) to a Tick
 # rule that keeps `<ns>NAME` equal to the condition, so the engine
 # TRACKS whether each goal is met (goal:NAME is 1) and whether each
 # constraint holds (constraint:NAME is 1, violated when 0). This is the
-# declaration + evaluation layer — goals/constraints as first-class,
+# declaration + evaluation layer - goals/constraints as first-class,
 # queryable, always-current facts (atlas goals_met / constraints_
 # violated). The SOLVER that plans HOW to achieve a goal under the
 # constraints is a distinct future slice; here the world states its
@@ -2154,17 +2155,17 @@ define parse_prefixed_derive(tokens: [Token], start: number, n: number, ns: text
     if not val.ok:
         return RuleStep{rule: empty, next: val.next, ok: false, error: val.error}
     # Coerce the predicate to 1/0 so it stores as an int resource (the
-    # set-drain drops raw bool payloads — see apply_set). goal:NAME is 1
+    # set-drain drops raw bool payloads - see apply_set). goal:NAME is 1
     # means met; constraint:NAME is 1 means satisfied.
     scored = IfExpr(val.value, LitInt(1), LitInt(0))
     body = append([], SetVar(ns + name, scored))
     r = Rule{name: ns + name, params: [], body: body, trigger: "Tick", condition: LitBool(true)}
     RuleStep{rule: r, next: val.next, ok: true, error: ""}
 
-# `for IDENT in INT until INT: body` — top-level macro. Body must be a
+# `for IDENT in INT until INT: body` - top-level macro. Body must be a
 # single rule construct (typically `when EXPR: stmts`). At parse time
 # we clone the body once per iteration, substituting the iter var.
-# Runtime sees N independent rules — edge detection, ctx threading,
+# Runtime sees N independent rules - edge detection, ctx threading,
 # everything else is unchanged.
 type ForStep: rules: [Rule], next: number, ok: truth, error: text
 
@@ -2232,7 +2233,7 @@ define parse_for_loop(tokens: [Token], start: number, n: number) -> ForStep:
         v = v + 1
     ForStep{rules: out, next: body_step.next, ok: true, error: ""}
 
-# `every N : NEWLINE body` — sugar for `when (tick % N is 0): body`.
+# `every N : NEWLINE body` - sugar for `when (tick % N is 0): body`.
 # Period must be an int literal; runtime evaluates the synthetic
 # condition against whatever `tick` binding the host supplies.
 define parse_every_rule(tokens: [Token], start: number, n: number) -> RuleStep:
@@ -2259,7 +2260,7 @@ define parse_every_rule(tokens: [Token], start: number, n: number) -> RuleStep:
             if unit is "m":
                 interval_ms = period * 60000
                 i = i + 1
-    # Optional `if EXPR` gate: `every 3s if heat > 0: heat -= 1` — cadence
+    # Optional `if EXPR` gate: `every 3s if heat > 0: heat -= 1` - cadence
     # fires the tick, EXPR gates the body. Cleaner than nesting an if inside
     # the body manually. Combines the two most common patterns
     # (periodic + conditional) into one line.
@@ -2315,7 +2316,7 @@ define parse_stmt(tokens: [Token], start: number, n: number) -> StmtStep:
         return parse_require_stmt(tokens, start + 1, n)
     if match_tok(tokens, start, n, "Let"):
         return parse_let_stmt(tokens, start + 1, n)
-    # `create X ...` — the only shape. `spawn` was Doom/Quake baggage;
+    # `create X ...` - the only shape. `spawn` was Doom/Quake baggage;
     # Cypher/SurrealDB/EdgeDB agree on CREATE. First-version cleanup:
     # one-way syntax, no aliases.
     if match_tok(tokens, start, n, "Create"):
@@ -2335,12 +2336,12 @@ define parse_stmt(tokens: [Token], start: number, n: number) -> StmtStep:
     if looks_like_assignment(tokens, start, n):
         return parse_set_stmt(tokens, start, n)
     # Bare `Panel ...` (no `create` keyword): a leading Uppercase Type is a
-    # spawn. `create` stays valid — this is pure sugar for the UI parts.
+    # spawn. `create` stays valid - this is pure sugar for the UI parts.
     if is_type_stmt(tokens, start, n):
         return parse_spawn_stmt(tokens, start, n, tokens[start].col)
     edit i = start
     # `emit X {...}` and `signal X {...}` are the same AST today, but the
-    # keyword split marks INTENT — `emit` is a buffered message (renderer /
+    # keyword split marks INTENT - `emit` is a buffered message (renderer /
     # audio / log drains it), `signal` is an observed event (any `on X:`
     # handler fires synchronously). Runtime is identical for now; the
     # semantic tag lets us diverge behavior later (buffered vs dispatched)
@@ -2354,7 +2355,7 @@ define parse_stmt(tokens: [Token], start: number, n: number) -> StmtStep:
     raw_event = ident_of(name_tok.tok)
     if raw_event is "":
         return StmtStep{stmt: EmitEffect("", []), next: i, ok: false, error: "expected event name after `emit`/`effect`/`signal`"}
-    # `effect X` is an EXTERNAL op the host performs (window/file/net) — it
+    # `effect X` is an EXTERNAL op the host performs (window/file/net) - it
     # lands on a namespaced channel `effect:X`, so rules can't observe it
     # (`on X` watches channel `X`). `emit X` stays an internal fact.
     event = if is_effect then "effect:" + raw_event else raw_event
@@ -2363,15 +2364,15 @@ define parse_stmt(tokens: [Token], start: number, n: number) -> StmtStep:
     fields = []
     edit field_list = fields
     edit i2 = i
-    # `emit X()` — parenless form, no fields. Consume the empty paren pair.
+    # `emit X()` - parenless form, no fields. Consume the empty paren pair.
     if match_tok(tokens, i2, n, "LParen"):
         i2 = i2 + 1
         if match_tok(tokens, i2, n, "RParen"):
             i2 = i2 + 1
-    # `emit X f1: v1, f2: v2` — brace-less only in v1. Braces `{}` are
+    # `emit X f1: v1, f2: v2` - brace-less only in v1. Braces `{}` are
     # forbidden; use comma-separated fields terminated by newline.
     if match_tok(tokens, i2, n, "LBrace"):
-        return StmtStep{stmt: EmitEffect(event, []), next: i2, ok: false, error: "braces not allowed for emit — use `emit X f: v, f: v`"}
+        return StmtStep{stmt: EmitEffect(event, []), next: i2, ok: false, error: "braces not allowed for emit - use `emit X f: v, f: v`"}
     if i2 < n and not is_newline(tokens[i2].tok) and not at_rule_starter(tokens, i2, n):
         line = parse_field_list_line(tokens, i2, n)
         if line.ok:
@@ -2382,7 +2383,7 @@ define parse_stmt(tokens: [Token], start: number, n: number) -> StmtStep:
 type FieldBlockStep: fields: [FieldExpr], next: number, ok: truth, error: text
 
 # Brace-less field-list: reads `f: v, f: v, ...` until a Newline.
-# The only shape — no C-family `{}` litter in Astra v1.
+# The only shape - no C-family `{}` litter in Astra v1.
 define parse_field_list_line(tokens: [Token], start: number, n: number) -> FieldBlockStep:
     edit out = []
     edit i = start
@@ -2425,8 +2426,8 @@ define parse_field(tokens: [Token], start: number, n: number) -> FieldStep:
     if not match_tok(tokens, i, n, "Colon"):
         return FieldStep{field: FieldExpr{name: "", value: LitInt(0)}, next: i, ok: false, error: "expected `:`"}
     i = i + 1
-    # Symbolic value: a SYMBOLIC field (anchor/layout/color/show/…) whose
-    # value is a lone bareword is an atom — its own name as text. So
+    # Symbolic value: a SYMBOLIC field (anchor/layout/color/show/...) whose
+    # value is a lone bareword is an atom - its own name as text. So
     # `anchor: fill` is `anchor: "fill"`, quotes reserved for real text.
     # Only lone idents atomise; `cmd.label` / `a and b` / numbers / strings
     # still parse as expressions. Numeric + text fields never atomise, so
@@ -2434,9 +2435,9 @@ define parse_field(tokens: [Token], start: number, n: number) -> FieldStep:
     if is_symbolic_field(name) and is_bareword_value(tokens, i, n):
         atom = ident_of(tokens[i].tok)
         return FieldStep{field: FieldExpr{name: name, value: LitText(atom)}, next: i + 1, ok: true, error: ""}
-    # `size: WxH` dimension shorthand — `18x14` lexes as Int(18)+Ident("x14"),
+    # `size: WxH` dimension shorthand - `18x14` lexes as Int(18)+Ident("x14"),
     # so recombine into a [w, h] pair the spawn post-pass expands to w:/h:.
-    # (`size: 16` stays a plain int → a square.)
+    # (`size: 16` stays a plain int -> a square.)
     if fe_name_eq(name, "size") and is_dim_pair(tokens, i, n):
         wv = int_of(tokens[i].tok)
         hv = int_from_x_ident(ident_of(tokens[i + 1].tok))
@@ -2448,7 +2449,7 @@ define parse_field(tokens: [Token], start: number, n: number) -> FieldStep:
         FieldStep{field: FieldExpr{name: "", value: LitInt(0)}, next: i, ok: false, error: step.error}
 
 # Map-literal field: like parse_field but a lone bareword value ALWAYS
-# atomises (map literals are data — `{ icon: menu, act: menu }` — so any
+# atomises (map literals are data - `{ icon: menu, act: menu }` - so any
 # unquoted word is a symbol, quotes are reserved for real text). Also ends
 # a value at `}`/`]`, not just comma/newline.
 define parse_map_field(tokens: [Token], start: number, n: number) -> FieldStep:
@@ -2480,7 +2481,7 @@ define is_bareword_map_value(tokens: [Token], i: number, n: number) -> truth:
 
 # Fields whose value is a symbolic atom (an enum-ish name), not text or a
 # number. A bare identifier in one of these is its own name. Text fields
-# (text/label/hint/placeholder/desc) are absent on purpose — they keep
+# (text/label/hint/placeholder/desc) are absent on purpose - they keep
 # quotes; numeric fields never reach here (a bareword there stays an expr).
 define is_symbolic_field(name: text) -> truth:
     name is "anchor" or name is "layout" or name is "align" or name is "justify" or name is "role" or name is "fill" or name is "blend" or name is "kind" or name is "tint" or name is "easing" or name is "do" or name is "submit" or name is "style" or name is "name" or name is "parent" or name is "show" or name is "hide" or name is "search" or name is "image" or name is "color" or name is "ink" or name is "w_from" or name is "render" or name is "items" or name is "bind" or name is "changed"
@@ -2499,7 +2500,7 @@ define is_bareword_value(tokens: [Token], i: number, n: number) -> truth:
             j = i + 1
             if j >= n then true else (is_newline(tokens[j].tok) or match_tok(tokens, j, n, "Comma"))
 
-# `18x14` → Int(18) then Ident("x14"). Detect that pair (an int followed by
+# `18x14` -> Int(18) then Ident("x14"). Detect that pair (an int followed by
 # an `x` + digits identifier) so `size:` can read a WxH dimension without a
 # dedicated lexer token.
 define is_dim_pair(tokens: [Token], i: number, n: number) -> truth:
@@ -2533,8 +2534,8 @@ define int_from_x_ident(id: text) -> number:
         v = v * 10 + (byte_at(b, k) - 48)
     v
 
-# Expand a `size:` field into `w:`/`h:` at spawn build. `size: N` → N×N,
-# `size: WxH` → W×H. On Text `size` stays FONT size (text has no box), so
+# Expand a `size:` field into `w:`/`h:` at spawn build. `size: N` -> N×N,
+# `size: WxH` -> W×H. On Text `size` stays FONT size (text has no box), so
 # it is left untouched.
 define expand_size(fields: [FieldExpr], kind: text) -> [FieldExpr]:
     if fe_name_eq(kind, "Text"):
@@ -2561,7 +2562,7 @@ define expand_size(fields: [FieldExpr], kind: text) -> [FieldExpr]:
 
 # ---- require / let stmt parsers ----
 
-# `require A` — single guard. `require A, B, C` — comma-separated guards
+# `require A` - single guard. `require A, B, C` - comma-separated guards
 # combined with AND so the rule passes only when all hold. Reads as a
 # checklist of preconditions.
 define parse_require_stmt(tokens: [Token], start: number, n: number) -> StmtStep:
@@ -2598,9 +2599,9 @@ define parse_let_stmt(tokens: [Token], start: number, n: number) -> StmtStep:
         return StmtStep{stmt: Let(name, LitInt(0)), next: step.next, ok: false, error: step.error}
     StmtStep{stmt: Let(name, step.value), next: step.next, ok: true, error: ""}
 
-# `let { a, b, c } = expr` — bind every listed name to the same-named
+# `let { a, b, c } = expr` - bind every listed name to the same-named
 # MapV field. Caller is responsible for ensuring expr yields a MapV;
-# missing field → NoneV binding.
+# missing field -> NoneV binding.
 define parse_let_destructure(tokens: [Token], start: number, n: number) -> StmtStep:
     edit i = skip_newlines(tokens, start, n)
     edit names = []
@@ -2628,7 +2629,7 @@ define parse_let_destructure(tokens: [Token], start: number, n: number) -> StmtS
         return StmtStep{stmt: Let("", LitInt(0)), next: val.next, ok: false, error: val.error}
     StmtStep{stmt: LetDestructure(names, val.value), next: val.next, ok: true, error: ""}
 
-# `create Kind f: v, f: v, ...` — the only shape. Fields comma-
+# `create Kind f: v, f: v, ...` - the only shape. Fields comma-
 # separated after Kind, terminated by newline. Braces `{}` are
 # forbidden in v1 (C-family litter has no place in an indent-driven
 # data language).
@@ -2638,8 +2639,8 @@ define parse_spawn_stmt(tokens: [Token], start: number, n: number, stmt_col: num
     raw_kind = ident_of(tokens[start].tok)
     if raw_kind is "":
         return StmtStep{stmt: SpawnEntity("", []), next: start, ok: false, error: "expected type name after `create`"}
-    # Element sugar — the name says what it is, so you don't spell the flag:
-    #   Input  = an editable Text (`Input bind:…` not `Text editable: true`)
+    # Element sugar - the name says what it is, so you don't spell the flag:
+    #   Input  = an editable Text (`Input bind:...` not `Text editable: true`)
     #   Spacer = a Panel that just grows (fills the gap in a row/column)
     kind = if raw_kind is "Input" then "Text" else if raw_kind is "Spacer" then "Panel" else raw_kind
     edit fields = []
@@ -2648,7 +2649,7 @@ define parse_spawn_stmt(tokens: [Token], start: number, n: number, stmt_col: num
     if raw_kind is "Spacer":
         fields = append(fields, FieldExpr{name: "grow", value: LitInt(1)})
     edit i = start + 1
-    # Component instantiation: `NAME(argA, argB)` — a capitalised name directly
+    # Component instantiation: `NAME(argA, argB)` - a capitalised name directly
     # followed by `(` is a call, not a widget (Panel/Text never take parens).
     # Args park in __argN fields; the expand_components post-pass splices the
     # component body in with these bound to its params. Unknown names stay a
@@ -2676,9 +2677,9 @@ define parse_spawn_stmt(tokens: [Token], start: number, n: number, stmt_col: num
         call_fields = append(call_fields, FieldExpr{name: "__col", value: LitInt(stmt_col)})
         return StmtStep{stmt: SpawnEntity(kind, call_fields), next: i, ok: true, error: ""}
     if match_tok(tokens, i, n, "LBrace"):
-        return StmtStep{stmt: SpawnEntity(kind, []), next: i, ok: false, error: "braces not allowed — use `Panel f: v, f: v` or indented `f: v` lines"}
+        return StmtStep{stmt: SpawnEntity(kind, []), next: i, ok: false, error: "braces not allowed - use `Panel f: v, f: v` or indented `f: v` lines"}
     # Positional primary value: a leading string with no `key:` is the
-    # element's main content — `Text "ATLAS"` is `Text text: "ATLAS"`.
+    # element's main content - `Text "ATLAS"` is `Text text: "ATLAS"`.
     if i < n and is_str_tok(tokens[i].tok):
         fields = append(fields, FieldExpr{name: "text", value: text_lit_expr(token_text(tokens[i].tok))})
         i = i + 1
@@ -2690,9 +2691,9 @@ define parse_spawn_stmt(tokens: [Token], start: number, n: number, stmt_col: num
     loop lf in line.fields:
         fields = append(fields, lf)
     # Continuation props: `key: value` lines indented DEEPER than this
-    # create fold in as more fields (readability for many-prop widgets —
+    # create fold in as more fields (readability for many-prop widgets -
     # >4 props reads better stacked). A deeper line starting with an
-    # Uppercase Type is a CHILD, not a prop → stop and let the body loop +
+    # Uppercase Type is a CHILD, not a prop -> stop and let the body loop +
     # parent-inference handle it. Dedent ends the create.
     edit cur = line.next
     loop:
@@ -2711,7 +2712,7 @@ define parse_spawn_stmt(tokens: [Token], start: number, n: number, stmt_col: num
         cur = fstep.next
         if match_tok(tokens, cur, n, "Comma"):
             cur = cur + 1
-    # Expand `size:` → w:/h: (skips Text, where size is font), then stash the
+    # Expand `size:` -> w:/h: (skips Text, where size is font), then stash the
     # create's column so parent-inference can nest by indentation. Both
     # __size-expansion and __col stripping happen before the entity is built.
     sized = expand_size(fields, kind)
@@ -2719,8 +2720,8 @@ define parse_spawn_stmt(tokens: [Token], start: number, n: number, stmt_col: num
     StmtStep{stmt: SpawnEntity(kind, fields_c), next: cur, ok: true, error: ""}
 
 # A statement that starts with an Uppercase identifier is a bare spawn
-# (`Panel ...` — no `create` keyword). Keywords lex to non-Ident tokens
-# (ident_of → "") and assignments/props start lowercase, so this never
+# (`Panel ...` - no `create` keyword). Keywords lex to non-Ident tokens
+# (ident_of -> "") and assignments/props start lowercase, so this never
 # collides.
 define is_type_stmt(tokens: [Token], start: number, n: number) -> truth:
     if start >= n:
@@ -2736,12 +2737,12 @@ define is_type_stmt(tokens: [Token], start: number, n: number) -> truth:
 # ── Styles ── `style NAME:` declares a reusable prop bundle; a create
 # with `style: NAME` gets those props merged in (its own fields win).
 # styles are collected here and exposed on ParseResult; atlas loads them
-# globally and merges them into a widget's payload at SPAWN — so a style
+# globally and merges them into a widget's payload at SPAWN - so a style
 # in one file styles a create in another (cross-bundle).
 type StyleStep: style: StyleDecl, next: number, ok: truth, error: text
 
-# `style` is a bare Ident at top level (no keyword → no Tok enum surgery):
-# `style NAME :` — NAME is an Ident, then a Colon.
+# `style` is a bare Ident at top level (no keyword -> no Tok enum surgery):
+# `style NAME :` - NAME is an Ident, then a Colon.
 define looks_like_style_decl(tokens: [Token], start: number, n: number) -> truth:
     if start + 2 >= n:
         false
@@ -2853,7 +2854,7 @@ define infer_parents_body(body: [Stmt]) -> [Stmt]:
 
 # Layout metadata (parent / source-order / auto-name) is a WIDGET concern:
 # only Panel and Text are auto-rendered + laid out. A game-entity create
-# (Block, Bullet, …) is imperative gameplay — it keeps EXACTLY its authored
+# (Block, Bullet, ...) is imperative gameplay - it keeps EXACTLY its authored
 # fields, no dead `name`/`order` riding along at spawn scale.
 define is_widget_kind(k: text) -> truth:
     k is "Panel" or k is "Text"
@@ -2875,7 +2876,7 @@ define infer_one_stmt(body: [Stmt], idx: number) -> Stmt:
             f4 = if fe_field_has(f3, "order") then f3 else append(f3, FieldExpr{name: "order", value: LitInt(idx)})
             # Auto-name nameless creates so children can reference them (parent
             # + the visibility cascade look parents up by name). `name:` stays
-            # optional — you only write it when YOU need to target the widget.
+            # optional - you only write it when YOU need to target the widget.
             f5 = if fe_field_has(f4, "name") then f4 else append(f4, FieldExpr{name: "name", value: LitText("__w{idx}")})
             SpawnEntity(kind, f5)
     else:
@@ -2884,7 +2885,7 @@ define infer_one_stmt(body: [Stmt], idx: number) -> Stmt:
             # loop sits under (nearest earlier spawn with a smaller column
             # than the `each` keyword) and sort at the loop's own position.
             # So a nested `for` drops explicit `parent:`/`order:`. Top-level
-            # loops (each_col 0) find no such container → parent stays empty,
+            # loops (each_col 0) find no such container -> parent stays empty,
             # so game loops that spawn free entities are unaffected.
             ForEach(iter, src, filter, fbody) then ForEach(iter, src, filter, infer_foreach_body(fbody, nearest_parent_name(body, idx, foreach_eachcol(fbody)), idx))
             _ then strip_one_stmt(s)
@@ -2894,7 +2895,7 @@ define infer_one_stmt(body: [Stmt], idx: number) -> Stmt:
 # the palette-row case) are exact; a row with its OWN children keeps them via
 # explicit parent (deep nesting inside a loop is not inferred).
 define infer_foreach_body(fbody: [Stmt], parent: text, order_val: number) -> [Stmt]:
-    # A KEYED body (`each … key EXPR`) can nest: children resolve `parent:` to
+    # A KEYED body (`each ... key EXPR`) can nest: children resolve `parent:` to
     # their in-body root by column, and every widget is named from the key so
     # per-type id batching can't collide names across iterations. A keyless
     # body keeps the old flat behaviour (one Panel per item, all re-parented
@@ -2932,7 +2933,7 @@ define fe_field_expr(fields: [FieldExpr], key: text) -> Expr:
             r = f.value
     r
 
-# Nearest earlier body spawn with a STRICTLY smaller column — its INDEX (so a
+# Nearest earlier body spawn with a STRICTLY smaller column - its INDEX (so a
 # keyed name can be rebuilt from its position). -1 = none (this row is a root).
 define nearest_smaller_col_idx(body: [Stmt], idx: number, col: number) -> number:
     edit j = idx - 1
@@ -2971,7 +2972,7 @@ define infer_keyed_body(fbody: [Stmt], container: text, order_val: number) -> [S
             # `order` is a GLOBAL paint index (z-order render sorts every widget
             # by it). The whole keyed subtree must sit at the loop's slot, so
             # base it on order_val: root (i=0) = order_val, each nested child
-            # +i after. A bare `i` would be a tiny local index (1,2) → the child
+            # +i after. A bare `i` would be a tiny local index (1,2) -> the child
             # paints FIRST, then the card + everything paints over it (invisible).
             row_order = order_val + i
             fb = if fe_field_has(fa, "parent") then fa else if pidx >= 0 then append(fa, FieldExpr{name: "parent", value: keyed_name(pidx, keyexpr)}) else if length(container) > 0 then append(fa, FieldExpr{name: "parent", value: LitText(container)}) else fa
@@ -3011,7 +3012,7 @@ define nearest_parent_name(body: [Stmt], idx: number, col: number) -> text:
     result
 
 # Strip __col from a stmt (and recurse into control-flow bodies) without
-# inferring parent — nested-in-if/for creates keep their explicit parent.
+# inferring parent - nested-in-if/for creates keep their explicit parent.
 define strip_one_stmt(s: Stmt) -> Stmt:
     choose s:
         SpawnEntity(k, f) then SpawnEntity(k, fe_strip_field(f, "__col"))
@@ -3116,8 +3117,8 @@ define stmt_spawn_name(s: Stmt) -> text:
         SpawnEntity(k, f) then fe_field_text(f, "name")
         _ then ""
 
-# `destroy EXPR` — EXPR yields a RefV/IntV. For bulk delete use
-# `each x in list: destroy x.eid` — one consistent way to iterate.
+# `destroy EXPR` - EXPR yields a RefV/IntV. For bulk delete use
+# `each x in list: destroy x.eid` - one consistent way to iterate.
 define parse_destroy_stmt(tokens: [Token], start: number, n: number) -> StmtStep:
     step = parse_expr(tokens, start, n)
     if not step.ok:
@@ -3137,7 +3138,7 @@ define parse_set_stmt(tokens: [Token], start: number, n: number) -> StmtStep:
     if not lhs.ok:
         return StmtStep{stmt: SetVar("", LitInt(0)), next: lhs.next, ok: false, error: lhs.error}
     edit i = lhs.next
-    # Accept `=` OR `becomes` — the state-transition spelling desugars
+    # Accept `=` OR `becomes` - the state-transition spelling desugars
     # to the same SetVar/SetField (A2 laws-sugar).
     if not (match_tok(tokens, i, n, "Assign") or match_tok(tokens, i, n, "Becomes")):
         return StmtStep{stmt: SetVar("", LitInt(0)), next: i, ok: false, error: "expected `=` or `becomes` after target"}
@@ -3147,7 +3148,7 @@ define parse_set_stmt(tokens: [Token], start: number, n: number) -> StmtStep:
         return StmtStep{stmt: SetVar("", LitInt(0)), next: rhs.next, ok: false, error: rhs.error}
     # Optional `confidence N` suffix (B2, uncertainty-as-type): tags the
     # fact with a 0-100 certainty stored as a parallel `conf:<fact>`
-    # resource, read back by the `confidence(fact)` query. Pure sugar —
+    # resource, read back by the `confidence(fact)` query. Pure sugar -
     # `x = v confidence n` becomes SetVar(x, v) + SetVar(conf:x, n).
     if match_tok(tokens, rhs.next, n, "Confidence"):
         cname = varref_name_of(lhs.value)
@@ -3159,7 +3160,7 @@ define parse_set_stmt(tokens: [Token], start: number, n: number) -> StmtStep:
         setv = SetVar(cname, rhs.value)
         setc = SetVar("conf:" + cname, cstep.value)
         return StmtStep{stmt: IfStmt(LitBool(true), append(append([], setv), setc)), next: cstep.next, ok: true, error: ""}
-    # Classify the LHS — VarRef → SetVar; Field → SetField.
+    # Classify the LHS - VarRef -> SetVar; Field -> SetField.
     classify_set(lhs.value, rhs.value, rhs.next)
 
 define varref_name_of(e: Expr) -> text:
@@ -3167,7 +3168,7 @@ define varref_name_of(e: Expr) -> text:
         VarRef(nm) then nm
         _ then ""
 
-# `confidence(FACT)` -> VarRef("conf:FACT") — reads the parallel
+# `confidence(FACT)` -> VarRef("conf:FACT") - reads the parallel
 # certainty resource a `= v confidence n` fact wrote (B2). Pure sugar:
 # the conf: resource is auto-ctx bound, so a rule can `when
 # confidence(enemy_at) > 50: ...` reason over how sure it is. Unset
@@ -3228,7 +3229,7 @@ define looks_like_assignment(tokens: [Token], start: number, n: number) -> truth
     # is the state-transition spelling of `player = dead` (A2, idea #7).
     match_tok(tokens, i, n, "Assign") or match_tok(tokens, i, n, "Becomes")
 
-# `if COND: body-stmt` — single-branch conditional. No else. For
+# `if COND: body-stmt` - single-branch conditional. No else. For
 # expression-form conditionals use `if-then-else` inside an expression.
 define parse_if_stmt(tokens: [Token], start: number, n: number) -> StmtStep:
     cond_step = parse_expr(tokens, start, n)
@@ -3244,7 +3245,7 @@ define parse_if_stmt(tokens: [Token], start: number, n: number) -> StmtStep:
         return StmtStep{stmt: IfStmt(cond_step.value, []), next: body_step.next, ok: false, error: body_step.error}
     StmtStep{stmt: IfStmt(cond_step.value, append([], body_step.stmt)), next: body_step.next, ok: true, error: ""}
 
-# `relate SOURCE kind TARGET` — create a relation SOURCE -kind-> TARGET
+# `relate SOURCE kind TARGET` - create a relation SOURCE -kind-> TARGET
 # (A3, idea #5). SOURCE/TARGET are exprs (entity refs), kind a bare
 # identifier: `relate player owns sword`, `relate wolf hunts player`.
 define parse_relate_stmt(tokens: [Token], start: number, n: number) -> StmtStep:
@@ -3261,14 +3262,14 @@ define parse_relate_stmt(tokens: [Token], start: number, n: number) -> StmtStep:
         return StmtStep{stmt: SetVar("", LitInt(0)), next: b.next, ok: false, error: b.error}
     StmtStep{stmt: RelateStmt(a.value, kind, b.value), next: b.next, ok: true, error: ""}
 
-# `after N: name = value` — a delayed set (A2, idea #7). N is a tick
+# `after N: name = value` - a delayed set (A2, idea #7). N is a tick
 # count; the write lands N ticks from now. PURE PARSER SUGAR, no core
-# enum: it desugars to two resource writes inside an always-true block —
+# enum: it desugars to two resource writes inside an always-true block -
 #   __after:name     = tick + N     (the fire tick, `tick` from ctx)
 #   __after_val:name = value        (the value to set when it fires)
 # The host scans `__after:*` each tick and, when tick reaches the fire
 # tick, sets `name = __after_val:name` and disarms (`__after:name = 0`).
-# Resources are ints, so they save/rewind and self-manage lifetime — no
+# Resources are ints, so they save/rewind and self-manage lifetime - no
 # timer-list, no pool dance. Only ONE pending `after` per target name in
 # v1 (a second arm overwrites the first's fire tick). `becomes` accepted
 # as the law-readable synonym for `=`.
@@ -3302,7 +3303,7 @@ define classify_set(lhs: Expr, rhs: Expr, next: number) -> StmtStep:
         Field(base, field_name) then StmtStep{stmt: SetField(base, field_name, rhs), next: next, ok: true, error: ""}
         _ then StmtStep{stmt: SetVar("", rhs), next: next, ok: false, error: "set target must be a name or a field access"}
 
-# `for x in EXPR: <body-stmt>` — runtime list iteration inside a rule.
+# `for x in EXPR: <body-stmt>` - runtime list iteration inside a rule.
 # Body is one statement (commonly spawn/emit). The expression must
 # yield a ListV at eval time.
 define parse_foreach_stmt(tokens: [Token], start: number, n: number) -> StmtStep:
@@ -3310,7 +3311,7 @@ define parse_foreach_stmt(tokens: [Token], start: number, n: number) -> StmtStep
         return StmtStep{stmt: ForEach("", LitInt(0), LitBool(true), []), next: start, ok: false, error: "expected iter name after `for`"}
     # Two spellings: `for ITER in EXPR:` and `each EXPR as ITER:`. The
     # for-form leads with the iter name then `in`; anything else is the
-    # each-form (source first, then `as ITER`) — reads like plain English.
+    # each-form (source first, then `as ITER`) - reads like plain English.
     edit iter_name = ""
     edit src_expr = LitInt(0)
     edit i = start
@@ -3334,13 +3335,13 @@ define parse_foreach_stmt(tokens: [Token], start: number, n: number) -> StmtStep
         if iter_name is "":
             return StmtStep{stmt: ForEach("", LitInt(0), LitBool(true), []), next: i, ok: false, error: "expected iter name after `as`"}
         i = i + 1
-    # Optional `key EXPR` — a per-item STABLE IDENTITY (`each commands as cmd
+    # Optional `key EXPR` - a per-item STABLE IDENTITY (`each commands as cmd
     # key cmd.id`). Stamped onto the body's root spawns as `__key`; the
     # runtime derives a per-instance name from it, so nested children inside a
     # loop can reference their own row (entity ids batch per type, so a static
     # name would collide across iterations) AND the same key maps to the same
     # entity across re-renders (identity for animation/focus/diff). `key` is a
-    # bare ident (no keyword surgery); absent → today's behaviour, no __key.
+    # bare ident (no keyword surgery); absent -> today's behaviour, no __key.
     edit key_expr = LitInt(0)
     edit has_key = false
     if ident_of(tokens[i].tok) is "key":
@@ -3364,7 +3365,7 @@ define parse_foreach_stmt(tokens: [Token], start: number, n: number) -> StmtStep
     i = i + 1
     i = skip_newlines(tokens, i, n)
     # Body: stmts more indented than the `each` keyword itself. A stmt
-    # starting at or left of the header's column is a dedent — it belongs
+    # starting at or left of the header's column is a dedent - it belongs
     # to the enclosing block, not this loop. (Without this, a sibling
     # statement after a nested loop is silently swallowed into the loop
     # body and runs once per iteration.)
@@ -3486,7 +3487,7 @@ define find_template(name: text, templates: [ComponentTemplate]) -> number:
             idx = i
     idx
 
-# Lowest __col in a body — the root's column (children indent deeper).
+# Lowest __col in a body - the root's column (children indent deeper).
 define body_min_col(body: [Stmt]) -> number:
     edit m = 1000000
     loop i in 0 until length(body):
@@ -3556,7 +3557,7 @@ define expand_components(stmts: [Stmt], templates: [ComponentTemplate]) -> [Stmt
 
 # ---- expression grammar (precedence climbing) ----
 #
-# Levels low → high:
+# Levels low -> high:
 #   1: or          2: and        3: is is not 4: < <= > >=
 #   5: + -         6: * / %      7: unary -, not
 #   8: postfix (.field, (args)) 9: primary
@@ -3566,7 +3567,7 @@ type ExprStep: value: Expr, next: number, ok: truth, error: text
 public define parse_expr(tokens: [Token], start: number, n: number) -> ExprStep:
     parse_binop(tokens, start, n, 1)
 
-# Token-kind → operator-string + precedence. Empty op means "not a binop".
+# Token-kind -> operator-string + precedence. Empty op means "not a binop".
 define binop_at(tokens: [Token], i: number, n: number) -> text:
     if i >= n:
         return ""
@@ -3663,7 +3664,7 @@ define parse_postfix(tokens: [Token], start: number, n: number) -> ExprStep:
     ExprStep{value: e, next: i, ok: true, error: ""}
 
 # String interpolation: `"wood: {n}"` expands at parse time into a `+`
-# concat chain — `"wood: " + n` — reusing the text-coercing `+` in the
+# concat chain - `"wood: " + n` - reusing the text-coercing `+` in the
 # evaluator. `{{` and `}}` are literal braces. A string with no `{` is a
 # plain LitText (fast path, unchanged). Interpolated strings always start
 # from an empty LitText so a bare `"{n}"` still evaluates to text, not the
@@ -3705,7 +3706,7 @@ define collect_inner(bs: [number], n: number, start: number) -> InnerStep:
 
 # Lex + parse one interpolation hole as an astra expression. A hole that
 # fails to lex/parse stays literal (braces and all) rather than aborting
-# the whole string — a forgiving default for authored game text.
+# the whole string - a forgiving default for authored game text.
 define parse_inner_expr(src: text) -> Expr:
     lr = lex(src)
     if not lr.ok:
@@ -3734,7 +3735,7 @@ define interp_parts(bs: [number], n: number) -> [Expr]:
                 # Wrap each hole in `__hole(expr, "{raw}")`. At eval the hole
                 # yields its value if the name resolves (a loop var already
                 # substituted, or a seeded resource), else the LITERAL `{raw}`
-                # — so a hole over a resource not yet seeded when a widget
+                # - so a hole over a resource not yet seeded when a widget
                 # spawns at Init survives as `{name}` and expand_widget_text
                 # resolves it at render (live), instead of baking empty.
                 # ct_subst/subst recurse into Call args, so loop/component
@@ -3772,7 +3773,7 @@ define parse_primary(tokens: [Token], start: number, n: number) -> ExprStep:
     if match_tok(tokens, start, n, "Count"):
         return parse_count_query(tokens, start + 1, n)
     if match_tok(tokens, start, n, "From"):
-        # `from A to B` / `from A through B` — the leading `from` is pure
+        # `from A to B` / `from A through B` - the leading `from` is pure
         # readability sugar; the range itself is built by the postfix
         # `to`/`through` handler on the expression that follows. Skip the
         # keyword and parse the range normally.
@@ -3859,16 +3860,16 @@ define parse_count_query(tokens: [Token], start: number, n: number) -> ExprStep:
         return ExprStep{value: LitInt(0), next: cond.next, ok: false, error: "expected `)` to close count query"}
     ExprStep{value: CountQuery(iter_name, list_step.value, cond.value), next: cond.next + 1, ok: true, error: ""}
 
-# Parse the list source of a count query — only postfix-level exprs (no
+# Parse the list source of a count query - only postfix-level exprs (no
 # binops, since `where` would conflict). Accepts VarRef, Call, Field
-# chains — exactly the shapes a host pre-bakes into ctx.
+# chains - exactly the shapes a host pre-bakes into ctx.
 define parse_count_list_expr(tokens: [Token], start: number, n: number) -> ExprStep:
     parse_postfix(tokens, start, n)
 
-# `exists ITER in LIST where COND` → desugars to `count(where COND) > 0`.
-# `none   ITER in LIST where COND` → desugars to `count(where COND) is 0`.
-# `all    ITER in LIST where COND` → desugars to `count(where not COND) is 0`
-#   ("no element violates COND" — the universal quantifier completing the
+# `exists ITER in LIST where COND` -> desugars to `count(where COND) > 0`.
+# `none   ITER in LIST where COND` -> desugars to `count(where COND) is 0`.
+# `all    ITER in LIST where COND` -> desugars to `count(where not COND) is 0`
+#   ("no element violates COND" - the universal quantifier completing the
 #   exists/none/all trio, all over the same CountQuery machinery).
 # Reads as natural English; clamps down the most common count idioms.
 define parse_quantifier(tokens: [Token], start: number, n: number, kind: text) -> ExprStep:
@@ -3960,7 +3961,7 @@ define parse_implicit_let_in(tokens: [Token], start: number, n: number, name: te
         return body_step
     ExprStep{value: LetIn(name, val_step.value, body_step.value), next: body_step.next, ok: true, error: ""}
 
-# `let NAME = VAL <body-expr>` — binds NAME in scope of the body
+# `let NAME = VAL <body-expr>` - binds NAME in scope of the body
 # expression. Newlines between val and body are permitted, so fn bodies
 # can stack lets without `in` glue: `let a = ...\nlet b = ...\na + b`.
 define parse_let_in_expr(tokens: [Token], start: number, n: number) -> ExprStep:
@@ -4004,7 +4005,7 @@ define parse_list_literal(tokens: [Token], start: number, n: number) -> ExprStep
         return ExprStep{value: LitList(items), next: i, ok: false, error: "expected `]` to close list literal"}
     ExprStep{value: LitList(items), next: i + 1, ok: true, error: ""}
 
-# `{ f: v, f: v }` map literal — same field syntax as emit/spawn but as
+# `{ f: v, f: v }` map literal - same field syntax as emit/spawn but as
 # an expression value. Empty `{}` makes an empty MapV.
 define parse_map_literal(tokens: [Token], start: number, n: number) -> ExprStep:
     edit i = skip_newlines(tokens, start, n)
@@ -4057,7 +4058,7 @@ define parse_if_expr(tokens: [Token], start: number, n: number) -> ExprStep:
 define empty_rule() -> Rule:
     Rule{name: "", params: [], body: [], trigger: "", condition: LitBool(true)}
 
-# ---- Substitution: replace VarRef(name) → LitInt(value) throughout
+# ---- Substitution: replace VarRef(name) -> LitInt(value) throughout
 # an Expr/Stmt/Rule tree. Used by `for IDENT in N until M: body` expansion
 # to clone the body M-N times with the loop var pinned to each value.
 
@@ -4091,7 +4092,7 @@ define subst_let_in(let_n: text, ve: Expr, be: Expr, name: text, value: number) 
     new_be = if let_n is name then be else subst_expr(be, name, value)
     LetIn(let_n, new_ve, new_be)
 
-# CountQuery's iter binding shadows an outer name — if the loop var and
+# CountQuery's iter binding shadows an outer name - if the loop var and
 # the count iter share a name, the count iter wins inside the predicate
 # (but the list-source still binds against the outer scope).
 define subst_count(iter_n: text, le: Expr, ce: Expr, name: text, value: number) -> Expr:
@@ -4274,7 +4275,7 @@ define token_text(t: Tok) -> text:
         _ then ""
 
 # Is this token a string literal? Distinguishes `Str("")` (a real empty
-# string) from a non-string token — `text_of` alone can't, since both
+# string) from a non-string token - `text_of` alone can't, since both
 # yield "".
 define is_str_tok(t: Tok) -> truth:
     choose t:

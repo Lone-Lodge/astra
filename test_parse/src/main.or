@@ -77,7 +77,7 @@ define main() -> number:
         print_line(r.name)
         print_line(r.trigger)
 
-    # Full concatenated bundle (as atlas sees it — packages + shell).
+    # Full concatenated bundle (as atlas sees it - packages + shell).
     widgets_src = read_file("../../atlas/packages/widgets.astra")
     dtokens_src = read_file("../../atlas/packages/design-tokens.astra")
     templates_src = read_file("../../atlas/packages/editor-templates.astra")
@@ -104,7 +104,7 @@ define main() -> number:
     print_line(pr2.error.message)
 
     print_line("=== Panel primitive parse smoke ===")
-    # Panel is defined in atlas/packages/widgets.astra — the parser
+    # Panel is defined in atlas/packages/widgets.astra - the parser
     # doesn't know it, but `create Panel ...` uses the universal
     # key:value attribute syntax so it parses like any other type.
     src_panel_text = "on Init():\n    create Panel x: 10, y: 20, text: \"hello\", color: \"#EDEBE4\"\n"
@@ -131,7 +131,7 @@ define main() -> number:
     print_line(length(parse_pc.rules))
 
     print_line("=== template invocation via fn machinery ===")
-    # Templates desugar to functions — `compile` should merge them into
+    # Templates desugar to functions - `compile` should merge them into
     # `functions`, then eval-call can find them by name. The regression
     # test just confirms the merge happens; deeper eval is exercised by
     # the fireplace bundle set above.

@@ -1,6 +1,6 @@
 name = "astra_lexer"
 version = "0.1.0"
-description = "Astra — tokeniser (pure Orion port av Rust-impl)"
+description = "Astra - tokeniser"
 
 [orbs]
 bytes = "*"

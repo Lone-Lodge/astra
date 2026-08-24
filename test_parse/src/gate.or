@@ -1,5 +1,5 @@
 
-# st_fact gate (NEXTGEN Punkt 3) — standalone so it does not depend on the
+# st_fact gate - standalone so it does not depend on the
 # read_file-based file tests in main.or (whose `io` wildcard does not resolve
 # read_file in this environment; unrelated to the `fact` change). Verifies the
 # new `fact` keyword desugars into the SAME namespaces the individual keywords
@@ -14,7 +14,7 @@ define setvar_name(r: Rule, idx: number) -> text:
             _ then "<not-setvar>"
 
 define main() -> number:
-    print_line("=== st_fact gate (NEXTGEN Punkt 3) ===")
+    print_line("=== st_fact gate ===")
     f_view   = compile_parse_result("fact alive = health > 0\n")
     f_goal   = compile_parse_result("fact reach = score > 100 in goal\n")
     f_broken = compile_parse_result("fact wet = water > 0 in broken\n")

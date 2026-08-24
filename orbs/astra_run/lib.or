@@ -1,13 +1,13 @@
-# astra_run — the single front door: source → Outcome.
+# astra_run - the single front door: source -> Outcome.
 #
 # `run(source, name, args)` finds the plain rule named `name` and
 # evaluates it.  `dispatch(source, event, args)` finds every `on Event`
-# handler and merges their effects — the reactive entry point a game
+# handler and merges their effects - the reactive entry point a game
 # uses to wire user input to .astra scripts. `tick(source, ctx, prev)`
-# fires every `when EXPR: body` rule on the false→true edge.
+# fires every `when EXPR: body` rule on the false->true edge.
 #
 # Pure helper `fn` definitions live in the parser's function table and
-# are forwarded to eval transparently — rules call them via expression
+# are forwarded to eval transparently - rules call them via expression
 # `Call(name, args)` without any runtime ceremony.
 
 use log
@@ -19,12 +19,12 @@ public external define orion_arena_reset() -> int
 public external define orion_persist_on() -> int
 public external define orion_persist_off() -> int
 
-# What `compile` produces — rules, helper functions, evaluated consts
+# What `compile` produces - rules, helper functions, evaluated consts
 # and component declarations (the ECS auto-pack schema).
 type Compiled: rules: [Rule], functions: [Function], consts: [Binding], components: [ComponentDecl], tests: [TestCase], enum_states: [EnumState]
 
 # Lex + parse + (MVP: skip check) + evaluate the first rule by NAME.
-# Errors at any stage collapse to an empty Outcome — atlas pipes silent
+# Errors at any stage collapse to an empty Outcome - atlas pipes silent
 # refusals through, exactly how the Rust impl handles failed guards.
 public define run(source: text, rule_name: text, args: [Value]) -> Outcome:
     c = compile(source)
@@ -33,11 +33,11 @@ public define run(source: text, rule_name: text, args: [Value]) -> Outcome:
         return empty()
     run_rule_args_ctx(target, args, c.consts, c.functions)
 
-# Dispatch — fire every `on Event(...)` handler in `source` matching
+# Dispatch - fire every `on Event(...)` handler in `source` matching
 # `event`. Merges all effects (order = source order).
 # Invoke a pure helper `fn` by name with args; return its Value result.
 # Lets Orion-side hosts call into astra-defined helpers for pixel math,
-# piece catalog lookups, etc. — single source of truth in the .astra
+# piece catalog lookups, etc. - single source of truth in the .astra
 # file, host stays a thin invoker.
 public define eval_fn(source: text, fn_name: text, args: [Value]) -> Value:
     c = compile(source)
@@ -76,7 +76,7 @@ public define dispatch_ctx(source: text, event: text, args: [Value], ctx: [Bindi
 
 # Short-key twin: dispatch-hot callers pass a stable bundle id so
 # the cache lookup is a ~15-byte compare instead of rebuilding and
-# comparing the whole source per call (6us/hit on a big bundle —
+# comparing the whole source per call (6us/hit on a big bundle -
 # a double-digit share of a dirty sims frame across the fixpoint).
 public define dispatch_ctx_c(cid: text, source: text, event: text, args: [Value], ctx: [Binding]) -> Outcome:
     dispatch_with(compile_c(cid, source), cid, event, args, ctx)
@@ -84,7 +84,7 @@ public define dispatch_ctx_c(cid: text, source: text, event: text, args: [Value]
 define dispatch_with(c: Compiled, cid: text, event: text, args: [Value], ctx: [Binding]) -> Outcome:
     full_ctx = merge_bindings(c.consts, ctx)
     q_on = slot_has("astra:quar_on")
-    # effects is owned (fresh []) until returned — in-place merge.
+    # effects is owned (fresh []) until returned - in-place merge.
     edit effects = []
     edit ri = 0
     loop r in c.rules:
@@ -99,14 +99,14 @@ define dispatch_with(c: Compiled, cid: text, event: text, args: [Value], ctx: [B
     Outcome{effects: effects, reads: []}
 
 # A rule's identity for crumbs and quarantine: its own name when it
-# has one, else its position among same-trigger rules (source order —
+# has one, else its position among same-trigger rules (source order -
 # stable per compile; shifts on script edits, which a session-lived
 # quarantine tolerates). The parser stores the trigger AS the name for
 # the `on Event():` form, so name is trigger means anonymous too.
 define rule_id(cid: text, name: text, trig: text, i: number) -> text:
     if name is "" or name is trig then "{cid}/{trig}#{i}" else "{cid}/{name}"
 
-# Start from a fresh list — `mut out = a` would alias the cached consts
+# Start from a fresh list - `mut out = a` would alias the cached consts
 # and an in-place push would then append arena-lived ctx bindings INTO
 # the compile cache. That was the wandering dangling-cache crash.
 # push_mut is audited here BECAUSE out starts owned from [].
@@ -119,13 +119,13 @@ define merge_bindings(a: [Binding], b: [Binding]) -> [Binding]:
     out
 
 # Result of a reactive tick. `truths` is parallel to the `when` rules in
-# source order — true means "condition currently holds". The host stores
+# source order - true means "condition currently holds". The host stores
 # this between ticks and passes it back as `prev_truths` so we can
-# detect the false→true edge that fires the body.
+# detect the false->true edge that fires the body.
 public type TickOutcome: outcome: Outcome, truths: [truth]
 
 # Evaluate every `when EXPR: body` rule in `source` against the supplied
-# context bindings. Fires the body on the false→true edge only —
+# context bindings. Fires the body on the false->true edge only -
 # `prev_truths` carries last tick's per-rule state. First call should
 # pass an empty list; subsequent calls pass the previous TickOutcome's
 # `truths` so milestones don't re-fire every tick.
@@ -147,7 +147,7 @@ define tick_with(c: Compiled, cid: text, ctx: [Binding], prev_truths: [truth]) -
     loop r in c.rules:
         # A view/derive is a standing definition, not an event: recompute
         # it every pass with no edge test and no truths slot (the truths
-        # bitmask is indexed by `$when` order — `idx` must not advance).
+        # bitmask is indexed by `$when` order - `idx` must not advance).
         if r.trigger is "$derive":
             outcome = run_rule_env(r, full_ctx, c.functions)
             loop e in outcome.effects:
@@ -161,7 +161,7 @@ define tick_with(c: Compiled, cid: text, ctx: [Binding], prev_truths: [truth]) -
                 rid = rule_id(cid, r.name, "$when", idx)
                 # Cross-bundle patches: if this is a `cmd:X` and any
                 # bundle declared `patch command X`, atlas set
-                # `atlas:patched:X` at boot — skip the base fire.
+                # `atlas:patched:X` at boot - skip the base fire.
                 shadowed = rule_name_starts_with_local(r.name, "cmd:") and slot_has("atlas:patched:" + rule_name_strip_prefix_local(r.name, "cmd:"))
                 if not shadowed and not (q_on and slot_has("astra:quar:" + rid)):
                     orion_crumb_rule(rid)
@@ -190,11 +190,11 @@ public external define orion_ledger_off() -> int
 public external define orion_crumb_rule(rule: text)
 
 public define compile(source: text) -> Compiled:
-    # Memoise on source text — the same script bundle is dispatched
+    # Memoise on source text - the same script bundle is dispatched
     # every frame (60Hz) so lex+parse dominates without a cache.
     # Slot map keys on source directly; the runtime hashes the String
     # once per lookup, which is O(N) but a single memcmp vs re-lexing.
-    # slot_has instead of type_of-probing — identical semantics
+    # slot_has instead of type_of-probing - identical semantics
     # interpreted and native (native values carry no type tags).
     cache_key = "astra:compiled_v1:" + source
     if slot_has(cache_key):
@@ -238,7 +238,7 @@ define binding_at(bs: [Binding], i: number) -> Binding:
     bs[i]
 
 # A bundle that fails to compile becomes an EMPTY program (rules just
-# stop firing) — say WHY on the error channel instead of silently
+# stop firing) - say WHY on the error channel instead of silently
 # rendering nothing. astra_check gates hot reload the same way.
 define compile_fresh(source: text) -> Compiled:
     lex_result = lex(source)
@@ -255,7 +255,7 @@ define compile_fresh(source: text) -> Compiled:
         pline = pe.line
         error("astra", "parse failed line {pline}: {pmsg}")
         return Compiled{rules: [], functions: [], consts: [], components: [], tests: [], enum_states: []}
-    # Templates desugar to functions — same shape (name, params, body Expr),
+    # Templates desugar to functions - same shape (name, params, body Expr),
     # only the decl keyword differs. Merging them into `functions` lets
     # `eval_user_call` invoke templates without a separate registry.
     all_functions = template_functions_merged(parse_result.functions, parse_result.templates)
@@ -272,13 +272,13 @@ define template_functions_merged(fns: [Function], tmpls: [TemplateDecl]) -> [Fun
 define template_at_local(xs: [TemplateDecl], i: number) -> TemplateDecl:
     xs[i]
 
-# Component declarations from the memoized compile — the ECS auto-pack
+# Component declarations from the memoized compile - the ECS auto-pack
 # path must not re-parse the bundle per dispatch.
 public define compiled_components(source: text) -> [ComponentDecl]:
     c = compile(source)
     c.components
 
-# Source declarations — extracted from a raw parse (bypasses the
+# Source declarations - extracted from a raw parse (bypasses the
 # Compiled cache which drops them). Called once per bundle at boot.
 # Text copies keep names/paths persistent past the arena reset.
 public define compiled_sources(source: text) -> [SourceDecl]:
@@ -293,7 +293,7 @@ public define compiled_sources(source: text) -> [SourceDecl]:
 define source_at(xs: [SourceDecl], i: number) -> SourceDecl:
     xs[i]
 
-# Animation declarations — same evacuation pattern as sources.
+# Animation declarations - same evacuation pattern as sources.
 public define compiled_animations(source: text) -> [AnimationDecl]:
     pr = compile_parse_result(source)
     n = length(pr.animations)
@@ -306,13 +306,13 @@ public define compiled_animations(source: text) -> [AnimationDecl]:
 define animation_at(xs: [AnimationDecl], i: number) -> AnimationDecl:
     xs[i]
 
-# Rule list from the memoized compile — atlas uses this at boot to
+# Rule list from the memoized compile - atlas uses this at boot to
 # scan for `patch:X` names and populate the cross-bundle patch index.
 public define compiled_rules(source: text) -> [Rule]:
     c = compile(source)
     c.rules
 
-# Asset declarations — same evacuation pattern.
+# Asset declarations - same evacuation pattern.
 public define compiled_assets(source: text) -> [AssetDecl]:
     pr = compile_parse_result(source)
     n = length(pr.assets)
@@ -325,7 +325,7 @@ public define compiled_assets(source: text) -> [AssetDecl]:
 define asset_at(xs: [AssetDecl], i: number) -> AssetDecl:
     xs[i]
 
-# Type→traits mapping: for each `type X uses A, B, C` in this bundle,
+# Type->traits mapping: for each `type X uses A, B, C` in this bundle,
 # the (X, [A, B, C]) pair. Atlas aggregates across bundles to answer
 # trait-queries (`each e in Movable`).
 public define compiled_type_traits(source: text) -> [TypeTraits]:
@@ -343,7 +343,7 @@ public define compiled_type_traits(source: text) -> [TypeTraits]:
 define type_traits_at(xs: [TypeTraits], i: number) -> TypeTraits:
     xs[i]
 
-# Template declarations — parameterised fragments. Atlas registers
+# Template declarations - parameterised fragments. Atlas registers
 # each by name; runtime callers (`items:` on Panel) invoke by name and
 # bind args positionally. Body Expr is kept live for eval-time expansion.
 public define compiled_templates(source: text) -> [TemplateDecl]:
@@ -361,9 +361,9 @@ public define compiled_templates(source: text) -> [TemplateDecl]:
 define template_at(xs: [TemplateDecl], i: number) -> TemplateDecl:
     xs[i]
 
-# Design-token blocks — `tokens NS: key: value, ...`. Atlas resolver
+# Design-token blocks - `tokens NS: key: value, ...`. Atlas resolver
 # joins `namespace + key` (e.g. `color.bg`) when a widget consumes
-# `style:` or `layout:` attributes. Values are Expr — resolved lazily
+# `style:` or `layout:` attributes. Values are Expr - resolved lazily
 # by the resolver so token refs can chain (`layout.card.padding: md`).
 public define compiled_token_blocks(source: text) -> [TokensDecl]:
     pr = compile_parse_result(source)
@@ -380,7 +380,7 @@ public define compiled_token_blocks(source: text) -> [TokensDecl]:
 define token_block_at(xs: [TokensDecl], i: number) -> TokensDecl:
     xs[i]
 
-# Style prop-bundles — `style NAME:` then indented `key: value`. Atlas
+# Style prop-bundles - `style NAME:` then indented `key: value`. Atlas
 # loads these globally and merges them into a create's payload at spawn,
 # so a style declared in one bundle styles a widget in another.
 public define compiled_styles(source: text) -> [StyleDecl]:
@@ -392,7 +392,7 @@ public define compiled_styles(source: text) -> [StyleDecl]:
         out = append(out, StyleDecl{name: "" + s.name, fields: s.fields})
     out
 
-# Local byte-comparison helpers — astra_run's Orbit.toml doesn't pull
+# Local byte-comparison helpers - astra_run's Orbit.toml doesn't pull
 # in `text`, and the byte primitives are already reachable through the
 # lexer chain. Kept locally so a later `use text` won't shadow.
 define rule_name_starts_with_local(name: text, prefix: text) -> truth:
@@ -450,7 +450,7 @@ define find_named_rule(rules: [Rule], name: text) -> Rule:
 define empty_sentinel() -> Rule:
     Rule{name: "", params: [], body: [], trigger: "", condition: LitBool(true)}
 
-# Warm the compile cache. compile() owns its epoch/evacuation dance —
+# Warm the compile cache. compile() owns its epoch/evacuation dance -
 # safe to call from anywhere (load, reload poll, mid-dispatch).
 public define astra_warm(source: text) -> number:
     c = compile(source)
@@ -460,7 +460,7 @@ public define astra_warm(source: text) -> number:
 # The content cache stays correct but its key IS the source: every
 # lookup rebuilds and compares a bundle-sized string. Hot callers
 # bind bundle -> tree ONCE under a short stable id; (re)load is the
-# invalidation point — astra_warm_c recompiles by CONTENT (an edit
+# invalidation point - astra_warm_c recompiles by CONTENT (an edit
 # misses the content cache) and rebinds the short key.
 public define compile_c(cid: text, source: text) -> Compiled:
     tkey = "astra:t:" + cid
@@ -475,7 +475,7 @@ public define astra_warm_c(cid: text, source: text) -> number:
     store_tree("astra:t:" + cid, c)
     length(c.rules)
 
-# The store runs with the arena OFF — the arena outranks persist,
+# The store runs with the arena OFF - the arena outranks persist,
 # and a slot key copied into an open epoch is the wandering
 # dangling-cache crash all over again.
 define store_tree(tkey: text, c: Compiled):
@@ -492,7 +492,7 @@ public define compiled_components_c(cid: text, source: text) -> [ComponentDecl]:
     c = compile_c(cid, source)
     c.components
 
-# ---- Facts: rules as data (H2 — one machinery, three fruits) ----
+# ---- Facts: rules as data (H2 - one machinery, three fruits) ----
 # Per rule: what it reads (free names), writes (set targets), emits
 # (channels), spawns (kinds), calls (helper fns). This IS the static
 # footprint (deterministic parallelism), the AI query surface
@@ -505,7 +505,7 @@ type FAcc: reads: [text], writes: [text], emits: [text], spawns: [text], calls: 
 
 public define astra_facts_c(cid: text, source: text) -> [RuleFacts]:
     c = compile_c(cid, source)
-    # A rule's effect is not just its own body — it inherits everything
+    # A rule's effect is not just its own body - it inherits everything
     # the helper functions it calls read and write. Without this, a
     # resource touched only inside a helper (a game's tray_x_end, read in
     # pixel_to_tray_slot) looks unread, and the scheduler would call two
@@ -588,7 +588,7 @@ define ffacts_at(fs: [RuleFacts], i: number) -> RuleFacts:
 
 # Transitive closure by repeated propagation. Union is monotonic and
 # the name set finite, so length(names) passes reach the fixpoint (cycles
-# converge — union is idempotent).
+# converge - union is idempotent).
 define close_facts(names: [text], facts: [RuleFacts]) -> [RuleFacts]:
     edit cur = facts
     edit pass = 0
@@ -751,7 +751,7 @@ define stmt_facts(s: Stmt, a: FAcc) -> FAcc:
         _ then a
 
 # Unknown helper calls: valid = bundle fns + the three eval
-# builtins. Live eval stays graceful (NoneV — hot-reload mid-edit
+# builtins. Live eval stays graceful (NoneV - hot-reload mid-edit
 # must not crash the game); CHECK and TRY fail loud instead.
 public define astra_unknown_calls_c(cid: text, source: text) -> text:
     c = compile_c(cid, source)
@@ -800,7 +800,7 @@ public define astra_check_c(cid: text, source: text) -> [CheckError]:
     c = compile_c(cid, source)
     check_program(c.rules, c.functions, c.enum_states)
 
-# One-line summary of the check pass — "" when the bundle is clean, else the
+# One-line summary of the check pass - "" when the bundle is clean, else the
 # errors joined "owner: message; owner: message". Mirrors the Text shape of
 # astra_unknown_calls_c for CLI/log surfaces.
 public define astra_check_text_c(cid: text, source: text) -> text:
@@ -816,13 +816,13 @@ public define astra_check_text_c(cid: text, source: text) -> text:
 define check_err_at(errs: [CheckError], i: number) -> CheckError:
     errs[i]
 
-# ---- Test runner (pillar 5: tests as syntax) ----
+# ---- Test runner: the bundle's own inline tests ----
 # Executes each `test NAME:` block from the parse (tests live in ParseResult,
 # never in the arena-evacuated Compiled tree). A test runs its steps against a
 # fresh effect accumulator + tick counter:
-#   apply CALL   — run the named rule, fold its effects into the accumulator
-#   tick N       — advance the tick counter (readable as `tick`)
-#   expect COND  — assert (with `effects` bound to the running effect count)
+#   apply CALL   - run the named rule, fold its effects into the accumulator
+#   tick N       - advance the tick counter (readable as `tick`)
+#   expect COND  - assert (with `effects` bound to the running effect count)
 # The first failing step stops the test. Returns one TestResult per test.
 public type TestResult: name: text, passed: truth, message: text
 
@@ -830,7 +830,7 @@ type TState: effects: [AstraEffect], tickc: number, passed: truth, msg: text
 
 public define run_tests(source: text) -> [TestResult]:
     # Use the evacuated Compiled (not raw compile_parse_result) so every rule,
-    # helper, and test step is deep-copied into the persist heap — raw parse
+    # helper, and test step is deep-copied into the persist heap - raw parse
     # output carries arena-lived Text that dangles once any epoch resets.
     c = compile(source)
     n = length(c.tests)
@@ -839,7 +839,7 @@ public define run_tests(source: text) -> [TestResult]:
         out = append(out, rt_run_one(rt_test_at(c.tests, i), c.rules, c.functions, c.consts))
     out
 
-# One-line pass/fail summary — "" when every test passes, else the failing
+# One-line pass/fail summary - "" when every test passes, else the failing
 # tests joined "name: message; ...".
 public define run_tests_text(source: text) -> text:
     results = run_tests(source)

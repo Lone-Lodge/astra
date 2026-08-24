@@ -1,7 +1,7 @@
-# astra_outcome — what a rule run yielded.
+# astra_outcome - what a rule run yielded.
 #
 # The closed set: three writes (Set / Spawn / Destroy) + one signal
-# (Emit), nothing else. No IO, no mutation, no unbounded loop — the
+# (Emit), nothing else. No IO, no mutation, no unbounded loop - the
 # sandbox is the grammar, not a runtime guard.
 
 
@@ -21,7 +21,7 @@ public type AstraEffect:
     AstraEmit(text, Value)
     AstraRelate(number, text, number)
 
-# One read trace — used by the typed Trace UI to show where a rule
+# One read trace - used by the typed Trace UI to show where a rule
 # looked when it computed its answer.
 public type Read: entity: number, field: text
 
@@ -35,7 +35,7 @@ public define empty() -> Outcome:
 public define refused() -> Outcome:
     empty()
 
-# Deep copies — evacuate a rule's outcome out of the eval frame arena.
+# Deep copies - evacuate a rule's outcome out of the eval frame arena.
 public define effect_copy(e: AstraEffect) -> AstraEffect:
     choose e:
         AstraSet(eid, field, v) then AstraSet(eid, "" + field, value_copy(v))
@@ -55,7 +55,7 @@ define fields_copy(fields: [ValueField], i: number, acc: [ValueField]) -> [Value
 
 public define outcome_copy(o: Outcome) -> Outcome:
     n = length(o.effects)
-    # fx is owned (fresh []) until wrapped — in-place accumulation.
+    # fx is owned (fresh []) until wrapped - in-place accumulation.
     edit fx = []
     loop i in 0 until n:
         fx = append(fx, effect_copy(o.effects[i]))

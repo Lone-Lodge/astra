@@ -1,6 +1,6 @@
 name = "astra"
 version = "0.0.1"
-description = "Astra — facade orb"
+description = "Astra - facade orb"
 
 [orbs]
 astra_value = "path:../astra_value"

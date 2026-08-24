@@ -1,12 +1,12 @@
-# astra_check — the loud pass.
+# astra_check - the loud pass.
 #
 # Live eval is deliberately graceful: an unknown helper call returns NoneV
 # so a hot-reload mid-edit never crashes the running game (see astra_eval::
-# eval_call). astra_check is the OPPOSITE stance — a separate pass a tool or
+# eval_call). astra_check is the OPPOSITE stance - a separate pass a tool or
 # host runs to surface authoring mistakes BEFORE they silently no-op. It never
 # runs on the 60Hz dispatch path; it answers "is this bundle well-formed?".
 #
-# With four scalar Value variants there is no Hindley-Milner here — the checks
+# With four scalar Value variants there is no Hindley-Milner here - the checks
 # are structural table-lookups over the parsed tree:
 #   - a Call to a name that is neither a builtin nor a defined `fn`
 #   - a Call to a known `fn` with the wrong argument count
@@ -17,7 +17,7 @@
 
 public type CheckError: rule: text, message: text
 
-# eval_call's built-in helpers — calls to these are always valid regardless of
+# eval_call's built-in helpers - calls to these are always valid regardless of
 # the bundle's own `fn` table, and they self-tolerate arg count, so no arity
 # check applies (mirror astra_eval::eval_call + astra_run::call_is_known).
 define is_builtin(name: text) -> truth:
@@ -42,14 +42,14 @@ public define check_program(rules: [Rule], functions: [Function], enum_states: [
     errs = check_exhaustive_when(rules, enum_states, errs)
     errs
 
-# Non-exhaustive `when` switch on an enum state (NEXTGEN #5a). Enum variants
+# Non-exhaustive `when` switch on an enum state. Enum variants
 # stay as `VarRef`s (a variant resolves to its int via world state at eval, not
 # by parse-time folding), so `when door is Open` is `door is VarRef("Open")`;
 # we match the variant NAME directly against the retained EnumState registry.
 # This is the one intentionally-ADVISORY check (the others flag provably-wrong
 # programs): it fires only when an enum is branched on EXCLUSIVELY by
 # `enum is Variant` equalities (no ` is not `, no `<`, no dynamic/bare reference) and
-# at least one — but not every — variant has a branch. That keeps it
+# at least one - but not every - variant has a branch. That keeps it
 # effectively zero-false-positive: a partial equality-switch is almost always a
 # forgotten case, and any construct we cannot reason about suppresses the hint.
 define check_exhaustive_when(rules: [Rule], enum_states: [EnumState], acc: [CheckError]) -> [CheckError]:
@@ -67,7 +67,7 @@ define check_exhaustive_when(rules: [Rule], enum_states: [EnumState], acc: [Chec
 
 # How an enum state is referenced across a condition tree: the set of variant
 # NAMES covered by `enum is Variant`, and whether it is touched in any way we
-# cannot reason about (a dynamic ` is `, a ` is not `/`<`, or a bare read) — which
+# cannot reason about (a dynamic ` is `, a ` is not `/`<`, or a bare read) - which
 # voids exhaustiveness reasoning for that enum.
 type ScanRef: covered: [text], other: truth
 
@@ -171,7 +171,7 @@ define check_dup_functions(fs: [Function], i: number, acc: [CheckError]) -> [Che
 # Only PLAIN callable rules collide harmfully: run() picks the LAST rule of a
 # given name, so two `rule foo(...)` silently shadow. `on Event` handlers share
 # their event name on purpose (many handlers per event is valid), and desugared
-# rules (derive:/goal:/belief:) carry a trigger — all excluded by trigger is "".
+# rules (derive:/goal:/belief:) carry a trigger - all excluded by trigger is "".
 define check_dup_rules(rs: [Rule], i: number, acc: [CheckError]) -> [CheckError]:
     n = length(rs)
     if i >= n:

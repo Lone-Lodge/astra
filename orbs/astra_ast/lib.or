@@ -1,4 +1,4 @@
-# astra_ast — AST for rules.
+# astra_ast - AST for rules.
 #
 # M1 grammar: rule + params + body of (emit | require | let) stmts,
 # expressions support literals/varref/binop/unop/if/call/field access.
@@ -16,11 +16,11 @@ public type Expr:
     IfExpr(Expr, Expr, Expr)       # cond then else
     Call(text, [Expr])             # callee + args
     Field(Expr, text)              # base.name
-    CountQuery(text, Expr, Expr)   # count(NAME in LIST where COND) — iter binding, list source, predicate
-    LetIn(text, Expr, Expr)        # let NAME = VAL <expr> — binds NAME in scope of body expr
-    LitList([Expr])                # [a, b, c] — list literal, evaluates to ListV
-    MapLit([FieldExpr])            # { f: v, f: v } in expression position — evaluates to MapV
-    RangeExpr(Expr, Expr)          # a until b — half-open int range, evaluates to ListV
+    CountQuery(text, Expr, Expr)   # count(NAME in LIST where COND) - iter binding, list source, predicate
+    LetIn(text, Expr, Expr)        # let NAME = VAL <expr> - binds NAME in scope of body expr
+    LitList([Expr])                # [a, b, c] - list literal, evaluates to ListV
+    MapLit([FieldExpr])            # { f: v, f: v } in expression position - evaluates to MapV
+    RangeExpr(Expr, Expr)          # a until b - half-open int range, evaluates to ListV
     MatchExpr(Expr, [MatchArm])    # match scrutinee: PAT -> RESULT, ...
 
 public type MatchArm: pattern: Expr, body: Expr
@@ -39,14 +39,14 @@ public type Stmt:
     EmitEffect(text, [FieldExpr])
     Require(Expr)                  # silent no-op if false
     Let(text, Expr)                # bind name in env for rest of body
-    LetDestructure([text], Expr)   # let { a, b } = mapv — bind every name to the same-named MapV field
-    SpawnEntity(text, [FieldExpr]) # spawn Kind { f: v, ... } — host constructs the typed entity
-    DestroyEntity(Expr)            # destroy expr_yielding_ref — host despawns the ref
-    SetField(Expr, text, Expr)     # set base.field = value — host applies field mutation
-    SetVar(text, Expr)             # set name = value — host applies resource/var write
-    ForEach(text, Expr, Expr, [Stmt])  # for x in list [where pred]: stmts — runtime list iteration with optional filter
+    LetDestructure([text], Expr)   # let { a, b } = mapv - bind every name to the same-named MapV field
+    SpawnEntity(text, [FieldExpr]) # spawn Kind { f: v, ... } - host constructs the typed entity
+    DestroyEntity(Expr)            # destroy expr_yielding_ref - host despawns the ref
+    SetField(Expr, text, Expr)     # set base.field = value - host applies field mutation
+    SetVar(text, Expr)             # set name = value - host applies resource/var write
+    ForEach(text, Expr, Expr, [Stmt])  # for x in list [where pred]: stmts - runtime list iteration with optional filter
     IfStmt(Expr, [Stmt])               # if cond: body-stmt (single-branch conditional)
-    RelateStmt(Expr, text, Expr)       # `relate A kind B` — create relation A -kind-> B (A3)
+    RelateStmt(Expr, text, Expr)       # `relate A kind B` - create relation A -kind-> B (A3)
 
 # A rule's parameter.
 public type Param: name: text, type_name: text
@@ -58,7 +58,7 @@ public type Param: name: text, type_name: text
 # other rule kinds it's LitBool(true) so eval logic can ignore it.
 public type Rule: name: text, params: [Param], body: [Stmt], trigger: text, condition: Expr
 
-# A pure helper. Body is a single expression — `let x = ... <expr>`-style
+# A pure helper. Body is a single expression - `let x = ... <expr>`-style
 # multi-line bodies aren't supported yet; one expression suffices for
 # pixel-math / piece-catalog use cases. Called from rule expressions via
 # `Call(name, args)`; the runtime looks the name up in the parsed
@@ -67,12 +67,12 @@ public type Function: name: text, params: [Param], return_type: text, body: Expr
 
 public type ConstDecl: name: text, value: Expr
 
-# ---- Tests (pillar 5: tests as syntax) ----
+# ---- Tests: a bundle carries its own ----
 # A `test NAME:` block is a sequence of steps the test runner executes
 # against a fresh effect accumulator. `apply CALL` runs a named rule and
 # folds its effects in; `tick N` advances the tick counter (readable as
 # `tick` in expects); `expect COND` asserts (with `effects` bound to the
-# running effect count). Tests are a dev/tooling surface — they never enter
+# running effect count). Tests are a dev/tooling surface - they never enter
 # the arena-evacuated Compiled tree, only ParseResult.
 # A test step is a flat data struct with a `kind` tag rather than an enum:
 # an enum whose variants carry different payload shapes (a call vs an Expr)
@@ -85,13 +85,13 @@ public type TestStep: kind: text, name: text, args: [Expr], cond: Expr
 
 public type TestCase: name: text, steps: [TestStep]
 
-# An entity declaration — `entity Kind { f: type, ... }`. The host
+# An entity declaration - `entity Kind { f: type, ... }`. The host
 # registers a constructor for `Kind` so `spawn Kind { ... }` can produce
 # a real typed entity. Fields are parsed for documentation and future
 # type-checking; the runtime doesn't enforce them yet.
 public type EntityDecl: name: text, fields: [Param]
 
-# A component declaration — `component Kind: field:type, field:type`.
+# A component declaration - `component Kind: field:type, field:type`.
 # Declares an ECS component type inline in Astra. atlas_astra registers
 # the type in the world at load time so `spawn Kind { ... }` and
 # `for x in Kind` work without any Orion glue code.
@@ -99,13 +99,13 @@ public type ComponentDecl: name: text, fields: [Param]
 
 # ---- Deep copy: compile-epoch evacuation ----
 #
-# astra_run::compile runs lex+parse inside an arena epoch — tokens and
+# astra_run::compile runs lex+parse inside an arena epoch - tokens and
 # parse garbage die at the epoch reset, and ONLY this copy of the live
 # tree survives into the persist heap. Every variant MUST be covered:
 # a missed one shares an arena pointer into the cache, and the poison
 # turns that into a deterministic crash on first dispatch. Texts copy
 # via "" + s (allocates in the active scope, persist during
-# evacuation). Accumulators are fresh owned locals — push_mut.
+# evacuation). Accumulators are fresh owned locals - push_mut.
 
 public define ast_copy_expr(e: Expr) -> Expr:
     choose e:
@@ -158,10 +158,10 @@ define arm_at(xs: [MatchArm], i: number) -> MatchArm:
 # `component NAME(params):` declares a named widget subtree. An instantiation
 # NAME(args) is expanded at PARSE TIME (astra_parser): the body is spliced in
 # with every param VarRef replaced by its arg expression (ct_subst_* below). No
-# new Stmt variant, no runtime change — pure sugar over the widget tree.
+# new Stmt variant, no runtime change - pure sugar over the widget tree.
 public type ComponentTemplate: name: text, params: [Param], body: [Stmt]
 
-# Byte-wise name compare — ` is ` on Text is pointer equality for runtime-built
+# Byte-wise name compare - ` is ` on Text is pointer equality for runtime-built
 # strings, so match param names by content.
 define ct_names_eq(a: text, b: text) -> truth:
     ab = bytes_of(a)
@@ -176,7 +176,7 @@ define ct_names_eq(a: text, b: text) -> truth:
                 same = false
         same
 
-# VarRef(param) → the matching arg expression; other names pass through.
+# VarRef(param) -> the matching arg expression; other names pass through.
 # params[k] is replaced by args[k].
 define ct_subst_var(name: text, params: [text], args: [Expr]) -> Expr:
     n = length(params)

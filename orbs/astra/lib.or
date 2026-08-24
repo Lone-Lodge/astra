@@ -1,11 +1,12 @@
-# astra — small typed host-agnostic language for game logic.
+# astra - a small typed host-agnostic scripting language.
 #
-# A rule is a pure fn from args → Outcome (the Effects it proposes
-# + the reads it made). A view is the same shape over a render tree.
-# The core does lex/type/eval; everything it can't (read the world,
-# resolve a module) it asks a host through `astra_host`.
+# One dependency for a host: this orb re-exports the whole language.
+# A rule is a pure fn from args -> Outcome (the effects it proposes
+# + the reads it made). A tree is the same shape over widgets.
+# The core does lex/check/eval; everything it can't (read the world,
+# resolve a bundle) it asks a host through `astra_host`.
 #
-# Atlas embeds this as `atlas_astra`, mapping Value ↔ atlas_wire.
+# Atlas embeds this as `atlas_astra`, mapping Value <-> atlas_wire.
 
 public use astra_value
 public use astra_outcome

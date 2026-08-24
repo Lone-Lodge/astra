@@ -1,11 +1,11 @@
-# astra_host — the boundary.
+# astra_host - the boundary.
 #
 # Two things the core can't do itself: read the world, resolve an
 # imported module. Hosts implement these so the language stays
 # host-agnostic. Atlas plugs in via atlas_astra.
 
 
-# Trait-shaped — the host implements `lookup` against its store and
+# Trait-shaped - the host implements `lookup` against its store and
 # `resolve` against its module map.
 public type HostQuery: kind: text, entity: number, field: text
 

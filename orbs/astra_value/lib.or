@@ -1,4 +1,4 @@
-# astra_value — the value universe.
+# astra_value - the value universe.
 #
 # Four scalar types (Int / Text / Bool / Ref) so the typechecker is a
 # table lookup, not Hindley-Milner. MapV gives us multi-field payloads
@@ -17,10 +17,10 @@ public type Value:
 
 # A named slot inside a MapV. Field name is the source-level identifier
 # (`tier` for `emit Milestone { tier: 100 }`); value can be any Value
-# including another MapV — host bridges decide how deep to flatten.
+# including another MapV - host bridges decide how deep to flatten.
 public type ValueField: name: text, value: Value
 
-# Deep copy — evacuates a call result out of the eval frame arena.
+# Deep copy - evacuates a call result out of the eval frame arena.
 public define value_copy(v: Value) -> Value:
     choose v:
         IntV(n) then IntV(n)
