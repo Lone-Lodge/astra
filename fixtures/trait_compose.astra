@@ -1,0 +1,3 @@
+trait Movable speed: int
+
+type Wolf uses Movable hp: int

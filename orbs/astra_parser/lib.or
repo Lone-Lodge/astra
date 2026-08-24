@@ -42,8 +42,8 @@ public type AnimationDecl: name: text, from_val: number, to_val: number, duratio
 # from silent-at-runtime to loud-at-load-time.
 public type AssetDecl: name: text, kind: text, path: text
 
-# Trait declaration - `trait X { field: type }`. A reusable field
-# bundle. When a `type Y uses A, B { extra }` composes it, the parser
+# Trait declaration - `trait X field: type`. A reusable field
+# bundle. When a `type Y uses A, B extra: type` composes it, the parser
 # inlines A's and B's fields into Y's ComponentDecl. Pure parse-time
 # sugar; the ECS sees one merged component per Y, no multi-component
 # machinery required. Bundle-local: traits declared in one .astra
@@ -167,7 +167,7 @@ public define parse(tokens: [Token]) -> ParseResult:
                     err_msg = cstep.error
                     err_line = t.line
             if not handled and match_tok(tokens, i, n, "Trait"):
-                # `trait X { fields }` - reusable field bundle. Types
+                # `trait X f: t, f: t` - reusable field bundle. Types
                 # declare `uses X` to inline the fields.
                 handled = true
                 tstep = parse_trait_decl(tokens, i + 1, n)
@@ -917,7 +917,7 @@ define parse_when_rule(tokens: [Token], start: number, n: number) -> RuleStep:
     RuleStep{rule: Rule{name: "", params: [], body: body, trigger: "$when", condition: cond.value}, next: i, ok: true, error: ""}
 
 define at_rule_starter(tokens: [Token], i: number, n: number) -> truth:
-    match_tok(tokens, i, n, "Rule") or match_tok(tokens, i, n, "On") or match_tok(tokens, i, n, "Every") or match_tok(tokens, i, n, "Fn") or match_tok(tokens, i, n, "When") or match_tok(tokens, i, n, "Component") or match_tok(tokens, i, n, "Type") or match_tok(tokens, i, n, "Entity") or match_tok(tokens, i, n, "Const") or match_tok(tokens, i, n, "Test") or match_tok(tokens, i, n, "Intent") or match_tok(tokens, i, n, "State") or match_tok(tokens, i, n, "Command") or match_tok(tokens, i, n, "View") or match_tok(tokens, i, n, "Source") or match_tok(tokens, i, n, "Animate") or match_tok(tokens, i, n, "Asset") or match_tok(tokens, i, n, "Trait") or match_tok(tokens, i, n, "Template") or match_tok(tokens, i, n, "Tokens")
+    match_tok(tokens, i, n, "Rule") or match_tok(tokens, i, n, "On") or match_tok(tokens, i, n, "Every") or match_tok(tokens, i, n, "Fn") or match_tok(tokens, i, n, "When") or match_tok(tokens, i, n, "Component") or match_tok(tokens, i, n, "Type") or match_tok(tokens, i, n, "Entity") or match_tok(tokens, i, n, "Const") or match_tok(tokens, i, n, "Test") or match_tok(tokens, i, n, "Intent") or match_tok(tokens, i, n, "State") or match_tok(tokens, i, n, "Command") or match_tok(tokens, i, n, "View") or match_tok(tokens, i, n, "Source") or match_tok(tokens, i, n, "Animate") or match_tok(tokens, i, n, "Asset") or match_tok(tokens, i, n, "Trait") or match_tok(tokens, i, n, "Template") or match_tok(tokens, i, n, "Tokens") or match_tok(tokens, i, n, "Patch") or match_tok(tokens, i, n, "Law")
 
 # `fn NAME(params) -> TYPE: body-expr` - pure helper. Params may include
 # optional `: type` annotations; we accept and discard them for now.
@@ -1113,9 +1113,9 @@ define trait_fields(traits: [TraitDecl], name: text) -> [Param]:
 define trait_at(xs: [TraitDecl], i: number) -> TraitDecl:
     xs[i]
 
-# `trait X { field: type }` - reuses the component field-parsing but
-# stores as a TraitDecl. No composition allowed on traits themselves
-# in v1 (a trait can't `uses` another trait).
+# `trait X field: type` - reuses the component field-parsing (braces
+# and all: brace-less, comma-separated, newline-terminated) but stores
+# the result as a TraitDecl. A trait cannot itself `uses` another.
 type TraitStep: trait_decl: TraitDecl, next: number, ok: truth, error: text
 
 define parse_trait_decl(tokens: [Token], start: number, n: number) -> TraitStep:
@@ -4167,12 +4167,10 @@ define tok_kind(t: Tok) -> text:
         Str(_) then "Str"
         Ident(_) then "Ident"
         Rule then "Rule"
-        Record then "Record"
         RequireKw then "Require"
         UseKw then "Use"
         LetKw then "Let"
         Set then "Set"
-        SpawnKw then "Spawn"
         Destroy then "Destroy"
         Emit then "Emit"
         Effect then "Effect"
@@ -4201,7 +4199,6 @@ define tok_kind(t: Tok) -> text:
         Every then "Every"
         Fn then "Fn"
         Const then "Const"
-        Derive then "Derive"
         Fact then "Fact"
         Law then "Law"
         RelateKw then "RelateKw"

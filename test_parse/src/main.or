@@ -1,10 +1,10 @@
 
-# Parse-smoke harness for the fireplace game + the new template/tokens
-# syntax (task #43). All bundles must print OK. Run after any
-# astra_lexer / astra_parser change:
+# Parse smoke over whole bundles: the app template's own .astra files and
+# the declaration forms that only show up in a real file. Every bundle must
+# parse; the exit code is the number that did not, so CI can gate on it.
 #
 #   cd astra/test_parse
-#   orbit run src/main.or main
+#   orbit run
 
 define test_source(label: text, src: text):
     print_line("--- ")
@@ -22,6 +22,7 @@ define test_source(label: text, src: text):
         print_line("token_blocks:")
         print_line(length(pr.token_blocks))
     else:
+        slot_set("fails", slot_get_number("fails") + 1)
         print_line("FAIL line:")
         print_line(er.line)
         print_line("msg:")
@@ -147,4 +148,8 @@ define main() -> number:
     print_line(ok_str)
 
     print_line("=== done ===")
-    0
+    fails = slot_get_number("fails")
+    if fails > 0:
+        print_line("bundles that did not parse:")
+        print_line(fails)
+    fails

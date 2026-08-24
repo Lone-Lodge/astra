@@ -1,0 +1,3 @@
+data commands(id, label):
+    menu      "Open Menu"
+    minimize  "Minimize window"

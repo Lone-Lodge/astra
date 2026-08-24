@@ -96,14 +96,14 @@ Astra is written in Orion and builds with Orion's `orbit`. Clone it beside
 toolchain finds the standard orbs by sweeping from the workspace root.
 
 ```sh
-orbit run                    # the language suite, 51 checks
+orbit run                    # the language suite, 76 checks
 cd test_parse && orbit run   # parse smoke over whole bundles
 ```
 
 | gate | what it proves |
 |---|---|
-| `orbit run` | dispatch, reactive edges, queries, text, inline tests, the check pass |
-| `test_parse` | a real multi-declaration bundle parses, and the template roundtrip holds |
+| `orbit run` | every declaration, statement and expression the language has |
+| `test_parse` | whole bundles off disk parse, the app template's among them |
 
 ## Layout
 
@@ -124,20 +124,18 @@ fixtures/           .astra programs the suite reads
 
 ## Status
 
-v0.0.1. Green, and embedded in real programs, but young.
+v0.1.0. Green on Linux and Windows, and embedded in real programs.
 
-What is proven by a gate or a live program: `state`, `type`, `rule`, `command
-needs`, `on Event`, `on X becomes Y`, `when`, `every N s`, `fn`, `view`,
-`component`, `each ... key`, `style`, `tokens`, `template`, `test`, `intent`,
-`fact` and its family (`goal`, `constraint`, `belief`, `conf`), `emit`,
-`create`, `entity`, `all`, `count ... where`.
+Every word the lexer reserves has a gate or a live user. The suite covers the
+declarations a host reads (`state`, `type`, `trait`, `entity`, `const`, `data`,
+`source`, `animate`, `asset`, `template`, `tokens`, `style`, `view`), the rules
+(`rule`, `command needs`, `on`, `when`, `every`, `law`, `patch`, `intent`,
+`fact` and its family), the statements (`create`, `destroy`, `set`, `relate`,
+`emit`, `effect`, `signal`, `after`, `each`/`for`, `if`) and the expressions
+(`match`, `count ... where`, `all`, `exists`, `none`, ranges, text).
 
 Known gaps:
 
-- **Declared but ungated.** `law`, `source`, `animate`, `asset`, `patch`,
-  `trait`, `record`, `relate`, `exists`, `derive`, `signal`, `const`, `match`,
-  `effect`, `spawn` and `destroy` are in the lexer and the parser but have no
-  test and no user. Treat them as unfinished until each has a gate.
 - **`use` is a note to the host, not an import.** A bundle is a file and its
   path is its identity. `use NAME` is recorded in the parse result and the host
   decides what to load; names that cross bundles (styles, tokens, types) are

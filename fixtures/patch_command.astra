@@ -1,0 +1,5 @@
+command go:
+    tally = 1
+
+patch command go:
+    tally = 2

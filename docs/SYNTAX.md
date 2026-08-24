@@ -1,8 +1,8 @@
 # Astra syntax
 
 Every form here is exercised by a gate (`orbit run`, `test_parse`) or by a
-running program. Forms that exist in the parser but have neither are listed as
-gaps in the [README](../README.md) and are deliberately absent from this page.
+running program. Every word the lexer reserves appears on this page: if it is
+not here, it is not reserved.
 
 A bundle is one `.astra` file. Indentation is structure: the block of a rule,
 the parent chain of a tree. `#` starts a comment. A bundle holds a tree or
@@ -28,6 +28,27 @@ entity Block { col: int, row: int, color: Text }
 `type` declares a record the host registers; a widget vocabulary is just a
 bundle of these. `entity Kind { ... }` is the authoring form the host uses to
 build one from `create`.
+
+```
+trait Movable speed: int
+type Wolf uses Movable hp: int
+```
+
+A `trait` is a reusable field bundle. `uses` inlines its fields at parse time,
+so the host still sees one merged type. Traits are bundle-local and must be
+declared before the type that uses them.
+
+```
+const MAXHP = 100
+
+data commands(id, label):
+    menu      "Open Menu"
+    minimize  "Minimize window"
+```
+
+`const` names a literal. `data NAME(cols):` is a table with a named schema:
+each row fills the columns in order, and the whole thing becomes a const list
+that `each` can walk and `.id` / `.label` can read.
 
 ## Rules
 
@@ -57,6 +78,22 @@ seconds, and `if` adds a guard.
 A failed `require` proposes zero effects. An illegal move is a silent no-op,
 never an error.
 
+```
+law Gravity:
+when falling: emit Fall()
+
+patch command strike:
+    sparks = sparks + 2
+
+when spawned(Block):
+    emit Born()
+```
+
+`law NAME:` names the rule that follows, so a fact can cite it by name.
+`patch command NAME:` overrides a command declared earlier in the same bundle:
+the base is evicted and only the patch runs. `when spawned(T)` and
+`when destroyed(T)` fire on a type's lifecycle.
+
 ## Inside a rule
 
 ```
@@ -79,11 +116,21 @@ Expressions carry the usual precedence, comparison and `and` / `or` / `not`.
 `if COND then A else B` is an expression. `+` concatenates when either side is
 text, and `"n={n}"` interpolates.
 
-Queries over a list:
+Queries over a list. `count` gives a number; `all`, `exists` and `none` give a
+truth over the same machinery:
 
 ```
 count(b in items where b.color == "red")
-all x in [2, 4, 6] where x > 0
+all    x in [2, 4, 6] where x > 0
+exists x in [1, 2, 3] where x > 2
+none   x in [1, 2]    where x > 5
+```
+
+`match` picks the first arm whose pattern matches, `_` being the wildcard, and
+answers `none` when nothing matches:
+
+```
+match x: 1 -> 10, 2 -> 20, _ -> 0
 ```
 
 ## Effects
@@ -94,9 +141,22 @@ create Block col: 1, row: 2, color: "red"
 sparks = sparks + 1
 ```
 
-`emit X` is an internal fact other rules can observe with `on X`. `create Kind`
-builds an entity from an `entity` declaration. A bare assignment writes a
-`state`.
+```
+signal Ready()
+effect WindowMinimize()
+destroy e
+relate player owns sword
+set hp = 5
+after 3: door = 1
+```
+
+`emit X` is an internal fact other rules can observe with `on X`; `signal` is
+the same thing spelled for a one-way notification. `effect X` is an external
+operation that leaves the program and is not observable. `create Kind` builds
+an entity from an `entity` declaration and `destroy` retires one. `relate A
+kind B` records a relation. A bare assignment writes a `state`, and `set` is
+the explicit spelling of the same write. `after N: name = value` arms a
+delayed write N ticks out; `becomes` reads as the synonym for `=`.
 
 ## Helpers
 
@@ -155,6 +215,19 @@ template greeting(name) = "hello, " + name
 ```
 
 A `template` is a parameterised expression fragment, invoked like a helper.
+
+## Boot-time declarations
+
+```
+source levels from file "levels.json"
+asset hero: sprite "hero.png"
+animate fade from 0 to 100 over 2 s
+```
+
+These are notes to the host, not behaviour. `source` names an external file the
+host loads into a state of the same name. `asset` is a typed file reference the
+host verifies at boot, so a missing file fails loudly at load rather than
+silently at runtime. `animate` is a declarative tween the host drives.
 
 ## Tests
 

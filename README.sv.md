@@ -98,14 +98,14 @@ Astra är skriven i Orion och byggs med Orions `orbit`. Klona den bredvid
 hittar standardorbarna genom att svepa från arbetsytans rot.
 
 ```sh
-orbit run                    # språksviten, 51 kontroller
+orbit run                    # språksviten, 76 kontroller
 cd test_parse && orbit run   # parse-rök över hela buntar
 ```
 
 | grind | vad den bevisar |
 |---|---|
-| `orbit run` | dispatch, reaktiva flanker, frågor, text, inbyggda tester, kontrollpassen |
-| `test_parse` | en riktig bunt med många deklarationer parsar, och mallen tur och retur håller |
+| `orbit run` | varje deklaration, sats och uttryck språket har |
+| `test_parse` | hela buntar från disk parsar, appmallens bland dem |
 
 ## Karta
 
@@ -126,20 +126,19 @@ fixtures/           .astra-program som sviten läser
 
 ## Läge
 
-v0.0.1. Grön, och inbäddad i riktiga program, men ung.
+v0.1.0. Grön på Linux och Windows, och inbäddad i riktiga program.
 
-Vad som bevisas av en grind eller ett levande program: `state`, `type`, `rule`,
-`command needs`, `on Event`, `on X becomes Y`, `when`, `every N s`, `fn`,
-`view`, `component`, `each ... key`, `style`, `tokens`, `template`, `test`,
-`intent`, `fact` med familj (`goal`, `constraint`, `belief`, `conf`), `emit`,
-`create`, `entity`, `all`, `count ... where`.
+Varje ord lexern reserverar har en grind eller en levande användare. Sviten
+täcker deklarationerna en värd läser (`state`, `type`, `trait`, `entity`,
+`const`, `data`, `source`, `animate`, `asset`, `template`, `tokens`, `style`,
+`view`), reglerna (`rule`, `command needs`, `on`, `when`, `every`, `law`,
+`patch`, `intent`, `fact` med familj), satserna (`create`, `destroy`, `set`,
+`relate`, `emit`, `effect`, `signal`, `after`, `each`/`for`, `if`) och
+uttrycken (`match`, `count ... where`, `all`, `exists`, `none`, intervall,
+text).
 
 Kända luckor:
 
-- **Deklarerade men ogrindade.** `law`, `source`, `animate`, `asset`, `patch`,
-  `trait`, `record`, `relate`, `exists`, `derive`, `signal`, `const`, `match`,
-  `effect`, `spawn` och `destroy` finns i lexern och parsern men har varken test
-  eller användare. Betrakta dem som ofärdiga tills var och en har en grind.
 - **`use` är en notis till värden, inte en import.** En bunt är en fil och dess
   sökväg är dess identitet. `use NAMN` skrivs ner i parse-resultatet och värden
   avgör vad som ska laddas; namn som korsar buntar (styles, tokens, typer) är

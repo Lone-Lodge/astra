@@ -181,7 +181,86 @@ define main() -> number:
     # Empty string literal "" is a real Text, not a parse fall-through.
     check("empty string literal", 1, text_is("fn f() -> text:\n    \"\"\n", [], ""))
 
+    section("declarations a host reads")
+    # const: a named literal any expression can reach.
+    src_const = "const MAXHP = 100\nfn cap(n: int) -> int: if n > MAXHP then MAXHP else n"
+    check("const caps at 100", 100, int_of_value(eval_fn(src_const, "cap", [IntV(250)])))
+
+    # law NAME: names the rule that follows, so a fact can cite it.
+    src_law = "law Gravity:\nwhen falling: emit Fall()"
+    check("law names one rule", 1, length(compiled_rules(src_law)))
+
+    # A trait's fields inline into every type that uses it.
+    src_trait = read_file("fixtures/trait_compose.astra")
+    check("trait composes into a type", 1, length(compiled_type_traits(src_trait)))
+
+    # source / asset / animate are boot-time declarations for the host.
+    check("source declares one feed", 1, length(compiled_sources("source levels from file \"levels.json\"\n")))
+    check("asset declares one file", 1, length(compiled_assets("asset hero: sprite \"hero.png\"\n")))
+    check("animate declares one tween", 1, length(compiled_animations("animate fade from 0 to 100 over 2 s\n")))
+
+    # patch evicts the command it overrides, so one rule survives.
+    src_patch = read_file("fixtures/patch_command.astra")
+    check("patch replaces its base command", 1, length(compiled_rules(src_patch)))
+
+    section("statements and expressions")
+    check("relate proposes one effect", 1, eff_count(run("rule own(a, b): relate a owns b", "own", [IntV(1), IntV(2)])))
+    check("destroy proposes one effect", 1, eff_count(run("rule kill(e): destroy e", "kill", [IntV(7)])))
+    check("signal proposes one effect", 1, eff_count(run("rule ping(): signal Ping()", "ping", [])))
+    check("effect proposes one effect", 1, eff_count(run("rule minimise(): effect WindowMin()", "minimise", [])))
+
+    src_match = "fn pick(x: int) -> int: match x: 1 -> 10, _ -> 0"
+    check("match arm 1 gives 10", 10, int_of_value(eval_fn(src_match, "pick", [IntV(1)])))
+    check("match wildcard gives 0", 0, int_of_value(eval_fn(src_match, "pick", [IntV(5)])))
+
+    src_exists = "fn any_big() -> int: if exists x in [1, 2, 3] where x > 2 then 1 else 0"
+    check("exists finds one over 2", 1, int_of_value(eval_fn(src_exists, "any_big", [])))
+
+    # after / spawned / data / set / none - the last forms without a gate.
+    check("after arms a delayed write", 2, eff_count(run("rule arm(): after 3: door = 1", "arm", [])))
+    check("when spawned(T) is one rule", 1, length(compiled_rules("when spawned(Block):\n    emit Born()")))
+    src_data = read_file("fixtures/data_table.astra")
+    check("data table becomes one const", 1, length(compile_parse_result(src_data).consts))
+    check("set writes one effect", 1, eff_count(run("rule s(): set hp = 5", "s", [])))
+    src_none = "fn no_big() -> int: if none x in [1, 2] where x > 5 then 1 else 0"
+    check("none finds nothing over 5", 1, int_of_value(eval_fn(src_none, "no_big", [])))
+
+    section("fact and its family")
+    # `fact N = E` is the one keyword: bare it is a view, `in goal` /
+    # `in belief:WHO` place it elsewhere, `conf N` records a confidence.
+    # Each spelling must land in the namespace the single keyword gave.
+    f_view   = compile_parse_result("fact alive = health > 0\n")
+    f_goal   = compile_parse_result("fact reach = score > 100 in goal\n")
+    f_broken = compile_parse_result("fact wet = water > 0 in broken\n")
+    f_belief = compile_parse_result("fact enemy_at = 3 in belief:Guard\n")
+    f_conf   = compile_parse_result("fact enemy_at = 3 in belief:Guard conf 73\n")
+    v_view   = compile_parse_result("view alive = health > 0\n")
+    check("fact writes alive", 1, name_is(f_view, 0, "alive"))
+    check("fact in goal writes goal:reach", 1, name_is(f_goal, 0, "goal:reach"))
+    check("an unknown namespace is a constraint", 1, name_is(f_broken, 0, "constraint:wet"))
+    check("fact in belief writes belief:Guard:enemy_at", 1, name_is(f_belief, 0, "belief:Guard:enemy_at"))
+    check("conf writes a second target", 1, name_is(f_conf, 1, "conf:enemy_at"))
+    check("bare fact is the view alias", 1, name_is(v_view, 0, "alive"))
+
     t_summary()
+
+# First statement of the first rule a bundle parsed: the name it writes to.
+# `fact` and `view` desugar to a SetVar per target, so the name IS the proof.
+define name_is(pr: ParseResult, idx: number, want: text) -> number:
+    if not pr.ok:
+        0
+    else:
+        if length(pr.rules) is 0:
+            0
+        else:
+            r = pr.rules[0]
+            if idx >= length(r.body):
+                0
+            else:
+                choose r.body[idx]:
+                    SetVar(nm, _) then if nm is want then 1 else 0
+                    _ then 0
+
 
 # ── tiny test runner ─────────────────────────────────────────────────
 # Colored PASS/FAIL rows + a pass/total summary, in the shape of Orion's

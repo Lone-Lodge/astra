@@ -17,11 +17,9 @@ public type Tok:
     Str(text)
     Ident(text)
     Rule
-    Record
     RequireKw
     LetKw
     Set
-    SpawnKw
     Destroy
     Emit
     Effect
@@ -50,7 +48,6 @@ public type Tok:
     Every
     Fn
     Const
-    Derive
     Fact
     Law
     RelateKw
@@ -385,11 +382,9 @@ define is_newline_token(t: Token) -> truth:
 # Map an identifier text to its keyword token, or Ident if not reserved.
 define keyword_of(text: text) -> Tok:
     if text is "rule" then Rule
-    else if text is "record" then Record
     else if text is "require" then RequireKw
     else if text is "let" then LetKw
     else if text is "set" then Set
-    else if text is "spawn" then SpawnKw
     else if text is "destroy" then Destroy
     else if text is "emit" then Emit
     else if text is "effect" then Effect
@@ -419,7 +414,6 @@ define keyword_of(text: text) -> Tok:
     else if text is "every" then Every
     else if text is "fn" then Fn
     else if text is "const" then Const
-    else if text is "derive" then Derive
     else if text is "fact" then Fact
     else if text is "conf" then Confidence
     else if text is "law" then Law
