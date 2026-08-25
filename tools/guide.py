@@ -105,9 +105,36 @@ def render(md):
                 code.append(lines[i])
                 i += 1
             i += 1
-            tag = ' data-astra' if lang in ('python', 'astra', '') else ''
+            tag = ' data-code' if lang in ('python', 'astra') else ''
             body.append('<pre><code' + tag + '>' +
                         html.escape('\n'.join(code)) + '</code></pre>')
+            continue
+        if line.startswith('|') and i + 1 < len(lines) and set(lines[i + 1].replace('|', '').strip()) <= set('-: '):
+            flush()
+            head = [c.strip() for c in line.strip('|').split('|')]
+            i += 2
+            rows = []
+            while i < len(lines) and lines[i].startswith('|'):
+                rows.append([c.strip() for c in lines[i].strip('|').split('|')])
+                i += 1
+            body.append('<table><thead><tr>' +
+                        ''.join('<th>' + inline(c) + '</th>' for c in head) +
+                        '</tr></thead><tbody>' +
+                        ''.join('<tr>' + ''.join('<td>' + inline(c) + '</td>' for c in r) + '</tr>'
+                                for r in rows) +
+                        '</tbody></table>')
+            continue
+        if line.startswith('- '):
+            flush()
+            items = []
+            while i < len(lines) and (lines[i].startswith('- ') or
+                                      (items and lines[i].startswith('  ') and lines[i].strip())):
+                if lines[i].startswith('- '):
+                    items.append(lines[i][2:].strip())
+                else:
+                    items[-1] += ' ' + lines[i].strip()
+                i += 1
+            body.append('<ul>' + ''.join('<li>' + inline(t) + '</li>' for t in items) + '</ul>')
             continue
         if line.startswith('## '):
             flush()
