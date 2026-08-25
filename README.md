@@ -22,7 +22,8 @@ on sparks becomes 3:
     seen_flame = true
 ```
 
-**[Syntax](docs/SYNTAX.md)** - every form that has a gate, on one page.
+**[Syntax](https://lone-lodge.github.io/astra/)** - every form that has a gate,
+on one page, coloured. The same text lives in [docs/SYNTAX.md](docs/SYNTAX.md).
 
 Nothing there reaches the machine. A rule proposes effects and the host commits
 them or refuses. There is no file I/O, no sockets, no `eval`, no unbounded loop

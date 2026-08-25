@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Astra syntax</title>
+<meta name="description" content="Every form the language has, on one page. Each one is exercised by a gate or by a running program.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<a class="skip" href="#guide">Skip to the guide</a>
+
+<header>
+<h1>Astra syntax</h1>
+<p class="lede">Every form the language has, on one page. Each one is exercised by a gate or by a running program.</p>
+<p class="lede"><a href="https://github.com/Lone-Lodge/astra">The repository</a>
+is where the gates live: <code>orbit run</code> proves every form below.</p>
+</header>
+
+<nav class="toc" aria-labelledby="toc-h">
+<h2 class="toc-h" id="toc-h">On this page</h2>
+<ol>
+<li><a href="#facts">Facts</a></li>
+<li><a href="#rules">Rules</a></li>
+<li><a href="#inside-a-rule">Inside a rule</a></li>
+<li><a href="#effects">Effects</a></li>
+<li><a href="#helpers">Helpers</a></li>
+<li><a href="#trees">Trees</a></li>
+<li><a href="#boot-time-declarations">Boot-time declarations</a></li>
+<li><a href="#tests">Tests</a></li>
+<li><a href="#the-declarative-side">The declarative side</a></li>
+</ol>
+</nav>
+
+<main id="guide">
+<p>Every form here is exercised by a gate (<code>orbit run</code>, <code>test_parse</code>) or by a running program. Every word the lexer reserves appears on this page: if it is not here, it is not reserved.</p>
+<p>A bundle is one <code>.astra</code> file. Indentation is structure: the block of a rule, the parent chain of a tree. <code>#</code> starts a comment. A bundle holds a tree or rules, never both.</p>
+<h2 id="facts">1. Facts</h2>
+<pre><code data-astra>state sparks: nat = 0
+state door: enum(Shut, Open, Locked) = Shut</code></pre>
+<p>A <code>state</code> is what the host stores and what a rule may change. An <code>enum</code> state is checked for exhaustiveness: if some <code>when</code> branches switch on it by <code>==</code> and a variant has no branch, the check pass says so. Any other reference to the state (<code>!=</code>, a call, a field) suppresses that check.</p>
+<pre><code data-astra>type Text x: int, text: text, color: text, size: int
+entity Block { col: int, row: int, color: Text }</code></pre>
+<p><code>type</code> declares a record the host registers; a widget vocabulary is just a bundle of these. <code>entity Kind { ... }</code> is the authoring form the host uses to build one from <code>create</code>.</p>
+<pre><code data-astra>trait Movable speed: int
+type Wolf uses Movable hp: int</code></pre>
+<p>A <code>trait</code> is a reusable field bundle. <code>uses</code> inlines its fields at parse time, so the host still sees one merged type. Traits are bundle-local and must be declared before the type that uses them.</p>
+<pre><code data-astra>const MAXHP = 100
+
+data commands(id, label):
+    menu      &quot;Open Menu&quot;
+    minimize  &quot;Minimize window&quot;</code></pre>
+<p><code>const</code> names a literal. <code>data NAME(cols):</code> is a table with a named schema: each row fills the columns in order, and the whole thing becomes a const list that <code>each</code> can walk and <code>.id</code> / <code>.label</code> can read.</p>
+<h2 id="rules">2. Rules</h2>
+<pre><code data-astra>rule scale(x): require x &gt; 0 let d = x * 2 emit Scaled()
+
+command strike needs strike_cd == 0:
+    sparks = sparks + 1
+
+on Click(x, y): require x &gt; 0 emit Confirmed()
+on sparks becomes 3: seen_flame = true
+
+when score &gt;= 100: emit Milestone()
+every 3: emit Pulse()
+every 1s if strike_cd &gt; 0: strike_cd = strike_cd - 1</code></pre>
+<p><code>rule</code> is called by name. <code>command</code> is a user action: <code>needs</code> is its precondition and a widget dispatches it with <code>do: NAME</code>. <code>on Event(args)</code> is a handler; every handler that matches an event fires, and their effects merge. <code>on X becomes Y</code> fires on the transition, once.</p>
+<p><code>when</code> fires on the false-to-true edge only, so a condition that stays true does not fire again. <code>every N</code> counts ticks, <code>every N s</code> counts wall-clock seconds, and <code>if</code> adds a guard.</p>
+<p>A failed <code>require</code> proposes zero effects. An illegal move is a silent no-op, never an error.</p>
+<pre><code data-astra>law Gravity:
+when falling: emit Fall()
+
+patch command strike:
+    sparks = sparks + 2
+
+when spawned(Block):
+    emit Born()</code></pre>
+<p><code>law NAME:</code> names the rule that follows, so a fact can cite it by name. <code>patch command NAME:</code> overrides a command declared earlier in the same bundle: the base is evicted and only the patch runs. <code>when spawned(T)</code> and <code>when destroyed(T)</code> fire on a type&#x27;s lifecycle.</p>
+<h2 id="inside-a-rule">3. Inside a rule</h2>
+<pre><code data-astra>let d = x * 2          # explicit binding
+doubled = x * 2        # the same thing, implicitly
+
+if x &gt; 5: emit Big()   # single-branch guard
+
+each cell in cells:
+    create Block col: col + cell.dc, row: row - cell.dr
+
+for r in 0 to 3:       # `for` is a spelling of `each`
+    when r == 2: emit Hit row: r</code></pre>
+<p>Ranges: <code>0 to 3</code>, <code>from 1 to 5</code>, <code>1 through 4</code>, <code>from 2 through 6</code>. <code>to</code> is half-open, <code>through</code> includes the last value.</p>
+<p>Expressions carry the usual precedence, comparison and <code>and</code> / <code>or</code> / <code>not</code>. <code>if COND then A else B</code> is an expression. <code>+</code> concatenates when either side is text, and <code>&quot;n={n}&quot;</code> interpolates.</p>
+<p>Queries over a list. <code>count</code> gives a number; <code>all</code>, <code>exists</code> and <code>none</code> give a truth over the same machinery:</p>
+<pre><code data-astra>count(b in items where b.color == &quot;red&quot;)
+all    x in [2, 4, 6] where x &gt; 0
+exists x in [1, 2, 3] where x &gt; 2
+none   x in [1, 2]    where x &gt; 5</code></pre>
+<p><code>match</code> picks the first arm whose pattern matches, <code>_</code> being the wildcard, and answers <code>none</code> when nothing matches:</p>
+<pre><code data-astra>match x: 1 -&gt; 10, 2 -&gt; 20, _ -&gt; 0</code></pre>
+<h2 id="effects">4. Effects</h2>
+<pre><code data-astra>emit Place col: 3, row: 5, color: &quot;red&quot;
+create Block col: 1, row: 2, color: &quot;red&quot;
+sparks = sparks + 1</code></pre>
+<pre><code data-astra>signal Ready()
+effect WindowMinimize()
+destroy e
+relate player owns sword
+set hp = 5
+after 3: door = 1</code></pre>
+<p><code>emit X</code> is an internal fact other rules can observe with <code>on X</code>; <code>signal</code> is the same thing spelled for a one-way notification. <code>effect X</code> is an external operation that leaves the program and is not observable. <code>create Kind</code> builds an entity from an <code>entity</code> declaration and <code>destroy</code> retires one. <code>relate A kind B</code> records a relation. A bare assignment writes a <code>state</code>, and <code>set</code> is the explicit spelling of the same write. <code>after N: name = value</code> arms a delayed write N ticks out; <code>becomes</code> reads as the synonym for <code>=</code>.</p>
+<h2 id="helpers">5. Helpers</h2>
+<pre><code data-astra>fn double(n: int) -&gt; int: n * 2
+
+double(x):                 # types are optional
+    x * 2</code></pre>
+<p>A helper is pure and callable from any rule expression. A call to a name that is neither a builtin nor a declared helper is what the check pass catches.</p>
+<h2 id="trees">6. Trees</h2>
+<pre><code data-astra>use widgets
+
+tokens color:
+    ink: &quot;#ece7dd&quot;
+    panel: &quot;#26262e&quot;
+
+style action:
+    role: button
+    h: 56
+    color: panel
+    ink: ink
+
+view can_strike = if strike_cd == 0 then 1 else 0
+
+Panel name: root, layout: column, gap: 14
+    Text &quot;sparks {sparks}&quot;, color: ink, size: 17
+    Panel style: action, text: &quot;STRIKE&quot;, do: strike, show: can_strike</code></pre>
+<p>A widget line is <code>Type field: value, ...</code>, and indentation parents it. <code>style</code> is a reusable bundle of fields, <code>tokens NS:</code> a namespace of named values; both are global across bundles. <code>view NAME = expr</code> is a derived value recomputed each tick, and <code>show:</code> gates a widget on one, hiding its whole subtree.</p>
+<pre><code data-astra>component CommandRow(cmd, query):
+    Panel style: row, do: cmd.id
+        Text cmd.label, size: 15
+
+each commands as cmd key cmd.id:
+    CommandRow(cmd, palette_query)</code></pre>
+<p>A <code>component</code> is a named parameterised subtree, expanded where it is called. <code>key EXPR</code> gives each pass of a loop its own identity, so nested children parent to their own row rather than to the last one.</p>
+<pre><code data-astra>template greeting(name) = &quot;hello, &quot; + name</code></pre>
+<p>A <code>template</code> is a parameterised expression fragment, invoked like a helper.</p>
+<h2 id="boot-time-declarations">7. Boot-time declarations</h2>
+<pre><code data-astra>source levels from file &quot;levels.json&quot;
+asset hero: sprite &quot;hero.png&quot;
+animate fade from 0 to 100 over 2 s</code></pre>
+<p>These are notes to the host, not behaviour. <code>source</code> names an external file the host loads into a state of the same name. <code>asset</code> is a typed file reference the host verifies at boot, so a missing file fails loudly at load rather than silently at runtime. <code>animate</code> is a declarative tween the host drives.</p>
+<h2 id="tests">8. Tests</h2>
+<pre><code data-astra>test a:
+    apply scale(5)
+    expect effects == 1
+
+test c:
+    tick 3
+    expect tick == 3</code></pre>
+<p><code>apply</code> runs a rule, <code>tick N</code> advances the clock, and <code>expect</code> reads <code>effects</code> or <code>tick</code>. The host runs them with <code>run_tests(source)</code>.</p>
+<h2 id="the-declarative-side">9. The declarative side</h2>
+<pre><code data-astra>intent FeedSelf for Worker:
+    require hunger &gt; 50
+    utility hunger
+
+fact alive = health &gt; 0
+fact reach = score &gt; 100 in goal
+fact enemy_at = 3 in belief:Guard conf 73</code></pre>
+<p>An <code>intent</code> is scored each tick into <code>intent:NAME:applicable</code> and <code>intent:NAME:score</code>, which a host reads to pick an action. <code>fact NAME = EXPR</code> is a derived value under a namespace: bare it is a <code>view</code>, <code>in goal</code> or <code>in belief:WHO</code> place it elsewhere, and <code>conf N</code> records a confidence.</p></main>
+
+<footer>
+<p>Astra is written in <a href="https://github.com/Lone-Lodge/orion">Orion</a>
+and embedded by a host, which decides what these declarations mean.</p>
+</footer>
+
+<script src="highlight.js"></script>
+
+</body>
+</html>

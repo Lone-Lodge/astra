@@ -21,7 +21,8 @@ on sparks becomes 3:
     seen_flame = true
 ```
 
-**[Syntaxen](docs/SYNTAX.md)** - varje form som har en grind, på en sida.
+**[Syntaxen](https://lone-lodge.github.io/astra/)** - varje form som har en grind,
+på en sida, färgad. Samma text ligger i [docs/SYNTAX.md](docs/SYNTAX.md).
 
 Ingenting där når maskinen. En regel föreslår effekter och värden verkställer
 dem eller vägrar. Det finns ingen fil-IO, inga sockets, ingen `eval`, ingen

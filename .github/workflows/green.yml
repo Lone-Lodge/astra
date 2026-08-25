@@ -37,6 +37,10 @@ jobs:
       - name: bootstrap orion
         run: cd orion && bash tools/bootstrap.sh
 
+      # The page is generated from docs/SYNTAX.md; a drifted page is a lie.
+      - name: guide matches the syntax reference
+        run: cd astra && python tools/guide.py --check
+
       - name: language suite
         run: cd astra && ../orion/dist/orbit.exe run
 
