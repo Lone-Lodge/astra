@@ -7,7 +7,7 @@ One `.astra` file is a bundle; a host embeds the language and gives the
 declarations meaning. Games, tools, desktop apps: the language has no opinion
 about which.
 
-```
+```python
 state sparks: nat = 0
 state strike_cd: nat = 0
 
@@ -38,7 +38,7 @@ implements those seven has the entire language wired.
 A bundle holds a **tree** or **rules**, never both. Indentation is the parent
 chain in a tree, the same way it is the block structure in a rule.
 
-```
+```python
 use widgets
 
 tokens color:
@@ -73,7 +73,7 @@ and `each xs as x key x.id:` repeats one with stable per-item identity.
 Astra is an orb. A host depends on `orbs/astra` and calls the front door in
 `astra_run`:
 
-```
+```python
 compiled  = compile(source)                        # parse + check, cache per bundle
 outcome   = dispatch(source, "Click", args)        # an event into the rules
 tick_out  = tick(source, ctx, prev_truths)         # fire when/every on the edge

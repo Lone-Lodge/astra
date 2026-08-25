@@ -6,7 +6,7 @@ Ett litet typat skriptspråk för vad ett program bestämmer och vad det visar.
 En `.astra`-fil är en bunt; en värd bäddar in språket och ger deklarationerna
 sin mening. Spel, verktyg, skrivbordsappar: språket har ingen åsikt om vilket.
 
-```
+```python
 state sparks: nat = 0
 state strike_cd: nat = 0
 
@@ -37,7 +37,7 @@ hanterar de sju har hela språket inkopplat.
 En bunt håller ett **träd** eller **regler**, aldrig båda. Indenteringen är
 föräldrakedjan i ett träd, precis som den är blockstrukturen i en regel.
 
-```
+```python
 use widgets
 
 tokens color:
@@ -73,7 +73,7 @@ post.
 Astra är en orb. En värd beror på `orbs/astra` och anropar ytterdörren i
 `astra_run`:
 
-```
+```python
 compiled  = compile(source)                        # parse + kontroll, cacha per bunt
 outcome   = dispatch(source, "Click", args)        # en händelse in i reglerna
 tick_out  = tick(source, ctx, prev_truths)         # tänder when/every på flanken

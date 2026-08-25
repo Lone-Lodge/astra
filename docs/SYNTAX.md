@@ -10,7 +10,7 @@ rules, never both.
 
 ## Facts
 
-```
+```python
 state sparks: nat = 0
 state door: enum(Shut, Open, Locked) = Shut
 ```
@@ -20,7 +20,7 @@ is checked for exhaustiveness: if some `when` branches switch on it by `==`
 and a variant has no branch, the check pass says so. Any other reference to
 the state (`!=`, a call, a field) suppresses that check.
 
-```
+```python
 type Text x: int, text: text, color: text, size: int
 entity Block { col: int, row: int, color: Text }
 ```
@@ -29,7 +29,7 @@ entity Block { col: int, row: int, color: Text }
 bundle of these. `entity Kind { ... }` is the authoring form the host uses to
 build one from `create`.
 
-```
+```python
 trait Movable speed: int
 type Wolf uses Movable hp: int
 ```
@@ -38,7 +38,7 @@ A `trait` is a reusable field bundle. `uses` inlines its fields at parse time,
 so the host still sees one merged type. Traits are bundle-local and must be
 declared before the type that uses them.
 
-```
+```python
 const MAXHP = 100
 
 data commands(id, label):
@@ -52,7 +52,7 @@ that `each` can walk and `.id` / `.label` can read.
 
 ## Rules
 
-```
+```python
 rule scale(x): require x > 0 let d = x * 2 emit Scaled()
 
 command strike needs strike_cd == 0:
@@ -78,7 +78,7 @@ seconds, and `if` adds a guard.
 A failed `require` proposes zero effects. An illegal move is a silent no-op,
 never an error.
 
-```
+```python
 law Gravity:
 when falling: emit Fall()
 
@@ -96,7 +96,7 @@ the base is evicted and only the patch runs. `when spawned(T)` and
 
 ## Inside a rule
 
-```
+```python
 let d = x * 2          # explicit binding
 doubled = x * 2        # the same thing, implicitly
 
@@ -119,7 +119,7 @@ text, and `"n={n}"` interpolates.
 Queries over a list. `count` gives a number; `all`, `exists` and `none` give a
 truth over the same machinery:
 
-```
+```python
 count(b in items where b.color == "red")
 all    x in [2, 4, 6] where x > 0
 exists x in [1, 2, 3] where x > 2
@@ -129,19 +129,19 @@ none   x in [1, 2]    where x > 5
 `match` picks the first arm whose pattern matches, `_` being the wildcard, and
 answers `none` when nothing matches:
 
-```
+```python
 match x: 1 -> 10, 2 -> 20, _ -> 0
 ```
 
 ## Effects
 
-```
+```python
 emit Place col: 3, row: 5, color: "red"
 create Block col: 1, row: 2, color: "red"
 sparks = sparks + 1
 ```
 
-```
+```python
 signal Ready()
 effect WindowMinimize()
 destroy e
@@ -160,7 +160,7 @@ delayed write N ticks out; `becomes` reads as the synonym for `=`.
 
 ## Helpers
 
-```
+```python
 fn double(n: int) -> int: n * 2
 
 double(x):                 # types are optional
@@ -172,7 +172,7 @@ is neither a builtin nor a declared helper is what the check pass catches.
 
 ## Trees
 
-```
+```python
 use widgets
 
 tokens color:
@@ -210,7 +210,7 @@ A `component` is a named parameterised subtree, expanded where it is called.
 `key EXPR` gives each pass of a loop its own identity, so nested children
 parent to their own row rather than to the last one.
 
-```
+```python
 template greeting(name) = "hello, " + name
 ```
 
@@ -218,7 +218,7 @@ A `template` is a parameterised expression fragment, invoked like a helper.
 
 ## Boot-time declarations
 
-```
+```python
 source levels from file "levels.json"
 asset hero: sprite "hero.png"
 animate fade from 0 to 100 over 2 s
@@ -231,7 +231,7 @@ silently at runtime. `animate` is a declarative tween the host drives.
 
 ## Tests
 
-```
+```python
 test a:
     apply scale(5)
     expect effects == 1
@@ -246,7 +246,7 @@ or `tick`. The host runs them with `run_tests(source)`.
 
 ## The declarative side
 
-```
+```python
 intent FeedSelf for Worker:
     require hunger > 50
     utility hunger
