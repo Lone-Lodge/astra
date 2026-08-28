@@ -249,6 +249,11 @@ define main() -> number:
     # A bundle with no rules is still a bundle.
     check("an empty source is still valid json", 1, if length(bundle_text("")) > 0 then 1 else 0)
 
+    # Parses fine, fails the checker: duplicate fn, wrong arity, unknown call.
+    # A bundle must refuse it here, because a host cannot run the checker.
+    b_unchecked = "fn dbl(n): n * 2\nfn dbl(n): n * 3\nrule go(x): require dbl(x, x) > 0\nrule bad(x): require missing(x) > 0"
+    check("a bundle that fails the checker is empty", 0, length(bundle_text(b_unchecked)))
+
     section("fact and its family")
     # `fact N = E` is the one keyword: bare it is a view, `in goal` /
     # `in belief:WHO` place it elsewhere, `conf N` records a confidence.

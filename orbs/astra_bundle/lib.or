@@ -16,6 +16,7 @@ use json
 use astra_ast
 use astra_lexer
 use astra_parser
+use astra_check
 
 # Bump when a field changes meaning or disappears. A host refuses a bundle
 # whose version it does not know rather than guessing.
@@ -244,8 +245,9 @@ public define bundle_json(p: ParseResult) -> Json:
     jobj(keys, vals)
 
 # Source text straight to bundle text. Returns "" when the source does not
-# parse, so a caller can tell a refusal from an empty bundle without an
-# exception mechanism the language does not have.
+# lex, does not parse, or does not pass the checker, so a caller can tell a
+# refusal from an empty bundle without an exception mechanism the language
+# does not have.
 public define bundle_text(src: text) -> text:
     lexed = lex(src)
     if lexed.ok:
@@ -256,6 +258,16 @@ public define bundle_text(src: text) -> text:
 define bundle_of_tokens(tokens: [Token]) -> text:
     p = parse(tokens)
     if p.ok:
+        bundle_if_clean(p)
+    else:
+        ""
+
+# The whole promise of a bundle is that it was parsed AND checked on a machine
+# that has Orion. A host cannot run the checker, so anything that would have
+# failed here would fail silently there instead, at the worst possible moment.
+define bundle_if_clean(p: ParseResult) -> text:
+    errs = check_program(p.rules, p.functions, p.enum_states)
+    if length(errs) is 0:
         json_stringify(bundle_json(p))
     else:
         ""

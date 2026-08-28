@@ -6,4 +6,5 @@ description = "Astra - serialise a parsed bundle to JSON so a non-Orion host can
 astra_ast = "path:../astra_ast"
 astra_parser = "path:../astra_parser"
 astra_lexer = "path:../astra_lexer"
+astra_check = "path:../astra_check"
 json = "*"
