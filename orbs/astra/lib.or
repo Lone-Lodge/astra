@@ -17,5 +17,6 @@ public use astra_check
 public use astra_eval
 public use astra_host
 public use astra_run
+public use astra_bundle
 
 public define version() -> text = "0.1.0"

@@ -7,3 +7,4 @@ description = "Astra - a small typed host-agnostic scripting language. Pure Orio
 astra = "path:orbs/astra"
 os = "*"
 bytes = "*"
+json = "*"

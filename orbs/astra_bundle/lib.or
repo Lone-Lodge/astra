@@ -1,0 +1,261 @@
+# astra_bundle - a parsed bundle, written out as JSON.
+#
+# Why this exists: a host that is not Orion cannot run lex/parse/eval. Games
+# ship to consoles and phones whose toolchains Orion does not target, so the
+# language cannot travel as source there. It travels as this instead: the AST,
+# already parsed on a machine that has Orion, as plain data the host reads.
+#
+# One grammar, one parser, many hosts. The host implements astra_outcome's
+# seven effects and a tree walk over these nodes; it never lexes anything.
+#
+# The shape is the AST, not a bytecode, because the AST is small and closed:
+# fifteen Expr cases, eleven Stmt cases. A bytecode would buy speed we do not
+# need yet and cost a second thing to keep in step with the language.
+
+use json
+use astra_ast
+use astra_lexer
+use astra_parser
+
+# Bump when a field changes meaning or disappears. A host refuses a bundle
+# whose version it does not know rather than guessing.
+public define bundle_format_version() -> number:
+    1
+
+
+# ---- Expressions ----
+#
+# One helper per case, because a `then` arm is a single expression and these
+# read better named than nested.
+
+define e_int(n: number) -> Json:
+    jobj(["k", "v"], [jstr("int"), jnum(n)])
+
+define e_text(s: text) -> Json:
+    jobj(["k", "v"], [jstr("text"), jstr(s)])
+
+define e_bool(b: truth) -> Json:
+    jobj(["k", "v"], [jstr("bool"), jbool(b)])
+
+define e_var(name: text) -> Json:
+    jobj(["k", "name"], [jstr("var"), jstr(name)])
+
+define e_binop(op: text, l: Expr, r: Expr) -> Json:
+    jobj(["k", "op", "l", "r"], [jstr("binop"), jstr(op), expr_json(l), expr_json(r)])
+
+define e_unop(op: text, x: Expr) -> Json:
+    jobj(["k", "op", "x"], [jstr("unop"), jstr(op), expr_json(x)])
+
+define e_if(c: Expr, t: Expr, f: Expr) -> Json:
+    jobj(["k", "c", "t", "f"], [jstr("if"), expr_json(c), expr_json(t), expr_json(f)])
+
+define e_call(name: text, args: [Expr]) -> Json:
+    jobj(["k", "name", "args"], [jstr("call"), jstr(name), jarr(exprs_json(args, 0, []))])
+
+define e_field(base: Expr, name: text) -> Json:
+    jobj(["k", "base", "name"], [jstr("field"), expr_json(base), jstr(name)])
+
+define e_count(bind: text, list: Expr, pred: Expr) -> Json:
+    jobj(["k", "bind", "list", "pred"], [jstr("count"), jstr(bind), expr_json(list), expr_json(pred)])
+
+define e_letin(name: text, val: Expr, body: Expr) -> Json:
+    jobj(["k", "name", "val", "body"], [jstr("letin"), jstr(name), expr_json(val), expr_json(body)])
+
+define e_list(items: [Expr]) -> Json:
+    jobj(["k", "items"], [jstr("list"), jarr(exprs_json(items, 0, []))])
+
+define e_map(fields: [FieldExpr]) -> Json:
+    jobj(["k", "fields"], [jstr("map"), jarr(fields_json(fields, 0, []))])
+
+define e_range(lo: Expr, hi: Expr) -> Json:
+    jobj(["k", "lo", "hi"], [jstr("range"), expr_json(lo), expr_json(hi)])
+
+define e_match(on: Expr, arms: [MatchArm]) -> Json:
+    jobj(["k", "on", "arms"], [jstr("match"), expr_json(on), jarr(arms_json(arms, 0, []))])
+
+public define expr_json(e: Expr) -> Json:
+    choose e:
+        LitInt(n) then e_int(n)
+        LitText(s) then e_text(s)
+        LitBool(b) then e_bool(b)
+        VarRef(name) then e_var(name)
+        Binop(op, l, r) then e_binop(op, l, r)
+        Unop(op, x) then e_unop(op, x)
+        IfExpr(c, t, f) then e_if(c, t, f)
+        Call(name, args) then e_call(name, args)
+        Field(base, name) then e_field(base, name)
+        CountQuery(bind, list, pred) then e_count(bind, list, pred)
+        LetIn(name, val, body) then e_letin(name, val, body)
+        LitList(items) then e_list(items)
+        MapLit(fields) then e_map(fields)
+        RangeExpr(lo, hi) then e_range(lo, hi)
+        MatchExpr(on, arms) then e_match(on, arms)
+
+define exprs_json(xs: [Expr], i: number, acc: [Json]) -> [Json]:
+    if i >= length(xs):
+        acc
+    else:
+        exprs_json(xs, i + 1, append(acc, expr_json(xs[i])))
+
+define field_json(f: FieldExpr) -> Json:
+    jobj(["name", "value"], [jstr(f.name), expr_json(f.value)])
+
+define fields_json(fs: [FieldExpr], i: number, acc: [Json]) -> [Json]:
+    if i >= length(fs):
+        acc
+    else:
+        fields_json(fs, i + 1, append(acc, field_json(fs[i])))
+
+define arm_json(a: MatchArm) -> Json:
+    jobj(["pattern", "body"], [expr_json(a.pattern), expr_json(a.body)])
+
+define arms_json(arms: [MatchArm], i: number, acc: [Json]) -> [Json]:
+    if i >= length(arms):
+        acc
+    else:
+        arms_json(arms, i + 1, append(acc, arm_json(arms[i])))
+
+define texts_json(xs: [text], i: number, acc: [Json]) -> [Json]:
+    if i >= length(xs):
+        acc
+    else:
+        texts_json(xs, i + 1, append(acc, jstr(xs[i])))
+
+
+# ---- Statements ----
+
+define s_emit(name: text, fields: [FieldExpr]) -> Json:
+    jobj(["k", "name", "fields"], [jstr("emit"), jstr(name), jarr(fields_json(fields, 0, []))])
+
+define s_require(cond: Expr) -> Json:
+    jobj(["k", "cond"], [jstr("require"), expr_json(cond)])
+
+define s_let(name: text, val: Expr) -> Json:
+    jobj(["k", "name", "val"], [jstr("let"), jstr(name), expr_json(val)])
+
+define s_letdes(names: [text], val: Expr) -> Json:
+    jobj(["k", "names", "val"], [jstr("letdestructure"), jarr(texts_json(names, 0, [])), expr_json(val)])
+
+define s_spawn(kind: text, fields: [FieldExpr]) -> Json:
+    jobj(["k", "kind", "fields"], [jstr("spawn"), jstr(kind), jarr(fields_json(fields, 0, []))])
+
+define s_destroy(target: Expr) -> Json:
+    jobj(["k", "target"], [jstr("destroy"), expr_json(target)])
+
+define s_setfield(base: Expr, name: text, val: Expr) -> Json:
+    jobj(["k", "base", "name", "val"], [jstr("setfield"), expr_json(base), jstr(name), expr_json(val)])
+
+define s_setvar(name: text, val: Expr) -> Json:
+    jobj(["k", "name", "val"], [jstr("setvar"), jstr(name), expr_json(val)])
+
+define s_foreach(bind: text, list: Expr, pred: Expr, body: [Stmt]) -> Json:
+    jobj(["k", "bind", "list", "pred", "body"], [jstr("foreach"), jstr(bind), expr_json(list), expr_json(pred), jarr(stmts_json(body, 0, []))])
+
+define s_if(cond: Expr, body: [Stmt]) -> Json:
+    jobj(["k", "cond", "body"], [jstr("if"), expr_json(cond), jarr(stmts_json(body, 0, []))])
+
+define s_relate(a: Expr, kind: text, b: Expr) -> Json:
+    jobj(["k", "a", "kind", "b"], [jstr("relate"), expr_json(a), jstr(kind), expr_json(b)])
+
+public define stmt_json(s: Stmt) -> Json:
+    choose s:
+        EmitEffect(name, fields) then s_emit(name, fields)
+        Require(cond) then s_require(cond)
+        Let(name, val) then s_let(name, val)
+        LetDestructure(names, val) then s_letdes(names, val)
+        SpawnEntity(kind, fields) then s_spawn(kind, fields)
+        DestroyEntity(target) then s_destroy(target)
+        SetField(base, name, val) then s_setfield(base, name, val)
+        SetVar(name, val) then s_setvar(name, val)
+        ForEach(bind, list, pred, body) then s_foreach(bind, list, pred, body)
+        IfStmt(cond, body) then s_if(cond, body)
+        RelateStmt(a, kind, b) then s_relate(a, kind, b)
+
+define stmts_json(xs: [Stmt], i: number, acc: [Json]) -> [Json]:
+    if i >= length(xs):
+        acc
+    else:
+        stmts_json(xs, i + 1, append(acc, stmt_json(xs[i])))
+
+
+# ---- Declarations ----
+
+define param_json(p: Param) -> Json:
+    jobj(["name", "type"], [jstr(p.name), jstr(p.type_name)])
+
+define params_json(ps: [Param], i: number, acc: [Json]) -> [Json]:
+    if i >= length(ps):
+        acc
+    else:
+        params_json(ps, i + 1, append(acc, param_json(ps[i])))
+
+define rule_json(r: Rule) -> Json:
+    keys = ["name", "params", "trigger", "condition", "body"]
+    vals = [jstr(r.name), jarr(params_json(r.params, 0, [])), jstr(r.trigger), expr_json(r.condition), jarr(stmts_json(r.body, 0, []))]
+    jobj(keys, vals)
+
+define rules_json(rs: [Rule], i: number, acc: [Json]) -> [Json]:
+    if i >= length(rs):
+        acc
+    else:
+        rules_json(rs, i + 1, append(acc, rule_json(rs[i])))
+
+define fn_json(f: Function) -> Json:
+    keys = ["name", "params", "return", "body"]
+    vals = [jstr(f.name), jarr(params_json(f.params, 0, [])), jstr(f.return_type), expr_json(f.body)]
+    jobj(keys, vals)
+
+define fns_json(fs: [Function], i: number, acc: [Json]) -> [Json]:
+    if i >= length(fs):
+        acc
+    else:
+        fns_json(fs, i + 1, append(acc, fn_json(fs[i])))
+
+define const_json(c: ConstDecl) -> Json:
+    jobj(["name", "value"], [jstr(c.name), expr_json(c.value)])
+
+define consts_json(cs: [ConstDecl], i: number, acc: [Json]) -> [Json]:
+    if i >= length(cs):
+        acc
+    else:
+        consts_json(cs, i + 1, append(acc, const_json(cs[i])))
+
+define enum_json(e: EnumState) -> Json:
+    jobj(["name", "variants"], [jstr(e.name), jarr(texts_json(e.variants, 0, []))])
+
+define enums_json(es: [EnumState], i: number, acc: [Json]) -> [Json]:
+    if i >= length(es):
+        acc
+    else:
+        enums_json(es, i + 1, append(acc, enum_json(es[i])))
+
+
+# ---- The bundle ----
+
+# Serialise an already-parsed bundle.
+#
+# Rules carry the state initialisers: the parser folds every `state NAME =
+# INIT` into a synthesised `on Init()` rule, so a host that dispatches Init
+# once at load has the world in its declared starting shape. There is no
+# separate state table to emit.
+public define bundle_json(p: ParseResult) -> Json:
+    keys = ["format", "rules", "functions", "consts", "enum_states"]
+    vals = [jnum(bundle_format_version()), jarr(rules_json(p.rules, 0, [])), jarr(fns_json(p.functions, 0, [])), jarr(consts_json(p.consts, 0, [])), jarr(enums_json(p.enum_states, 0, []))]
+    jobj(keys, vals)
+
+# Source text straight to bundle text. Returns "" when the source does not
+# parse, so a caller can tell a refusal from an empty bundle without an
+# exception mechanism the language does not have.
+public define bundle_text(src: text) -> text:
+    lexed = lex(src)
+    if lexed.ok:
+        bundle_of_tokens(lexed.tokens)
+    else:
+        ""
+
+define bundle_of_tokens(tokens: [Token]) -> text:
+    p = parse(tokens)
+    if p.ok:
+        json_stringify(bundle_json(p))
+    else:
+        ""

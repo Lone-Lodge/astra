@@ -1,0 +1,9 @@
+name = "astra_bundle"
+version = "0.1.0"
+description = "Astra - serialise a parsed bundle to JSON so a non-Orion host can run it"
+
+[orbs]
+astra_ast = "path:../astra_ast"
+astra_parser = "path:../astra_parser"
+astra_lexer = "path:../astra_lexer"
+json = "*"

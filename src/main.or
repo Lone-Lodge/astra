@@ -225,6 +225,30 @@ define main() -> number:
     src_none = "fn no_big() -> int: if none x in [1, 2] where x > 5 then 1 else 0"
     check("none finds nothing over 5", 1, int_of_value(eval_fn(src_none, "no_big", [])))
 
+
+    section("bundle: the AST as data for a non-Orion host")
+    # A host that cannot lex reads this instead. One rule in, one rule out.
+    b_src = "on Click(x, y): require x > 0 emit Confirmed()"
+    b = bundle_text(b_src)
+    check("a valid bundle is not empty", 1, if length(b) > 0 then 1 else 0)
+
+    b_doc = json_parse(b)
+    check("the format version travels", 1, json_whole(b_doc, "format"))
+    check("one rule survives", 1, length(json_list(b_doc, "rules")))
+
+    b_rule = json_list(b_doc, "rules")[0]
+    check("the trigger survives", 1, if json_text(b_rule, "trigger") is "Click" then 1 else 0)
+    check("both params survive", 2, length(json_list(b_rule, "params")))
+    # require + emit
+    check("both statements survive", 2, length(json_list(b_rule, "body")))
+
+    # Source that does not parse yields nothing, so a host can tell a refusal
+    # from an empty bundle without an exception mechanism.
+    check("a bundle that will not parse is empty", 0, length(bundle_text("on ((("))) 
+
+    # A bundle with no rules is still a bundle.
+    check("an empty source is still valid json", 1, if length(bundle_text("")) > 0 then 1 else 0)
+
     section("fact and its family")
     # `fact N = E` is the one keyword: bare it is a view, `in goal` /
     # `in belief:WHO` place it elsewhere, `conf N` records a confidence.
