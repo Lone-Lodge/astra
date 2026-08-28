@@ -1,0 +1,42 @@
+# astra bundle - turn a .astra source file into a .json bundle a non-Orion
+# host can run.
+#
+#   orbit run tools/bundle.or -- in.astra out.json
+#
+# This is the build step. It runs on a machine that has Orion; the game ships
+# the output. That is what lets Astra reach a console or a phone, where the
+# toolchain cannot follow but data can.
+#
+# Exit 0 on success, 1 on a usage error, 2 when the source does not parse, so
+# a cook step can fail the build rather than ship a game with no rules.
+
+use os
+use astra
+
+define main() -> number:
+    if arg_count() < 3:
+        print("usage: bundle <in.astra> <out.json>")
+        1
+    else:
+        convert(arg(1), arg(2))
+
+define convert(in_path: text, out_path: text) -> number:
+    src = read_file(in_path)
+    if length(src) is 0:
+        print("astra bundle: cannot read " + in_path)
+        1
+    else:
+        emit_to(src, in_path, out_path)
+
+define emit_to(src: text, in_path: text, out_path: text) -> number:
+    out = bundle_text(src)
+    if length(out) is 0:
+        print("astra bundle: " + in_path + " does not parse")
+        2
+    else:
+        written(out, out_path)
+
+define written(out: text, out_path: text) -> number:
+    write_file(out_path, out)
+    print("astra bundle: wrote " + out_path)
+    0

@@ -1,0 +1,7 @@
+state door_locked: bool = false
+state door_opened: bool = false
+
+on Interact():
+    require not door_locked
+    door_opened = true
+    emit DoorOpen()
