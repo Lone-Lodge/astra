@@ -1,0 +1,122 @@
+# astra conform - the corpus both implementations must agree on.
+#
+#   orbit run tools/conform.or -- fixtures/conformance/cases.txt build/conformance
+#
+# Astra is written once, in Orion. A host that cannot run Orion has to walk
+# the same tree itself, and that second walk is the only piece of the language
+# that exists twice. This is what keeps the two honest: every case is run
+# here, and the bundle plus the outcome are written out so the other
+# implementation can be handed the same input and checked against the same
+# answer.
+#
+# A case is one line: <file> <event> [text args...]
+# Blank lines and lines starting with # are skipped.
+
+use os
+use text
+use astra
+
+# `dispatch` is exported by app as well, so name the one we mean.
+use astra_run
+use json
+
+define main() -> number:
+    if arg_count() < 3:
+        print("usage: conform <cases.txt> <out-dir>")
+        1
+    else:
+        run_cases(arg(1), arg(2))
+
+define run_cases(cases_path: text, out_dir: text) -> number:
+    src = read_file(cases_path)
+    if length(src) is 0:
+        print("conform: cannot read " + cases_path)
+        1
+    else:
+        walk(lines(src), 0, 0, out_dir, dir_of(cases_path))
+
+# The .astra files sit beside the cases file, so a corpus is one folder.
+# Windows hands us backslashes, so normalise before splitting or the whole
+# corpus resolves to "." and every case silently reads nothing.
+define dir_of(path: text) -> text:
+    parts = split(replace(path, "\\", "/"), "/")
+    n = length(parts)
+    if n < 2 then "." else join_upto(parts, 0, n - 1, "")
+
+define join_upto(parts: [text], i: number, stop: number, acc: text) -> text:
+    if i >= stop:
+        acc
+    else:
+        join_upto(parts, i + 1, stop, if length(acc) is 0 then parts[i] else acc + "/" + parts[i])
+
+define walk(rows: [text], i: number, index: number, out_dir: text, base: text) -> number:
+    if i >= length(rows):
+        done(index)
+    else:
+        row = trim(rows[i])
+        if skip_row(row):
+            walk(rows, i + 1, index, out_dir, base)
+        else:
+            emit_case(row, index, out_dir, base)
+            walk(rows, i + 1, index + 1, out_dir, base)
+
+define skip_row(row: text) -> truth:
+    if length(row) is 0 then true else starts_with(row, "#")
+
+define done(count: number) -> number:
+    print("conform: wrote {count} case(s)")
+    0
+
+define emit_case(row: text, index: number, out_dir: text, base: text) -> number:
+    parts = split(row, " ")
+    file = parts[0]
+    event = parts[1]
+    src = read_file(base + "/" + file)
+
+    # An unreadable fixture must be loud. An empty source parses to a valid
+    # empty bundle, so without this the gate compares nothing against nothing
+    # and reports that the two implementations agree.
+    if length(src) is 0:
+        print("conform: cannot read " + base + "/" + file)
+        2
+    else:
+        emit_parsed(src, file, event, args_from(parts, 2, []), index, out_dir)
+
+define emit_parsed(src: text, file: text, event: text, args: [Value], index: number, out_dir: text) -> number:
+    bundle = bundle_text(src)
+    if length(bundle) is 0:
+        print("conform: " + file + " does not parse or does not check")
+        2
+    else:
+        write_case(src, bundle, event, args, index, out_dir)
+
+define args_from(parts: [text], i: number, acc: [Value]) -> [Value]:
+    if i >= length(parts):
+        acc
+    else:
+        args_from(parts, i + 1, append(acc, TextV(parts[i])))
+
+define write_case(src: text, bundle: text, event: text, args: [Value], index: number, out_dir: text) -> number:
+    outcome = dispatch(src, event, args)
+    write_file(out_dir + "/case_{index}.bundle.json", bundle)
+    write_file(out_dir + "/case_{index}.outcome.json", outcome_text(outcome))
+    # The other implementation is handed the same input, not just the same
+    # source, so a difference can only be a difference in behaviour.
+    write_file(out_dir + "/case_{index}.input.json", input_text(event, args))
+    0
+
+define input_text(event: text, args: [Value]) -> text:
+    json_stringify(jobj(["event", "args"], [jstr(event), jarr(args_json(args, 0, []))]))
+
+define args_json(xs: [Value], i: number, acc: [Json]) -> [Json]:
+    if i >= length(xs):
+        acc
+    else:
+        args_json(xs, i + 1, append(acc, arg_json(xs[i])))
+
+define arg_json(v: Value) -> Json:
+    choose v:
+        TextV(s) then jobj(["t", "v"], [jstr("text"), jstr(s)])
+        IntV(n) then jobj(["t", "v"], [jstr("int"), jnum(n)])
+        BoolV(b) then jobj(["t", "v"], [jstr("bool"), jbool(b)])
+        _ then jobj(["t"], [jstr("none")])

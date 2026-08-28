@@ -1,0 +1,18 @@
+# A door a player can open, unless it is locked.
+#
+# Tag the actor in the level with "door" and UInteractionComponent posts
+# Interact("door") when a player uses it.
+
+state door_locked: bool = false
+state door_opened: bool = false
+
+on Interact(what):
+    require what == "door"
+    require not door_locked
+    door_opened = true
+    emit DoorOpen()
+
+on Interact(what):
+    require what == "door"
+    require door_locked
+    emit DoorLocked()

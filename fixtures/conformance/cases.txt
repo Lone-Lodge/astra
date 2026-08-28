@@ -1,0 +1,8 @@
+# The corpus both implementations must agree on.
+# One case per line:  <file> <event> [text args...]
+
+door.astra Interact door
+door.astra Interact chest
+door.astra Init
+round.astra RoundStart
+round.astra Init

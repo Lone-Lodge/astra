@@ -1,0 +1,17 @@
+# State that must never reach a client.
+#
+# Astra itself has no notion of who may see a value; that is a multiplayer
+# concern the Unreal host adds. The [Astra] section of DefaultGame.ini names
+# these prefixes as secrets, and Astra.Dump on a client is how you check it
+# held.
+
+state round_traitor: text = ""
+state round_started: bool = false
+
+state player_objective: text = ""
+
+on RoundStart():
+    round_started = true
+    round_traitor = "player_2"
+    player_objective = "sabotera radion"
+    emit RoundBegun()

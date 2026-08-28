@@ -17,6 +17,8 @@ use astra_ast
 use astra_lexer
 use astra_parser
 use astra_check
+use astra_outcome
+use astra_value
 
 # Bump when a field changes meaning or disappears. A host refuses a bundle
 # whose version it does not know rather than guessing.
@@ -271,3 +273,79 @@ define bundle_if_clean(p: ParseResult) -> text:
         json_stringify(bundle_json(p))
     else:
         ""
+
+
+# ---- Outcomes ----
+#
+# The shared shape a conformance gate compares. Both this and the C++ host in
+# unreal-development write exactly this, so a difference in the JSON is a
+# difference in behaviour and nothing else.
+#
+# Reads are left out on purpose: they are a diagnostic aid, and two hosts may
+# legitimately record them differently.
+
+define value_json(v: Value) -> Json:
+    choose v:
+        NoneV then jobj(["t"], [jstr("none")])
+        BoolV(b) then jobj(["t", "v"], [jstr("bool"), jbool(b)])
+        IntV(n) then jobj(["t", "v"], [jstr("int"), jnum(n)])
+        TextV(s) then jobj(["t", "v"], [jstr("text"), jstr(s)])
+        RefV(r) then jobj(["t", "v"], [jstr("ref"), jnum(r)])
+        ListV(items) then jobj(["t", "v"], [jstr("list"), jarr(values_json(items, 0, []))])
+        MapV(fields) then jobj(["t", "v"], [jstr("map"), jarr(vfields_json(fields, 0, []))])
+
+define values_json(xs: [Value], i: number, acc: [Json]) -> [Json]:
+    if i >= length(xs):
+        acc
+    else:
+        values_json(xs, i + 1, append(acc, value_json(xs[i])))
+
+define vfields_json(fs: [ValueField], i: number, acc: [Json]) -> [Json]:
+    if i >= length(fs):
+        acc
+    else:
+        f = fs[i]
+        vfields_json(fs, i + 1, append(acc, jobj(["name", "value"], [jstr(f.name), value_json(f.value)])))
+
+define ef_set(eid: number, field: text, v: Value) -> Json:
+    jobj(["kind", "entity", "name", "value"], [jstr("set"), jnum(eid), jstr(field), value_json(v)])
+
+define ef_spawn(eid: number) -> Json:
+    jobj(["kind", "entity"], [jstr("spawn"), jnum(eid)])
+
+define ef_spawnkind(kind: text, fields: [ValueField]) -> Json:
+    jobj(["kind", "name", "fields"], [jstr("spawnkind"), jstr(kind), jarr(vfields_json(fields, 0, []))])
+
+define ef_destroy(eid: number) -> Json:
+    jobj(["kind", "entity"], [jstr("destroy"), jnum(eid)])
+
+define ef_setvar(name: text, v: Value) -> Json:
+    jobj(["kind", "name", "value"], [jstr("setvar"), jstr(name), value_json(v)])
+
+define ef_emit(event: text, v: Value) -> Json:
+    jobj(["kind", "name", "value"], [jstr("emit"), jstr(event), value_json(v)])
+
+define ef_relate(a: number, kind: text, b: number) -> Json:
+    jobj(["kind", "a", "name", "b"], [jstr("relate"), jnum(a), jstr(kind), jnum(b)])
+
+public define effect_json(e: AstraEffect) -> Json:
+    choose e:
+        AstraSet(eid, field, v) then ef_set(eid, field, v)
+        AstraSpawn(eid) then ef_spawn(eid)
+        AstraSpawnKind(kind, fields) then ef_spawnkind(kind, fields)
+        AstraDestroy(eid) then ef_destroy(eid)
+        AstraSetVar(name, v) then ef_setvar(name, v)
+        AstraEmit(event, v) then ef_emit(event, v)
+        AstraRelate(a, kind, b) then ef_relate(a, kind, b)
+
+define effects_json(xs: [AstraEffect], i: number, acc: [Json]) -> [Json]:
+    if i >= length(xs):
+        acc
+    else:
+        effects_json(xs, i + 1, append(acc, effect_json(xs[i])))
+
+public define outcome_json(o: Outcome) -> Json:
+    jobj(["effects"], [jarr(effects_json(o.effects, 0, []))])
+
+public define outcome_text(o: Outcome) -> text:
+    json_stringify(outcome_json(o))
