@@ -1,0 +1,61 @@
+# Every expression form a second implementation has to get right.
+#
+# Each handler emits its answers as fields, because an emit is the one effect
+# that carries a value out without needing a world behind it. The gate runs
+# these with no host, so nothing here may read state that was never set.
+
+const MAXHP = 100
+
+fn double(n): n * 2
+
+# A match separates its arms with commas and so does an emit field list, so a
+# match belongs in a helper rather than inline in an emit.
+fn pick(x): match x: 1 -> 10, 2 -> 20, _ -> 0
+
+state result: int = 0
+
+on Arithmetic():
+    emit A add: 7 + 3, sub: 7 - 3, mul: 7 * 3, div: 7 / 2, rem: 7 % 2
+
+on DivideByZero():
+    emit Z div: 7 / 0, rem: 7 % 0
+
+on Compare():
+    emit C lt: 1 < 2, le: 2 <= 2, gt: 3 > 4, ge: 3 >= 3, eq: 3 == 3, ne: 3 != 3
+
+on Logic():
+    emit L both: true and false, either: true or false, negated: not true
+
+on Truthiness():
+    emit T num: 5 and 5, zero: 0 or 0, text: "x" and "x", empty: "" or ""
+
+on TextOps():
+    emit S prefix: "wood: " + 3, suffix: 3 + " logs", same: "a" == "a", differ: "a" != "b"
+
+on Branch():
+    emit B taken: if 1 > 0 then 10 else 20, other: if 0 > 1 then 10 else 20
+
+on Helpers():
+    emit H doubled: double(21), constant: MAXHP
+
+on Counting():
+    emit Q over: count(x in [1, 2, 3] where x > 1), under: count(x in [1, 2] where x > 5)
+
+on Matching():
+    emit M hit: pick(1), miss: pick(9)
+
+on Binding():
+    let d = 5
+    emit D value: d + 1
+
+on Guarded():
+    if 1 > 0:
+        emit G reached: true
+
+on Refused():
+    require 1 > 2
+    emit Never here: true
+
+on Looping():
+    for r in 0 to 3:
+        emit Step index: r

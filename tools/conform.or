@@ -19,6 +19,9 @@ use astra
 # `dispatch` is exported by app as well, so name the one we mean.
 use astra_run
 use json
+use astra_lexer
+use astra_parser
+use astra_check
 
 define main() -> number:
     if arg_count() < 3:
@@ -57,8 +60,15 @@ define walk(rows: [text], i: number, index: number, out_dir: text, base: text) -
         if skip_row(row):
             walk(rows, i + 1, index, out_dir, base)
         else:
-            emit_case(row, index, out_dir, base)
-            walk(rows, i + 1, index + 1, out_dir, base)
+            step(emit_case(row, index, out_dir, base), rows, i, index, out_dir, base)
+
+# One refused case fails the whole corpus. A partly written corpus would leave
+# the other implementation comparing against yesterday's answers.
+define step(code: number, rows: [text], i: number, index: number, out_dir: text, base: text) -> number:
+    if code is not 0:
+        code
+    else:
+        walk(rows, i + 1, index + 1, out_dir, base)
 
 define skip_row(row: text) -> truth:
     if length(row) is 0 then true else starts_with(row, "#")
@@ -85,10 +95,41 @@ define emit_case(row: text, index: number, out_dir: text, base: text) -> number:
 define emit_parsed(src: text, file: text, event: text, args: [Value], index: number, out_dir: text) -> number:
     bundle = bundle_text(src)
     if length(bundle) is 0:
-        print("conform: " + file + " does not parse or does not check")
-        2
+        explain(src, file)
     else:
         write_case(src, bundle, event, args, index, out_dir)
+
+# bundle_text only says no. Re-run the three passes to say which one, and
+# where, because "does not parse" sends you back to the file blind.
+define explain(src: text, file: text) -> number:
+    lexed = lex(src)
+    if not lexed.ok:
+        print("conform: " + file + " line {lexed.error.line}: " + lexed.error.message)
+        2
+    else:
+        explain_parse(lexed.tokens, file)
+
+define explain_parse(tokens: [Token], file: text) -> number:
+    p = parse(tokens)
+    if not p.ok:
+        print("conform: " + file + " line {p.error.line}: " + p.error.message)
+        2
+    else:
+        explain_check(p, file)
+
+define explain_check(p: ParseResult, file: text) -> number:
+    errs = check_program(p.rules, p.functions, p.enum_states)
+    print("conform: " + file + " failed the checker with {length(errs)} error(s)")
+    print_checks(errs, 0)
+    2
+
+define print_checks(errs: [CheckError], i: number) -> number:
+    if i >= length(errs):
+        0
+    else:
+        e = errs[i]
+        print("  in " + e.rule + ": " + e.message)
+        print_checks(errs, i + 1)
 
 define args_from(parts: [text], i: number, acc: [Value]) -> [Value]:
     if i >= length(parts):

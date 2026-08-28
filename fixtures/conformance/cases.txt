@@ -1,8 +1,29 @@
 # The corpus both implementations must agree on.
+#
 # One case per line:  <file> <event> [text args...]
+# Blank lines and lines starting with # are skipped.
+#
+# Add a case every time the two disagree about something. A difference that is
+# written down here can never come back.
 
 door.astra Interact door
 door.astra Interact chest
 door.astra Init
 round.astra RoundStart
 round.astra Init
+
+expressions.astra Arithmetic
+expressions.astra DivideByZero
+expressions.astra Compare
+expressions.astra Logic
+expressions.astra Truthiness
+expressions.astra TextOps
+expressions.astra Branch
+expressions.astra Helpers
+expressions.astra Counting
+expressions.astra Matching
+expressions.astra Binding
+expressions.astra Guarded
+expressions.astra Refused
+expressions.astra Looping
+expressions.astra Init
